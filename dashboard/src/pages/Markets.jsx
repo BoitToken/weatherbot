@@ -1,12 +1,12 @@
-import React, { useState, useEffect, Component, Suspense } from 'react'
+import React, { useState, useEffect, Component } from 'react'
 import { useLocation } from 'react-router-dom'
 import axios from 'axios'
 import './Explorer.css'
 import './Intelligence.css'
-const LazyExplorer = React.lazy(() => import('./Explorer'))
-const LazyIntelligence = React.lazy(() => import('./Intelligence'))
-const LazySports = React.lazy(() => import('./SportsIntelligence'))
-const LazyMETAR = React.lazy(() => import('./METAR'))
+import Explorer from './Explorer'
+import Intelligence from './Intelligence'
+import SportsIntelligence from './SportsIntelligence'
+import METAR from './METAR'
 
 // Error boundary to catch rendering crashes
 class ErrorBoundary extends Component {
@@ -30,7 +30,6 @@ class ErrorBoundary extends Component {
   }
 }
 
-const LoadingFallback = () => <div className="loading">Loading...</div>
 
 const INDUSTRIES = [
   { id: 'all', label: 'All', icon: '📊', component: 'explorer' },
@@ -65,17 +64,17 @@ function Markets() {
   const renderContent = () => {
     return (
       <ErrorBoundary key={currentIndustry.id}>
-        <Suspense fallback={<LoadingFallback />}>
-          {currentIndustry.component === 'explorer' && <LazyExplorer activeOnly={showActive} />}
+        
+          {currentIndustry.component === 'explorer' && <Explorer activeOnly={showActive} />}
           {currentIndustry.component === 'intelligence' && (
             <>
-              <LazyIntelligence />
-              <div style={{ marginTop: 24 }}><LazyMETAR /></div>
+              <Intelligence />
+              <div style={{ marginTop: 24 }}><METAR /></div>
             </>
           )}
-          {currentIndustry.component === 'sports' && <LazySports />}
+          {currentIndustry.component === 'sports' && <SportsIntelligence />}
           {currentIndustry.component === 'explorer-filtered' && <FilteredExplorer category={currentIndustry.id} activeOnly={showActive} />}
-        </Suspense>
+        
       </ErrorBoundary>
     );
   }

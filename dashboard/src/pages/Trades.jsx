@@ -72,7 +72,7 @@ function Trades() {
 
       // Calculate summary metrics
       const totalPnl = trades.reduce((sum, t) => sum + (parseFloat(t.pnl_usd || 0)), 0)
-      const closedTrades = trades.filter(t => t.status === 'closed')
+      const closedTrades = trades.filter(t => t.status === 'closed' || t.status === 'won' || t.status === 'lost')
       const bestTrade = closedTrades.length > 0 
         ? Math.max(...closedTrades.map(t => parseFloat(t.pnl_usd || 0)))
         : 0
@@ -85,8 +85,8 @@ function Trades() {
       setPerformanceSummary({
         totalPnl,
         roiPct,
-        winRate: winRateData.win_rate || 0,
-        totalTrades: winRateData.total_trades || trades.length,
+        winRate: winRateData.win_rate_pct || winRateData.win_rate || 0,
+        totalTrades: trades.length,
         activePositions: active.length,
         bestTrade,
         worstTrade,
@@ -156,7 +156,7 @@ function Trades() {
         <div className="card">
           <div className="card-title">Win Rate</div>
           <div className="card-value">
-            {(performanceSummary.winRate * 100).toFixed(1)}%
+            {performanceSummary.winRate.toFixed(1)}%
           </div>
           <div className="card-label">
             {performanceSummary.wins}W / {performanceSummary.losses}L
@@ -167,9 +167,9 @@ function Trades() {
               <circle cx="40" cy="40" r="32" fill="none" stroke="var(--bg-tertiary)" strokeWidth="6" />
               <circle 
                 cx="40" cy="40" r="32" fill="none" 
-                stroke={performanceSummary.winRate >= 0.5 ? '#10B981' : '#F59E0B'}
+                stroke={performanceSummary.winRate >= 50 ? '#10B981' : '#F59E0B'}
                 strokeWidth="6"
-                strokeDasharray={`${performanceSummary.winRate * 201} 201`}
+                strokeDasharray={`${(performanceSummary.winRate / 100) * 201} 201`}
                 strokeLinecap="round"
               />
             </svg>

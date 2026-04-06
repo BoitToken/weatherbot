@@ -23,6 +23,7 @@ class OddsFetcher:
         'MLB': 'baseball_mlb',
         'Soccer': 'soccer_epl',
         'UCL': 'soccer_uefa_champions',
+        'IPL': 'cricket_ipl',
     }
     
     # Top US bookmakers

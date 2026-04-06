@@ -1351,24 +1351,27 @@ async def get_edge_distribution():
     """Edge % distribution for histogram."""
     try:
         query = """
-            SELECT
-                CASE
-                    WHEN edge_pct < 5 THEN '0-5%'
-                    WHEN edge_pct < 10 THEN '5-10%'
-                    WHEN edge_pct < 15 THEN '10-15%'
-                    WHEN edge_pct < 20 THEN '15-20%'
-                    ELSE '20%+'
-                END as range,
-                COUNT(*) as count
-            FROM sports_signals
-            GROUP BY range
+            SELECT bucket as range, COUNT(*) as count FROM (
+                SELECT
+                    CASE
+                        WHEN ABS(edge_pct) < 5 THEN '0-5%'
+                        WHEN ABS(edge_pct) < 10 THEN '5-10%'
+                        WHEN ABS(edge_pct) < 25 THEN '10-25%'
+                        WHEN ABS(edge_pct) < 50 THEN '25-50%'
+                        WHEN ABS(edge_pct) < 100 THEN '50-100%'
+                        ELSE '100%+'
+                    END as bucket
+                FROM sports_signals
+            ) sub
+            GROUP BY bucket
             ORDER BY
-                CASE range
+                CASE bucket
                     WHEN '0-5%' THEN 1
                     WHEN '5-10%' THEN 2
-                    WHEN '10-15%' THEN 3
-                    WHEN '15-20%' THEN 4
-                    ELSE 5
+                    WHEN '10-25%' THEN 3
+                    WHEN '25-50%' THEN 4
+                    WHEN '50-100%' THEN 5
+                    ELSE 6
                 END
         """
         results = await fetch_all(query)
@@ -1417,31 +1420,36 @@ async def get_sports_breakdown():
 async def get_odds_comparison(limit: int = 50):
     """Sportsbook vs Polymarket comparison for matched markets."""
     try:
-        # Join sportsbook_odds with sports_markets to find matches
+        # Match sportsbook outcomes to Polymarket questions by team name
         query = """
-            SELECT DISTINCT ON (sm.market_id)
+            SELECT DISTINCT ON (so.outcome, sm.market_id)
                 sm.market_id,
                 sm.question as event,
                 sm.sport,
                 sm.yes_price as polymarket_price,
-                so.odds_decimal as book_odds,
+                so.outcome as team,
+                so.implied_probability as book_prob,
                 so.bookmaker as book_name,
-                ABS((1.0 / NULLIF(so.odds_decimal, 0)) - sm.yes_price) * 100 as edge_pct
+                so.event_name as book_event,
+                ABS(so.implied_probability - sm.yes_price) * 100 as edge_pct
             FROM sports_markets sm
-            INNER JOIN sportsbook_odds so ON sm.question ILIKE '%' || so.event_name || '%'
+            CROSS JOIN sportsbook_odds so
             WHERE sm.yes_price IS NOT NULL
-              AND so.odds_decimal IS NOT NULL
-              AND so.odds_decimal > 0
-            ORDER BY sm.market_id, ABS((1.0 / NULLIF(so.odds_decimal, 0)) - sm.yes_price) DESC
+              AND so.implied_probability IS NOT NULL
+              AND LOWER(sm.question) LIKE '%%' || LOWER(SPLIT_PART(so.outcome, ' ', array_length(string_to_array(so.outcome, ' '), 1))) || '%%'
+              AND LOWER(sm.sport) = LOWER(so.sport)
+            ORDER BY so.outcome, sm.market_id, ABS(so.implied_probability - sm.yes_price) DESC
             LIMIT %s
         """
         results = await fetch_all(query, (limit,))
         
         comparisons = [{
-            "event": r['event'],
+            "event": r['event'][:100],
+            "team": r.get('team', ''),
             "polymarket_price": round(float(r['polymarket_price']), 3),
-            "book_price": round(1.0 / float(r['book_odds']) if r['book_odds'] > 0 else 0, 3),
+            "book_price": round(float(r['book_prob']), 3),
             "book_name": r['book_name'],
+            "book_event": r.get('book_event', ''),
             "edge": round(float(r['edge_pct']), 2),
             "sport": r['sport']
         } for r in results]
