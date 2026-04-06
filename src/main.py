@@ -1346,6 +1346,282 @@ async def get_wallet_balance():
         return {"error": str(e), "usdc": 0, "matic": 0}
 
 
+# ═══════════════════════════════════════════════════════════════
+# SPORTS INTELLIGENCE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+from src.sports.polymarket_sports_scanner import PolymarketSportsScanner
+from src.sports.espn_live import ESPNLiveScores
+from src.sports.correlation_engine import CorrelationEngine
+from src.sports.cross_odds_engine import CrossOddsEngine
+
+
+@app.get("/api/sports/markets")
+async def sports_markets(sport: str = None, limit: int = 200):
+    """Get active sports markets from Polymarket, categorized. Fetches live from Gamma API."""
+    import httpx
+    try:
+        scanner = PolymarketSportsScanner(None)
+        raw_markets = await scanner.fetch_sports_markets()
+        
+        # Categorize and filter
+        categorized = []
+        for m in raw_markets:
+            q = m.get('question', '')
+            s = scanner.categorize_sport(q)
+            if sport and s.lower() != sport.lower():
+                continue
+            m['sport'] = s
+            m['event_type'] = scanner.detect_event_type(q)
+            m['group_id'] = scanner.generate_group_id(q)
+            team_a, team_b = scanner.extract_teams(q, s)
+            m['team_a'] = team_a
+            m['team_b'] = team_b
+            categorized.append(m)
+        
+        # Sort by volume
+        categorized.sort(key=lambda x: float(x.get('volume', 0) or 0), reverse=True)
+        categorized = categorized[:limit]
+        
+        # Group by sport
+        sports_summary = {}
+        for m in categorized:
+            s = m.get('sport', 'Other')
+            if s not in sports_summary:
+                sports_summary[s] = {'count': 0, 'total_volume': 0, 'total_liquidity': 0}
+            sports_summary[s]['count'] += 1
+            sports_summary[s]['total_volume'] += float(m.get('volume', 0) or 0)
+            sports_summary[s]['total_liquidity'] += float(m.get('liquidity', 0) or 0)
+        
+        # Normalize field names
+        for m in categorized:
+            m['yes_price'] = m.get('outcomePrices', '').split(',')[0] if m.get('outcomePrices') else None
+            m['volume_usd'] = m.get('volume', 0)
+            m['liquidity_usd'] = m.get('liquidity', 0)
+            m['market_id'] = m.get('id', '')
+            m['resolution_date'] = m.get('endDate', '')
+        
+        return {
+            "total": len(categorized),
+            "scanned": len(raw_markets),
+            "by_sport": sports_summary,
+            "markets": categorized
+        }
+    except Exception as e:
+        logger.error(f"Sports markets error: {e}")
+        import traceback; traceback.print_exc()
+        return {"total": 0, "error": str(e), "markets": []}
+
+
+@app.get("/api/sports/markets/{sport}")
+async def sports_markets_by_sport(sport: str):
+    """Get markets for a specific sport."""
+    return await sports_markets(sport=sport, limit=200)
+
+
+@app.get("/api/sports/groups")
+async def sports_groups():
+    """Get market groups with sum analysis. Groups markets by event (e.g., all Stanley Cup teams)."""
+    try:
+        # Fetch fresh market data
+        data = await sports_markets(limit=500)
+        all_markets = data.get('markets', [])
+        
+        # Group by group_id
+        group_map = {}
+        for m in all_markets:
+            gid = m.get('group_id')
+            if not gid:
+                continue
+            if gid not in group_map:
+                group_map[gid] = {'sport': m.get('sport', 'Other'), 'markets': []}
+            
+            # Parse yes_price
+            yp = 0
+            try:
+                prices_str = m.get('outcomePrices', '')
+                if prices_str:
+                    # Format is '["0.95","0.05"]' or '0.95,0.05'
+                    import json
+                    try:
+                        prices = json.loads(prices_str)
+                        yp = float(prices[0]) if prices else 0
+                    except:
+                        yp = float(prices_str.split(',')[0].strip('[]"')) if ',' in prices_str else 0
+            except:
+                yp = 0
+            
+            group_map[gid]['markets'].append({
+                'question': m.get('question', ''),
+                'yes_price': yp,
+                'market_id': m.get('id', m.get('market_id', '')),
+                'volume': float(m.get('volume', 0) or 0)
+            })
+        
+        # Build groups with sum analysis
+        groups = []
+        for gid, data in group_map.items():
+            mkts = data['markets']
+            if len(mkts) < 2:
+                continue
+            total = sum(m['yes_price'] for m in mkts)
+            mkts.sort(key=lambda x: -x['yes_price'])
+            groups.append({
+                'group_id': gid,
+                'sport': data['sport'],
+                'market_count': len(mkts),
+                'total_yes_sum': round(total, 4),
+                'overpriced': total > 1.05,
+                'sum_pct': round(total * 100, 1),
+                'arb_edge': round((total - 1.0) * 100, 1) if total > 1.0 else 0,
+                'questions': [m['question'] for m in mkts[:10]],
+                'prices': [m['yes_price'] for m in mkts[:10]],
+                'market_ids': [m['market_id'] for m in mkts[:10]],
+                'total_volume': sum(m['volume'] for m in mkts)
+            })
+        
+        groups.sort(key=lambda x: -x['total_yes_sum'])
+        
+        return {
+            "total_groups": len(groups),
+            "overpriced_groups": len([g for g in groups if g['overpriced']]),
+            "groups": groups
+        }
+    except Exception as e:
+        logger.error(f"Sports groups error: {e}")
+        import traceback; traceback.print_exc()
+        return {"total_groups": 0, "error": str(e), "groups": []}
+
+
+@app.get("/api/sports/arbitrage")
+async def sports_arbitrage():
+    """Find logical arbitrage from group overpricing."""
+    try:
+        group_data = await sports_groups()
+        overpriced = [g for g in group_data.get('groups', []) if g['overpriced']]
+        
+        opportunities = []
+        for g in overpriced:
+            opportunities.append({
+                'type': 'group_overpricing',
+                'group_id': g['group_id'],
+                'sport': g['sport'],
+                'market_count': g['market_count'],
+                'sum_pct': g['sum_pct'],
+                'edge_pct': g['arb_edge'],
+                'reasoning': f"Group '{g['group_id']}' has {g['market_count']} markets summing to {g['sum_pct']}% (should be ~100%). Overpriced by {g['arb_edge']}%.",
+                'top_markets': list(zip(g['questions'][:5], g['prices'][:5]))
+            })
+        
+        return {
+            "total": len(opportunities),
+            "opportunities": opportunities
+        }
+    except Exception as e:
+        logger.error(f"Sports arbitrage error: {e}")
+        return {"total": 0, "error": str(e), "opportunities": []}
+
+
+@app.get("/api/sports/signals")
+async def sports_signals(limit: int = 50):
+    """Get sports trading signals. For now, derive from group overpricing."""
+    try:
+        arb_data = await sports_arbitrage()
+        signals = []
+        for opp in arb_data.get('opportunities', []):
+            signals.append({
+                'id': len(signals) + 1,
+                'edge_type': opp['type'],
+                'sport': opp['sport'],
+                'market_id': opp['group_id'],
+                'market_title': opp['group_id'],
+                'polymarket_price': opp['sum_pct'] / 100,
+                'fair_value': 1.0,
+                'edge_pct': opp['edge_pct'],
+                'confidence': 'HIGH' if opp['edge_pct'] > 10 else 'MEDIUM',
+                'signal': 'SELL_OVERPRICED',
+                'reasoning': opp['reasoning'],
+                'created_at': datetime.utcnow().isoformat()
+            })
+        return {"signals": signals}
+    except Exception as e:
+        logger.error(f"Sports signals error: {e}")
+        return {"signals": [], "error": str(e)}
+
+
+@app.get("/api/sports/live")
+async def sports_live():
+    """Get live games with scores from ESPN."""
+    import httpx
+    try:
+        espn_feeds = [
+            ('hockey', 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard'),
+            ('basketball', 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'),
+            ('soccer_ucl', 'https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard'),
+            ('soccer_epl', 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard'),
+            ('baseball', 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard'),
+        ]
+        
+        events = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            for sport_key, url in espn_feeds:
+                try:
+                    resp = await client.get(url)
+                    data = resp.json()
+                    for evt in data.get('events', []):
+                        status_type = evt.get('status', {}).get('type', {})
+                        status = 'live' if status_type.get('state') == 'in' else ('finished' if status_type.get('completed') else 'scheduled')
+                        comps = evt.get('competitions', [{}])[0]
+                        competitors = comps.get('competitors', [])
+                        home = next((c for c in competitors if c.get('homeAway') == 'home'), competitors[0] if competitors else {})
+                        away = next((c for c in competitors if c.get('homeAway') == 'away'), competitors[1] if len(competitors) > 1 else {})
+                        events.append({
+                            'sport': sport_key.replace('_ucl','').replace('_epl',''),
+                            'event_id': evt.get('id', ''),
+                            'home_team': home.get('team', {}).get('displayName', ''),
+                            'away_team': away.get('team', {}).get('displayName', ''),
+                            'home_score': int(home.get('score', 0) or 0),
+                            'away_score': int(away.get('score', 0) or 0),
+                            'status': status,
+                            'detail': status_type.get('shortDetail', ''),
+                            'period': comps.get('status', {}).get('period', ''),
+                            'minute': comps.get('status', {}).get('displayClock', ''),
+                        })
+                except Exception as e:
+                    logger.warning(f"ESPN {sport_key} fetch failed: {e}")
+        
+        # Sort: live first, then scheduled, then finished
+        events.sort(key=lambda x: 0 if x['status'] == 'live' else (1 if x['status'] == 'scheduled' else 2))
+        
+        return {
+            "total": len(events),
+            "live": len([e for e in events if e['status'] == 'live']),
+            "scheduled": len([e for e in events if e['status'] == 'scheduled']),
+            "finished": len([e for e in events if e['status'] == 'finished']),
+            "events": events
+        }
+    except Exception as e:
+        logger.error(f"Sports live error: {e}")
+        return {"total": 0, "error": str(e), "events": []}
+
+
+@app.get("/api/sports/performance")
+async def sports_performance():
+    """Sports strategy performance metrics."""
+    try:
+        arb_data = await sports_arbitrage()
+        return {
+            "total_opportunities": arb_data.get('total', 0),
+            "by_edge_type": [{
+                'type': 'group_overpricing',
+                'total': arb_data.get('total', 0),
+                'avg_edge': sum(o['edge_pct'] for o in arb_data.get('opportunities',[])) / max(len(arb_data.get('opportunities',[])), 1)
+            }]
+        }
+    except Exception as e:
+        return {"by_edge_type": [], "error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=6010)

@@ -9,6 +9,7 @@ import METAR from './pages/METAR'
 import Settings from './pages/Settings'
 import Explorer from './pages/Explorer'
 import Intelligence from './pages/Intelligence'
+import SportsIntelligence from './pages/SportsIntelligence'
 
 function Sidebar() {
   const location = useLocation()
@@ -20,6 +21,7 @@ function Sidebar() {
     { path: '/metar', label: 'METAR', icon: '🌡️' },
     { path: '/intelligence', label: 'Intelligence', icon: '🧠' },
     { path: '/explorer', label: 'Explorer', icon: '🔍' },
+    { path: '/sports', label: 'Sports', icon: '🏆' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
@@ -58,6 +60,7 @@ function App() {
             <Route path="/metar" element={<METAR />} />
             <Route path="/intelligence" element={<Intelligence />} />
             <Route path="/explorer" element={<Explorer />} />
+            <Route path="/sports" element={<SportsIntelligence />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
           
