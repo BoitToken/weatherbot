@@ -1,328 +1,318 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
+import './Intelligence.css'
 
 function Intelligence() {
-  const [data, setData] = useState(null)
-  const [daily, setDaily] = useState(null)
+  const [signals, setSignals] = useState([])
+  const [summary, setSummary] = useState({ total_markets: 0, actionable: 0, arbitrage: 0 })
   const [loading, setLoading] = useState(true)
-  const [selectedStation, setSelectedStation] = useState(null)
-  const [stationForecast, setStationForecast] = useState(null)
-  const [stationHistory, setStationHistory] = useState(null)
+  const [filter, setFilter] = useState('all')
+  const [sortBy, setSortBy] = useState('edge')
+  const [showSkip, setShowSkip] = useState(false)
+  const [lastUpdate, setLastUpdate] = useState(null)
+  const [executing, setExecuting] = useState(null)
 
   useEffect(() => {
-    fetchAll()
-    const interval = setInterval(fetchAll, 60000)
+    fetchSignals()
+    const interval = setInterval(fetchSignals, 30000) // Auto-refresh every 30s
     return () => clearInterval(interval)
   }, [])
 
-  const fetchAll = async () => {
+  const fetchSignals = async () => {
     try {
-      const [dashRes, dailyRes] = await Promise.all([
-        axios.get('/api/intelligence/dashboard'),
-        axios.get('/api/intelligence/daily').catch(() => ({ data: null }))
-      ])
-      setData(dashRes.data)
-      setDaily(dailyRes.data)
+      const res = await axios.get('/api/intelligence/live-signals')
+      setSignals(res.data.signals || [])
+      setSummary({
+        total_markets: res.data.total_markets || 0,
+        actionable: res.data.actionable || 0,
+        arbitrage: res.data.arbitrage || 0
+      })
+      setLastUpdate(new Date())
       setLoading(false)
     } catch (error) {
-      console.error('Failed to fetch intelligence data:', error)
+      console.error('Failed to fetch live signals:', error)
       setLoading(false)
     }
   }
 
-  const fetchStationDetail = async (icao) => {
-    setSelectedStation(icao)
+  const executeTrade = async (signal) => {
+    setExecuting(signal.market_id)
     try {
-      const [fRes, hRes] = await Promise.all([
-        axios.get(`/api/intelligence/forecast/${icao}`).catch(() => ({ data: null })),
-        axios.get(`/api/intelligence/historical/${icao}`).catch(() => ({ data: null }))
-      ])
-      setStationForecast(fRes.data)
-      setStationHistory(hRes.data)
-    } catch (e) {
-      console.error('Station detail fetch failed', e)
+      await axios.post('/api/trades/execute', {
+        market_id: signal.market_id,
+        side: signal.recommended_side,
+        size_usd: 25
+      })
+      alert(`✅ Trade executed: ${signal.recommended_side} on ${signal.title}`)
+      fetchSignals()
+    } catch (error) {
+      alert(`❌ Trade failed: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setExecuting(null)
     }
   }
 
-  if (loading) return <div className="loading">Loading intelligence data...</div>
-  if (!data) return <div className="loading">No data available</div>
-
-  const convergenceColor = (status) => {
-    if (status === 'high') return '#10B981'
-    if (status === 'medium') return '#F59E0B'
-    return '#EF4444'
+  // Filter signals
+  let filteredSignals = signals
+  if (filter === 'strong-buy') {
+    filteredSignals = signals.filter(s => s.signal === 'STRONG_BUY')
+  } else if (filter === 'buy') {
+    filteredSignals = signals.filter(s => s.signal === 'BUY')
+  } else if (filter === 'watch') {
+    filteredSignals = signals.filter(s => s.signal === 'WATCH')
+  } else if (filter === 'arbitrage') {
+    filteredSignals = signals.filter(s => s.is_arbitrage)
   }
 
-  const trendArrow = (val) => {
-    if (!val) return '—'
-    if (val > 0.5) return '🔺'
-    if (val < -0.5) return '🔻'
-    return '➡️'
+  if (!showSkip) {
+    filteredSignals = filteredSignals.filter(s => s.signal !== 'SKIP')
   }
+
+  // Sort signals
+  if (sortBy === 'edge') {
+    filteredSignals = [...filteredSignals].sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge))
+  } else if (sortBy === 'volume') {
+    filteredSignals = [...filteredSignals].sort((a, b) => b.volume - a.volume)
+  } else if (sortBy === 'temperature') {
+    filteredSignals = [...filteredSignals].sort((a, b) => b.current_temp - a.current_temp)
+  } else if (sortBy === 'probability') {
+    filteredSignals = [...filteredSignals].sort((a, b) => b.our_probability - a.our_probability)
+  }
+
+  if (loading) return <div className="loading">Loading live signals...</div>
 
   return (
-    <div>
+    <div className="intelligence-page">
       <div className="page-header">
-        <h1 className="page-title">🧠 Intelligence Layer</h1>
-        <p className="page-subtitle">Real-time data convergence across {data.station_count} stations</p>
-      </div>
-
-      {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16, marginBottom: 24 }}>
-        <div className="card" style={{ textAlign: 'center', padding: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{data.station_count}</div>
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>METAR Stations</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center', padding: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{data.forecast_count}</div>
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Forecasts Loaded</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center', padding: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{data.trend_count}</div>
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Trend Calculations</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center', padding: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{data.signal_count}</div>
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Signals Generated</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center', padding: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{data.trade_count}</div>
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Trades Executed</div>
-        </div>
-      </div>
-
-      {/* Daily Analysis */}
-      {daily && daily.total_trades !== undefined && (
-        <div className="card" style={{ marginBottom: 24, padding: 20 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>📊 Performance Analysis (7 days)</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 16 }}>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Win Rate</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: daily.win_rate >= 0.55 ? '#10B981' : '#EF4444' }}>
-                {(daily.win_rate * 100).toFixed(1)}%
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Total P&L</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: daily.total_pnl >= 0 ? '#10B981' : '#EF4444' }}>
-                ${daily.total_pnl?.toFixed(2) || '0.00'}
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Trades</div>
-              <div style={{ fontSize: 24, fontWeight: 700 }}>{daily.total_trades}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Wins / Losses</div>
-              <div style={{ fontSize: 24, fontWeight: 700 }}>
-                <span style={{ color: '#10B981' }}>{daily.wins}</span>
-                {' / '}
-                <span style={{ color: '#EF4444' }}>{daily.losses}</span>
-              </div>
-            </div>
-          </div>
-          {daily.needs_attention && (
-            <div style={{ marginTop: 16, padding: 12, background: 'rgba(239,68,68,0.1)', borderRadius: 8, color: '#EF4444', fontSize: 14 }}>
-              ⚠️ Win rate below 55% over {daily.total_trades} trades — strategy review recommended
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Station Data Convergence Table */}
-      <div className="card" style={{ marginBottom: 24, padding: 20 }}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>🌡️ Station Data Convergence</h3>
-        <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 16 }}>
-          Click any station to see detailed forecast + historical data
+        <h1 className="page-title">🟢 Live Trading Signal Board</h1>
+        <p className="page-subtitle">
+          Real-time probability analysis • Auto-refreshes every 30s
+          {lastUpdate && ` • Last update: ${lastUpdate.toLocaleTimeString()}`}
         </p>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                <th style={{ padding: '8px 12px', textAlign: 'left', color: 'var(--text-secondary)' }}>Station</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>METAR °C</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>Trend/hr</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>Proj High</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>Forecast High</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>Forecast Low</th>
-                <th style={{ padding: '8px 12px', textAlign: 'center' }}>Convergence</th>
-                <th style={{ padding: '8px 12px', textAlign: 'right' }}>Wind</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.stations.map((s, i) => (
-                <tr 
-                  key={s.station_icao}
-                  onClick={() => fetchStationDetail(s.station_icao)}
-                  style={{ 
-                    borderBottom: '1px solid rgba(255,255,255,0.05)',
-                    cursor: 'pointer',
-                    background: selectedStation === s.station_icao ? 'rgba(139,92,246,0.1)' : i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)'
-                  }}
-                >
-                  <td style={{ padding: '10px 12px', fontWeight: 600, fontFamily: 'monospace' }}>{s.station_icao}</td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, 
-                    color: s.metar.temperature_c > 30 ? '#EF4444' : s.metar.temperature_c < 0 ? '#3B82F6' : '#10B981' }}>
-                    {s.metar.temperature_c?.toFixed(1) || '—'}°
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                    {trendArrow(s.trend.per_hour)} {s.trend.per_hour?.toFixed(2) || '—'}
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                    {s.trend.projected_high?.toFixed(1) || '—'}°
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', color: '#8B5CF6' }}>
-                    {s.forecast.high_c?.toFixed(1) || '—'}°
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', color: '#3B82F6' }}>
-                    {s.forecast.low_c?.toFixed(1) || '—'}°
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                    <span style={{ 
-                      display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
-                      background: `${convergenceColor(s.convergence.status)}22`,
-                      color: convergenceColor(s.convergence.status)
-                    }}>
-                      {s.convergence.sources_agree}/{s.convergence.total_sources}
-                    </span>
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12 }}>
-                    {s.metar.wind_speed_kt ? `${s.metar.wind_speed_kt}kt ${s.metar.wind_dir || ''}°` : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      </div>
+
+      {/* Summary Bar */}
+      <div className="summary-bar">
+        <div className="summary-item">
+          <div className="summary-value">{summary.total_markets}</div>
+          <div className="summary-label">Total Markets</div>
+        </div>
+        <div className="summary-item highlight">
+          <div className="summary-value">{summary.actionable}</div>
+          <div className="summary-label">Actionable Signals</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-value">{summary.arbitrage}</div>
+          <div className="summary-label">Arbitrage Ops</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-value">{filteredSignals.length}</div>
+          <div className="summary-label">Showing</div>
         </div>
       </div>
 
-      {/* Station Detail Modal */}
-      {selectedStation && (stationForecast || stationHistory) && (
-        <div className="card" style={{ marginBottom: 24, padding: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h3 style={{ fontSize: 16, fontWeight: 600 }}>📍 {selectedStation} — Detailed Intelligence</h3>
-            <button onClick={() => { setSelectedStation(null); setStationForecast(null); setStationHistory(null) }}
-              style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 8, padding: '4px 12px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
-              ✕ Close
-            </button>
-          </div>
+      {/* Filter & Sort Bar */}
+      <div className="controls-bar">
+        <div className="filter-chips">
+          <button 
+            className={`chip ${filter === 'all' ? 'active' : ''}`}
+            onClick={() => setFilter('all')}
+          >
+            All
+          </button>
+          <button 
+            className={`chip ${filter === 'strong-buy' ? 'active' : ''}`}
+            onClick={() => setFilter('strong-buy')}
+          >
+            Strong Buy
+          </button>
+          <button 
+            className={`chip ${filter === 'buy' ? 'active' : ''}`}
+            onClick={() => setFilter('buy')}
+          >
+            Buy
+          </button>
+          <button 
+            className={`chip ${filter === 'watch' ? 'active' : ''}`}
+            onClick={() => setFilter('watch')}
+          >
+            Watch
+          </button>
+          <button 
+            className={`chip ${filter === 'arbitrage' ? 'active' : ''}`}
+            onClick={() => setFilter('arbitrage')}
+          >
+            Arbitrage
+          </button>
+          <label className="chip toggle">
+            <input 
+              type="checkbox" 
+              checked={showSkip} 
+              onChange={(e) => setShowSkip(e.target.checked)}
+            />
+            Show Skip
+          </label>
+        </div>
+        
+        <div className="sort-select">
+          <label>Sort by:</label>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+            <option value="edge">Edge</option>
+            <option value="volume">Volume</option>
+            <option value="temperature">Temperature</option>
+            <option value="probability">Probability</option>
+          </select>
+        </div>
+      </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            {/* Forecast */}
-            {stationForecast && (
-              <div style={{ background: 'var(--bg-tertiary)', borderRadius: 12, padding: 16 }}>
-                <h4 style={{ fontSize: 14, color: '#8B5CF6', marginBottom: 12 }}>🔮 Open-Meteo Forecast</h4>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Forecast High</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: '#EF4444' }}>{stationForecast.forecast_high_c?.toFixed(1)}°C</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Forecast Low</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: '#3B82F6' }}>{stationForecast.forecast_low_c?.toFixed(1)}°C</div>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Hourly Temperature (next 12h)</div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {(stationForecast.hourly_temps || []).slice(0, 12).map((t, i) => (
-                    <div key={i} style={{ 
-                      width: 36, textAlign: 'center', padding: '4px 0', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                      background: t > 25 ? 'rgba(239,68,68,0.15)' : t < 5 ? 'rgba(59,130,246,0.15)' : 'rgba(16,185,129,0.15)',
-                      color: t > 25 ? '#EF4444' : t < 5 ? '#3B82F6' : '#10B981'
-                    }}>
-                      {t?.toFixed(0)}°
-                    </div>
-                  ))}
-                </div>
-                {stationForecast.precipitation_probs && (
-                  <>
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 12, marginBottom: 8 }}>Precipitation Probability (next 12h)</div>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      {stationForecast.precipitation_probs.slice(0, 12).map((p, i) => (
-                        <div key={i} style={{ 
-                          width: 36, textAlign: 'center', padding: '4px 0', borderRadius: 6, fontSize: 11,
-                          background: p > 50 ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.05)',
-                          color: p > 50 ? '#3B82F6' : 'var(--text-tertiary)'
-                        }}>
-                          {p}%
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
+      {/* Signal Cards Grid */}
+      <div className="signals-grid">
+        {filteredSignals.map(signal => (
+          <SignalCard 
+            key={signal.market_id} 
+            signal={signal} 
+            onExecute={executeTrade}
+            executing={executing === signal.market_id}
+          />
+        ))}
+      </div>
 
-            {/* Historical */}
-            {stationHistory && (
-              <div style={{ background: 'var(--bg-tertiary)', borderRadius: 12, padding: 16 }}>
-                <h4 style={{ fontSize: 14, color: '#F59E0B', marginBottom: 12 }}>📜 Historical Pattern (5yr)</h4>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Avg High (this date)</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: '#F59E0B' }}>{stationHistory.avg_high_c?.toFixed(1)}°C</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Avg Low</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: '#6366F1' }}>{stationHistory.avg_low_c?.toFixed(1) || '—'}°C</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Hottest Record</div>
-                    <div style={{ fontSize: 18, fontWeight: 600 }}>{stationHistory.max_high_c?.toFixed(1)}°C</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Data Points</div>
-                    <div style={{ fontSize: 18, fontWeight: 600 }}>{stationHistory.data_points} years</div>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Year-by-Year Highs</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {stationHistory.yearly_highs && Object.entries(stationHistory.yearly_highs).sort().map(([year, temp]) => (
-                    <div key={year} style={{ 
-                      padding: '6px 10px', borderRadius: 8, fontSize: 12,
-                      background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)'
-                    }}>
-                      <span style={{ color: 'var(--text-tertiary)' }}>{year}: </span>
-                      <span style={{ fontWeight: 600 }}>{temp?.toFixed(1)}°C</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+      {filteredSignals.length === 0 && (
+        <div className="empty-state">
+          <p>No signals match the current filter.</p>
         </div>
       )}
+    </div>
+  )
+}
 
-      {/* 8-Gate System Status */}
-      <div className="card" style={{ padding: 20 }}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>🔒 8-Gate Intelligence System</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-          {[
-            { num: 1, name: 'Data Convergence', desc: 'METAR + Open-Meteo + Historical (2/3 must agree)', icon: '📊' },
-            { num: 2, name: 'Multi-Station', desc: 'Multiple airports validate same city (±1°C)', icon: '✈️' },
-            { num: 3, name: 'Bucket Coherence', desc: 'Temperature ranges must sum to ~100%', icon: '🪣' },
-            { num: 4, name: 'Binary Arbitrage', desc: 'YES + NO < $0.98 = guaranteed profit', icon: '💰' },
-            { num: 5, name: 'Liquidity Check', desc: 'Spread < 8¢, enough depth to fill', icon: '💧' },
-            { num: 6, name: 'Time Window', desc: 'Optimal trading hours (6-8 AM, post-METAR)', icon: '⏰' },
-            { num: 7, name: 'Risk Manager', desc: 'Position limits, Kelly sizing, circuit breakers', icon: '🛡️' },
-            { num: 8, name: 'Claude AI', desc: 'Final AI confirmation (catches edge cases)', icon: '🤖' },
-          ].map(gate => (
-            <div key={gate.num} style={{ 
-              display: 'flex', alignItems: 'center', gap: 12, padding: 12, 
-              background: 'var(--bg-tertiary)', borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)'
-            }}>
-              <div style={{ fontSize: 24, width: 40, textAlign: 'center' }}>{gate.icon}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>Gate {gate.num}: {gate.name}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{gate.desc}</div>
-              </div>
-              <div style={{ 
-                width: 10, height: 10, borderRadius: '50%', background: '#10B981',
-                boxShadow: '0 0 6px rgba(16,185,129,0.5)'
-              }} />
-            </div>
-          ))}
+function SignalCard({ signal, onExecute, executing }) {
+  const getCardClass = () => {
+    if (signal.is_arbitrage) return 'signal-card arbitrage'
+    if (signal.signal === 'STRONG_BUY') return 'signal-card strong-buy'
+    if (signal.signal === 'BUY') return 'signal-card buy'
+    if (signal.signal === 'WATCH') return 'signal-card watch'
+    return 'signal-card skip'
+  }
+
+  const getSignalBadge = () => {
+    if (signal.is_arbitrage) return { emoji: '💰', text: 'ARBITRAGE — FREE MONEY', color: '#FFD700' }
+    if (signal.signal === 'STRONG_BUY') return { emoji: '🟢', text: 'STRONG BUY', color: '#10B981' }
+    if (signal.signal === 'BUY') return { emoji: '🟡', text: 'BUY', color: '#F59E0B' }
+    if (signal.signal === 'WATCH') return { emoji: '⚪', text: 'WATCH', color: '#6B7280' }
+    return { emoji: '⏭️', text: 'SKIP', color: '#9CA3AF' }
+  }
+
+  const badge = getSignalBadge()
+
+  return (
+    <div className={getCardClass()}>
+      <div className="signal-header">
+        <div className="signal-badge" style={{ color: badge.color }}>
+          <span className="signal-emoji">{badge.emoji}</span>
+          <span className="signal-text">{badge.text}</span>
         </div>
+        {signal.auto_trade && (
+          <div className="auto-trade-badge">Auto-Trade: ON</div>
+        )}
+      </div>
+
+      <div className="signal-title">{signal.title}</div>
+      <div className="signal-station">{signal.station_icao} • {signal.city}</div>
+
+      {signal.is_arbitrage ? (
+        <div className="arbitrage-content">
+          <div className="arb-equation">
+            YES: {(signal.yes_price * 100).toFixed(0)}¢ + NO: {(signal.no_price * 100).toFixed(0)}¢ = {(signal.arb_total * 100).toFixed(0)}¢
+          </div>
+          <div className="arb-profit">
+            Profit: {((1 - signal.arb_total) * 100).toFixed(1)}¢ per $1
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="signal-data">
+            <div className="data-row">
+              <span>METAR:</span>
+              <strong>{signal.current_temp.toFixed(1)}°C</strong>
+            </div>
+            <div className="data-row">
+              <span>Trend:</span>
+              <strong>{signal.trend_per_hour > 0 ? '+' : ''}{signal.trend_per_hour.toFixed(1)}°C/hr</strong>
+            </div>
+            {signal.forecast_high && (
+              <div className="data-row">
+                <span>Forecast:</span>
+                <strong>{signal.forecast_high.toFixed(1)}°C</strong>
+              </div>
+            )}
+            {signal.projected_high && (
+              <div className="data-row">
+                <span>Projected:</span>
+                <strong>{signal.projected_high.toFixed(1)}°C</strong>
+              </div>
+            )}
+          </div>
+
+          <div className="signal-analysis">
+            <div className="analysis-grid">
+              <div className="analysis-item">
+                <div className="analysis-label">Our Prob</div>
+                <div className="analysis-value">{(signal.our_probability * 100).toFixed(0)}%</div>
+              </div>
+              <div className="analysis-item">
+                <div className="analysis-label">Market</div>
+                <div className="analysis-value">{(signal.yes_price * 100).toFixed(0)}¢</div>
+              </div>
+              <div className="analysis-item">
+                <div className="analysis-label">Edge</div>
+                <div className="analysis-value edge-positive">{signal.edge > 0 ? '+' : ''}{(signal.edge * 100).toFixed(0)}%</div>
+              </div>
+              <div className="analysis-item">
+                <div className="analysis-label">Expected</div>
+                <div className="analysis-value">+{signal.expected_return_pct.toFixed(0)}%</div>
+              </div>
+              <div className="analysis-item">
+                <div className="analysis-label">Side</div>
+                <div className="analysis-value">{signal.recommended_side}</div>
+              </div>
+              <div className="analysis-item">
+                <div className="analysis-label">Volume</div>
+                <div className="analysis-value">${(signal.volume / 1000).toFixed(1)}K</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="signal-sources">
+            <span className="sources-label">Sources:</span>
+            <span className={signal.sources.metar ? 'source-active' : 'source-inactive'}>
+              {signal.sources.metar ? '✅' : '⬜'}METAR
+            </span>
+            <span className={signal.sources.forecast ? 'source-active' : 'source-inactive'}>
+              {signal.sources.forecast ? '✅' : '⬜'}Forecast
+            </span>
+            <span className={signal.sources.trend ? 'source-active' : 'source-inactive'}>
+              {signal.sources.trend ? '✅' : '⬜'}Trend
+            </span>
+            <span className={signal.sources.historical ? 'source-active' : 'source-inactive'}>
+              {signal.sources.historical ? '✅' : '⬜'}Historical
+            </span>
+          </div>
+        </>
+      )}
+
+      <div className="signal-actions">
+        <button 
+          className="btn btn-primary"
+          onClick={() => onExecute(signal)}
+          disabled={executing}
+        >
+          {executing ? 'Executing...' : signal.is_arbitrage ? 'Buy Both Sides' : 'Execute Trade'}
+        </button>
+        <button className="btn btn-secondary">Details</button>
+        {!signal.is_arbitrage && signal.signal !== 'SKIP' && (
+          <button className="btn btn-tertiary">Skip</button>
+        )}
       </div>
     </div>
   )

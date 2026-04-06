@@ -614,6 +614,230 @@ async def get_price_history(condition_id: str, interval: str = "1h", fidelity: i
 # Intelligence Data — Forecasts, Historical, Combined View
 # =============================================================================
 
+@app.get("/api/intelligence/live-signals")
+async def get_live_signals():
+    """Run real-time intelligence analysis across all tracked markets.
+    Returns probability estimates, expected returns, and trade recommendations.
+    This is the LIVE TRADING SIGNAL BOARD."""
+    from src.data.openmeteo import fetch_forecast
+    
+    try:
+        # 1. Get all active weather markets from DB
+        markets = await fetch_all("""
+            SELECT * FROM weather_markets 
+            WHERE active = true
+            ORDER BY volume_usd DESC NULLS LAST
+        """)
+        
+        # 2. Get latest METAR for each station
+        metar = await fetch_all("""
+            SELECT DISTINCT ON (station_icao)
+                station_icao, temperature_c, observation_time
+            FROM metar_readings 
+            ORDER BY station_icao, observation_time DESC
+        """)
+        metar_map = {m['station_icao']: m for m in metar}
+        
+        # 3. Get trends
+        trends = await fetch_all("""
+            SELECT DISTINCT ON (station_icao)
+                station_icao, trend_per_hour, projected_high, projected_low, confidence
+            FROM temperature_trends 
+            ORDER BY station_icao, calculated_at DESC
+        """)
+        trend_map = {t['station_icao']: t for t in trends}
+        
+        signals = []
+        for market in markets:
+            icao = market.get('station_icao', '')
+            if not icao:
+                continue
+            
+            metar_data = metar_map.get(icao, {})
+            trend_data = trend_map.get(icao, {})
+            
+            if not metar_data:
+                continue
+            
+            current_temp = float(metar_data.get('temperature_c', 0) or 0)
+            threshold = float(market.get('threshold_value', 0) or 0)
+            yes_price = float(market.get('yes_price', 0.5) or 0.5)
+            no_price = float(market.get('no_price', 0.5) or 0.5)
+            trend = float(trend_data.get('trend_per_hour', 0) or 0)
+            projected_high = trend_data.get('projected_high')
+            
+            # Get forecast (cached, don't fetch every call)
+            forecast_high = None
+            try:
+                forecast = await fetch_forecast(icao)
+                if forecast:
+                    forecast_high = forecast.get('forecast_high_c')
+            except:
+                pass
+            
+            # Calculate our probability
+            # Simple model: based on data convergence
+            votes_yes = 0
+            total_sources = 0
+            
+            threshold_type = market.get('threshold_type', 'high_above')
+            
+            # Source 1: Current METAR
+            total_sources += 1
+            if threshold_type == 'high_above':
+                if current_temp >= threshold:
+                    votes_yes += 1  # Already hit
+                elif projected_high and float(projected_high) >= threshold:
+                    votes_yes += 0.7  # Trend says likely
+            elif threshold_type == 'low_below':
+                if current_temp <= threshold:
+                    votes_yes += 1
+            
+            # Source 2: Forecast
+            if forecast_high is not None:
+                total_sources += 1
+                if threshold_type == 'high_above' and forecast_high >= threshold:
+                    votes_yes += 1
+                elif threshold_type == 'low_below' and forecast_high <= threshold:
+                    votes_yes += 1
+            
+            # Our probability estimate
+            our_prob = min(0.95, max(0.05, votes_yes / max(total_sources, 1)))
+            
+            # Edge = our probability - market price
+            edge_yes = our_prob - yes_price
+            edge_no = (1 - our_prob) - no_price
+            
+            # Which side has better edge?
+            if edge_yes > edge_no:
+                recommended_side = "YES"
+                edge = edge_yes
+                entry_price = yes_price
+            else:
+                recommended_side = "NO"
+                edge = edge_no
+                entry_price = no_price
+            
+            # Expected return
+            if entry_price > 0 and entry_price < 1:
+                expected_return_pct = ((1.0 / entry_price) - 1) * our_prob * 100
+            else:
+                expected_return_pct = 0
+            
+            # Signal strength
+            if edge >= 0.25:
+                signal_status = "STRONG_BUY"  # Green flash
+                auto_trade = True
+            elif edge >= 0.15:
+                signal_status = "BUY"  # Yellow
+                auto_trade = False  # Alert only
+            elif edge >= 0.05:
+                signal_status = "WATCH"  # Gray
+                auto_trade = False
+            else:
+                signal_status = "SKIP"
+                auto_trade = False
+            
+            # Binary arbitrage check
+            arb_total = yes_price + no_price
+            is_arb = arb_total < 0.98
+            
+            signals.append({
+                "market_id": market.get('market_id'),
+                "title": market.get('title', ''),
+                "city": market.get('city', ''),
+                "station_icao": icao,
+                "threshold": threshold,
+                "threshold_type": threshold_type,
+                "threshold_unit": market.get('threshold_unit', '°C'),
+                
+                # Current data
+                "current_temp": current_temp,
+                "trend_per_hour": trend,
+                "projected_high": float(projected_high) if projected_high else None,
+                "forecast_high": forecast_high,
+                
+                # Market prices
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "volume": float(market.get('volume_usd', 0) or 0),
+                
+                # Our analysis
+                "our_probability": round(our_prob, 4),
+                "recommended_side": recommended_side,
+                "edge": round(edge, 4),
+                "expected_return_pct": round(expected_return_pct, 2),
+                
+                # Signal
+                "signal": signal_status,
+                "auto_trade": auto_trade,
+                "is_arbitrage": is_arb,
+                "arb_total": round(arb_total, 4),
+                
+                # Data sources used
+                "sources": {
+                    "metar": True,
+                    "forecast": forecast_high is not None,
+                    "historical": False,  # Not fetched per-call for speed
+                    "trend": trend != 0,
+                },
+                
+                "resolution_date": str(market.get('resolution_date', '')),
+                "last_updated": str(market.get('last_updated', '')),
+            })
+        
+        # Sort by edge (strongest signals first)
+        signals.sort(key=lambda s: abs(s['edge']), reverse=True)
+        
+        return {
+            "signals": signals,
+            "total_markets": len(markets),
+            "actionable": sum(1 for s in signals if s['signal'] in ('STRONG_BUY', 'BUY')),
+            "arbitrage": sum(1 for s in signals if s['is_arbitrage']),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Live signals error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/trades/execute")
+async def execute_trade(data: dict):
+    """Execute a trade (paper or live based on mode)."""
+    from src.execution.paper_trader import paper_trade
+    
+    try:
+        market_id = data.get("market_id")
+        side = data.get("side", "YES")
+        size_usd = float(data.get("size_usd", 25))
+        
+        if not market_id:
+            raise HTTPException(status_code=400, detail="market_id required")
+        
+        # Get current settings
+        settings_row = await fetch_one("SELECT value FROM bot_settings WHERE key = 'trading_mode'")
+        mode = settings_row['value'] if settings_row else '"paper"'
+        
+        # Execute paper trade (always paper for now)
+        result = await paper_trade({
+            "market_id": market_id,
+            "side": side,
+            "size_usd": size_usd,
+            "mode": "paper",
+        })
+        
+        return {
+            "status": "executed",
+            "trade": result,
+            "mode": "paper",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Execute trade error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/intelligence/forecast/{icao}")
 async def get_forecast(icao: str):
     """Get Open-Meteo forecast for a station."""

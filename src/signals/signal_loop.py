@@ -3,6 +3,7 @@ Signal Loop — Main scanning loop for weather signal generation
 """
 import asyncio
 import sys
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
@@ -88,24 +89,63 @@ class SignalLoop:
         
         try:
             markets = await self.scanner.scan_weather_markets()
+            logger.info(f"Scanner found {len(markets)} total weather markets")
             
-            # Match each market to ICAO station
-            for market in markets:
-                match_result = self.matcher.match_market(market.title)
-                if match_result:
-                    # Store match result in metadata
-                    market.metadata['match'] = {
-                        'icao': match_result.icao,
-                        'city': match_result.city,
-                        'threshold_type': match_result.threshold_type,
-                        'threshold_value': match_result.threshold_value,
-                        'threshold_max': match_result.threshold_max,
-                        'threshold_unit': match_result.threshold_unit
-                    }
+            # Match each market to ICAO station and store enriched data
+            stored = 0
+            async with self.db_pool.acquire() as conn:
+                for market in markets:
+                    match_result = self.matcher.match_market(market.title)
+                    if not match_result:
+                        continue  # Skip unmatched markets
+                    
+                    # Only store active markets with valid metadata
+                    meta = market.metadata or {}
+                    if meta.get('closed') or meta.get('archived'):
+                        continue
+                    if not meta.get('accepting_orders', True):
+                        continue
+                    
+                    try:
+                        # Store with city/station enrichment
+                        await conn.execute("""
+                            INSERT INTO weather_markets (
+                                market_id, title, city, station_icao,
+                                threshold_type, threshold_value, threshold_unit,
+                                resolution_date, yes_price, no_price,
+                                volume_usd, liquidity_usd, active, metadata, last_updated
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+                            ON CONFLICT (market_id) DO UPDATE SET
+                                title = EXCLUDED.title,
+                                city = EXCLUDED.city,
+                                station_icao = EXCLUDED.station_icao,
+                                yes_price = EXCLUDED.yes_price,
+                                no_price = EXCLUDED.no_price,
+                                volume_usd = EXCLUDED.volume_usd,
+                                liquidity_usd = EXCLUDED.liquidity_usd,
+                                active = EXCLUDED.active,
+                                last_updated = NOW()
+                        """,
+                            market.market_id,
+                            market.title,
+                            match_result.city,
+                            match_result.icao,
+                            match_result.threshold_type,
+                            match_result.threshold_value,
+                            match_result.threshold_unit,
+                            market.resolution_date,
+                            market.yes_price,
+                            market.no_price,
+                            market.volume,
+                            market.liquidity,
+                            market.active,
+                            json.dumps(meta) if isinstance(meta, dict) else '{}'
+                        )
+                        stored += 1
+                    except Exception as e:
+                        logger.error(f"Error storing market {market.market_id}: {e}")
             
-            # Store in database
-            stored = await self.scanner.store_markets(markets)
-            logger.info(f"✅ Refreshed {stored} markets")
+            logger.info(f"✅ Refreshed and stored {stored}/{len(markets)} matched markets")
             return stored
             
         except Exception as e:
