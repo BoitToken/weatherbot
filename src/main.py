@@ -419,43 +419,115 @@ async def get_db_stats():
 # Polymarket Explorer — Proxy to bypass ISP blocks
 # =============================================================================
 
-@app.get("/api/explorer/markets")
-async def explore_markets(category: str = None, search: str = None, limit: int = 50, cursor: str = "MA=="):
-    """Proxy to Polymarket — browse all markets. Bypasses ISP blocks."""
-    import httpx
-    params = {"limit": limit, "next_cursor": cursor}
+def detect_category(question: str) -> str:
+    """Detect market category from question text."""
+    q = question.lower()
     
+    weather_kw = ['temperature', 'weather', 'rain', 'snow', 'celsius', 'fahrenheit', '°f', '°c', 'heat wave', 'cold front', 'forecast', 'high temp', 'low temp']
+    sports_kw = ['ncaa', 'nba', 'nfl', 'mlb', 'nhl', 'premier league', 'champions league', 'world cup', 'super bowl', 'touchdown', 'goal', 'match', 'game', 'playoffs', 'series', 'vs.', 'vs ']
+    politics_kw = ['president', 'election', 'vote', 'congress', 'senate', 'governor', 'democrat', 'republican', 'biden', 'trump', 'parliament', 'prime minister']
+    crypto_kw = ['bitcoin', 'ethereum', 'btc', 'eth', 'crypto', 'token', 'blockchain', 'defi', 'solana', 'sol']
+    economics_kw = ['gdp', 'inflation', 'fed', 'interest rate', 'unemployment', 'recession', 'stock', 's&p', 'nasdaq', 'dow jones']
+    science_kw = ['ai', 'artificial intelligence', 'spacex', 'nasa', 'climate', 'vaccine', 'disease', 'pandemic']
+    entertainment_kw = ['oscar', 'grammy', 'box office', 'movie', 'album', 'taylor swift', 'drake', 'emmy']
+    
+    if any(kw in q for kw in weather_kw): return 'weather'
+    if any(kw in q for kw in sports_kw): return 'sports'
+    if any(kw in q for kw in politics_kw): return 'politics'
+    if any(kw in q for kw in crypto_kw): return 'crypto'
+    if any(kw in q for kw in economics_kw): return 'economics'
+    if any(kw in q for kw in science_kw): return 'science'
+    if any(kw in q for kw in entertainment_kw): return 'entertainment'
+    return 'other'
+
+
+@app.get("/api/explorer/markets")
+async def explore_markets(category: str = None, search: str = None, limit: int = 50, cursor: str = "MA==", active_only: bool = True):
+    """Proxy to Polymarket — filtered, categorized markets."""
+    import httpx
+    
+    all_markets = []
+    current_cursor = cursor
+    pages_fetched = 0
+    max_pages = 5  # Don't fetch too many pages
+    
+    async with httpx.AsyncClient(timeout=15) as client:
+        while pages_fetched < max_pages and len(all_markets) < limit:
+            params = {"limit": 100, "next_cursor": current_cursor}
+            try:
+                resp = await client.get("https://clob.polymarket.com/markets", params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.error(f"Explorer markets error: {e}")
+                break
+            
+            batch = data.get("data", [])
+            if not batch:
+                break
+            
+            for market in batch:
+                # Skip inactive markets (use 'active' field from API)
+                if active_only and not market.get("active", True):
+                    continue
+                
+                # Also skip if both closed AND not accepting orders (truly dead markets)
+                if active_only and market.get("closed") and not market.get("accepting_orders"):
+                    continue
+                
+                # Add category detection
+                question = (market.get("question") or "").lower()
+                market["_category"] = detect_category(question)
+                
+                # Apply category filter
+                if category and market["_category"] != category.lower():
+                    continue
+                
+                # Apply search filter
+                if search and search.lower() not in question:
+                    continue
+                
+                # Extract clean price data
+                tokens = market.get("tokens", [])
+                market["_yes_price"] = float(tokens[0].get("price", 0.5)) if tokens else 0.5
+                market["_no_price"] = float(tokens[1].get("price", 0.5)) if len(tokens) > 1 else 0.5
+                market["_volume"] = float(market.get("volume", 0) or 0)
+                
+                all_markets.append(market)
+            
+            current_cursor = data.get("next_cursor")
+            if not current_cursor:
+                break
+            pages_fetched += 1
+    
+    # Sort by volume (most active first)
+    all_markets.sort(key=lambda m: m.get("_volume", 0), reverse=True)
+    
+    return {
+        "data": all_markets[:limit],
+        "count": len(all_markets[:limit]),
+        "next_cursor": current_cursor,
+        "source": "polymarket_proxy"
+    }
+
+
+@app.get("/api/explorer/weather")
+async def explore_weather_markets():
+    """Our tracked weather markets from DB."""
+    query = """
+        SELECT market_id, title, city, station_icao, threshold_type, threshold_value,
+               threshold_unit, resolution_date, yes_price, no_price, volume_usd, 
+               liquidity_usd, active, last_updated
+        FROM weather_markets 
+        WHERE active = true
+        ORDER BY volume_usd DESC NULLS LAST
+    """
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get("https://clob.polymarket.com/markets", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-        
-        markets = data.get("data", [])
-        
-        # Filter by search text
-        if search:
-            search_lower = search.lower()
-            markets = [m for m in markets if search_lower in m.get("question", "").lower()]
-        
-        # Filter by category keyword
-        if category:
-            cat_lower = category.lower()
-            markets = [
-                m for m in markets 
-                if cat_lower in m.get("question", "").lower() 
-                or cat_lower in str(m.get("tags", [])).lower()
-            ]
-        
-        return {
-            "data": markets,
-            "count": len(markets),
-            "next_cursor": data.get("next_cursor"),
-            "source": "polymarket_proxy"
-        }
+        results = await fetch_all(query)
+        return {"data": results, "count": len(results)}
     except Exception as e:
-        logger.error(f"Explorer markets error: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)}")
+        logger.error(f"Weather markets error: {e}")
+        return {"data": [], "count": 0}
 
 
 @app.get("/api/explorer/events")
@@ -608,6 +680,161 @@ async def approve_proposal(proposal_id: str):
         "message": "Proposal approval not yet implemented. See STRATEGY.md for manual updates.",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+# =============================================================================
+# Settings & Bot Control
+# =============================================================================
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get all bot settings from DB and config."""
+    try:
+        # Fetch from bot_settings table
+        query = "SELECT key, value FROM bot_settings"
+        rows = await fetch_all(query)
+        settings = {row["key"]: row["value"] for row in rows}
+        
+        # Add config defaults if missing
+        if not settings:
+            settings = {
+                "max_position_size": 50,
+                "max_portfolio_exposure": 15,
+                "kelly_fraction": 0.25,
+                "max_trades_per_city_per_day": 3,
+                "daily_loss_limit": 10,
+                "min_edge_auto_trade": 25,
+                "min_edge_alert": 15,
+                "min_confidence_sources": 2,
+                "max_spread_cents": 8,
+                "min_liquidity_multiple": 2,
+                "min_hours_to_resolution": 2,
+                "gates_enabled": {
+                    "data_convergence": True,
+                    "multi_station": True,
+                    "bucket_coherence": True,
+                    "binary_arbitrage": True,
+                    "liquidity_check": True,
+                    "time_window": True,
+                    "risk_manager": True,
+                    "claude_confirmation": True
+                },
+                "telegram_alerts": False,
+                "telegram_chat_id": "",
+                "alert_on_trade": True,
+                "alert_on_signal": True,
+                "alert_on_daily_summary": True,
+                "refresh_interval_min": 15,
+                "strategy_auto_proposals": True,
+                "weekly_review_day": "Sunday",
+                "weekly_review_time": "09:00",
+                "auto_adjust_accuracy": True,
+                "proposal_approval_mode": "require"
+            }
+        
+        return {
+            "settings": settings,
+            "mode": getattr(config, 'MODE', 'paper'),
+            "wallet_address": getattr(config, 'WALLET_ADDRESS', None)
+        }
+    except Exception as e:
+        logger.error(f"Get settings error: {e}")
+        return {"settings": {}, "mode": "paper", "wallet_address": None}
+
+
+@app.post("/api/settings")
+async def save_settings(settings: dict):
+    """Save bot settings to DB."""
+    try:
+        for key, value in settings.items():
+            await execute(
+                "INSERT INTO bot_settings (key, value, updated_at) VALUES (%s, %s::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = %s::jsonb, updated_at = NOW()",
+                (key, str(value), str(value))
+            )
+        return {"status": "saved", "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        logger.error(f"Save settings error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
+
+
+@app.post("/api/bot/start")
+async def start_bot():
+    """Start the trading bot."""
+    global scheduler
+    if not scheduler.running:
+        scheduler.start()
+    return {"status": "started", "running": scheduler.running, "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/bot/pause")
+async def pause_bot():
+    """Pause — stop new trades but keep monitoring."""
+    # TODO: Add pause flag to signal loop
+    return {"status": "paused", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/bot/stop")
+async def stop_bot():
+    """Emergency stop — halt everything immediately."""
+    global scheduler
+    if scheduler.running:
+        scheduler.pause()
+    return {"status": "stopped", "running": scheduler.running, "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/wallet/balance")
+async def get_wallet_balance():
+    """Get USDC + MATIC balance from Polygon."""
+    import httpx
+    
+    wallet_address = getattr(config, 'WALLET_ADDRESS', None)
+    if not wallet_address:
+        return {"error": "Wallet address not configured", "usdc": 0, "matic": 0}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Get MATIC balance
+            matic_resp = await client.post(
+                "https://polygon-rpc.com",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getBalance",
+                    "params": [wallet_address, "latest"],
+                    "id": 1
+                }
+            )
+            matic_data = matic_resp.json()
+            matic_wei = int(matic_data.get("result", "0x0"), 16)
+            matic_balance = matic_wei / 1e18
+            
+            # Get USDC balance (ERC-20)
+            usdc_contract = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            # balanceOf(address) = 0x70a08231 + padded address
+            data_param = "0x70a08231" + wallet_address[2:].zfill(64)
+            
+            usdc_resp = await client.post(
+                "https://polygon-rpc.com",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_call",
+                    "params": [{"to": usdc_contract, "data": data_param}, "latest"],
+                    "id": 2
+                }
+            )
+            usdc_data = usdc_resp.json()
+            usdc_raw = int(usdc_data.get("result", "0x0"), 16)
+            usdc_balance = usdc_raw / 1e6  # USDC has 6 decimals
+        
+        return {
+            "usdc": round(usdc_balance, 2),
+            "matic": round(matic_balance, 4),
+            "wallet": wallet_address,
+            "network": "Polygon Mainnet",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Wallet balance error: {e}")
+        return {"error": str(e), "usdc": 0, "matic": 0}
 
 
 if __name__ == "__main__":

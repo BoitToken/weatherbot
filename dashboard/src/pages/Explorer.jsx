@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react'
 import './Explorer.css'
 
 export default function Explorer() {
+  const [activeTab, setActiveTab] = useState('all') // 'all' or 'weather'
   const [markets, setMarkets] = useState([])
+  const [weatherMarkets, setWeatherMarkets] = useState([])
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState('')
@@ -13,12 +15,14 @@ export default function Explorer() {
   const [detailLoading, setDetailLoading] = useState(false)
 
   const categories = [
-    { label: 'All', value: '' },
-    { label: '🌡️ Weather', value: 'weather' },
-    { label: '⚽ Sports', value: 'sports' },
-    { label: '₿ Crypto', value: 'crypto' },
-    { label: '🏛️ Politics', value: 'politics' },
-    { label: '💼 Economics', value: 'economics' },
+    { label: 'All', value: '', icon: '📊' },
+    { label: 'Weather', value: 'weather', icon: '🌡️' },
+    { label: 'Sports', value: 'sports', icon: '⚽' },
+    { label: 'Politics', value: 'politics', icon: '🏛️' },
+    { label: 'Crypto', value: 'crypto', icon: '₿' },
+    { label: 'Economics', value: 'economics', icon: '💼' },
+    { label: 'Science', value: 'science', icon: '🔬' },
+    { label: 'Entertainment', value: 'entertainment', icon: '🎬' },
   ]
 
   const fetchMarkets = async (reset = false) => {
@@ -28,6 +32,7 @@ export default function Explorer() {
       const params = new URLSearchParams({
         limit: '50',
         cursor: cursor,
+        active_only: 'true',
       })
       if (search) params.append('search', search)
       if (category) params.append('category', category)
@@ -50,6 +55,16 @@ export default function Explorer() {
     }
   }
 
+  const fetchWeatherMarkets = async () => {
+    try {
+      const response = await fetch('/api/explorer/weather')
+      const data = await response.json()
+      setWeatherMarkets(data.data || [])
+    } catch (error) {
+      console.error('Failed to fetch weather markets:', error)
+    }
+  }
+
   const loadMarketDetail = async (conditionId) => {
     setDetailLoading(true)
     try {
@@ -65,12 +80,16 @@ export default function Explorer() {
   }
 
   useEffect(() => {
-    fetchMarkets(true)
-  }, [search, category])
+    if (activeTab === 'all') {
+      fetchMarkets(true)
+    } else {
+      fetchWeatherMarkets()
+    }
+  }, [search, category, activeTab])
 
   useEffect(() => {
     if (selectedMarket) {
-      const conditionId = selectedMarket.condition_id || selectedMarket.id
+      const conditionId = selectedMarket.condition_id || selectedMarket.market_id || selectedMarket.id
       if (conditionId) {
         loadMarketDetail(conditionId)
       }
@@ -91,7 +110,8 @@ export default function Explorer() {
 
   const formatPrice = (price) => {
     if (!price) return '50¢'
-    return `${(price * 100).toFixed(0)}¢`
+    const cents = Math.round(price * 100)
+    return `${cents}¢`
   }
 
   const formatVolume = (volume) => {
@@ -104,92 +124,211 @@ export default function Explorer() {
   const formatDate = (dateStr) => {
     if (!dateStr) return 'Unknown'
     const date = new Date(dateStr)
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  const getCategoryBadge = (cat) => {
+    const found = categories.find(c => c.value === cat)
+    if (!found) return { icon: '📊', label: 'Other' }
+    return found
+  }
+
+  const isResolved = (market) => {
+    const yesPrice = market._yes_price || market.yes_price || 0
+    const noPrice = market._no_price || market.no_price || 0
+    return (yesPrice === 1 && noPrice === 0) || (yesPrice === 0 && noPrice === 1)
   }
 
   return (
     <div className="explorer-page">
       <div className="explorer-header">
-        <h1>🔍 Polymarket Explorer</h1>
-        <p className="subtitle">Browse all prediction markets (proxy bypasses ISP blocks)</p>
+        <h1>🔍 Market Explorer</h1>
+        <p className="subtitle">Browse prediction markets with intelligent filtering</p>
       </div>
 
-      {/* Search & Filters */}
-      <div className="explorer-controls">
-        <input
-          type="text"
-          placeholder="Search markets..."
-          value={search}
-          onChange={handleSearchChange}
-          className="search-input"
-        />
-        
-        <div className="category-chips">
-          {categories.map(cat => (
-            <button
-              key={cat.value}
-              className={`category-chip ${category === cat.value ? 'active' : ''}`}
-              onClick={() => handleCategoryChange(cat.value)}
-            >
-              {cat.label}
-            </button>
-          ))}
-        </div>
+      {/* Tabs */}
+      <div className="explorer-tabs">
+        <button
+          className={`tab-btn ${activeTab === 'all' ? 'active' : ''}`}
+          onClick={() => setActiveTab('all')}
+        >
+          📊 All Markets
+        </button>
+        <button
+          className={`tab-btn ${activeTab === 'weather' ? 'active' : ''}`}
+          onClick={() => setActiveTab('weather')}
+        >
+          🌡️ Our Weather Markets
+        </button>
       </div>
 
-      {/* Market Grid */}
-      <div className="markets-grid">
-        {markets.map((market, idx) => {
-          const tokens = market.tokens || []
-          const yesPrice = tokens[0]?.price || 0.5
-          const noPrice = tokens[1]?.price || 0.5
-          const volume = market.volume || 0
-          const endDate = market.end_date_iso || market.endDate
+      {/* Search & Filters (only for All Markets tab) */}
+      {activeTab === 'all' && (
+        <>
+          <div className="explorer-controls">
+            <input
+              type="text"
+              placeholder="Search markets..."
+              value={search}
+              onChange={handleSearchChange}
+              className="search-input"
+            />
+          </div>
           
-          return (
-            <div 
-              key={market.condition_id || market.id || idx} 
-              className="market-card"
-              onClick={() => setSelectedMarket(market)}
-            >
-              <div className="market-question">{market.question || market.title}</div>
-              
-              <div className="market-prices">
-                <div className="price-row">
-                  <span className="price-label">YES</span>
-                  <div className="price-bar-container">
-                    <div 
-                      className="price-bar yes-bar" 
-                      style={{width: `${yesPrice * 100}%`}}
-                    />
-                  </div>
-                  <span className="price-value">{formatPrice(yesPrice)}</span>
+          <div className="category-chips">
+            {categories.map(cat => (
+              <button
+                key={cat.value}
+                className={`category-chip ${category === cat.value ? 'active' : ''}`}
+                onClick={() => handleCategoryChange(cat.value)}
+              >
+                {cat.icon} {cat.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Market Grid - All Markets */}
+      {activeTab === 'all' && (
+        <div className="markets-grid">
+          {markets.map((market, idx) => {
+            const yesPrice = market._yes_price || 0.5
+            const noPrice = market._no_price || 0.5
+            const volume = market._volume || 0
+            const endDate = market.end_date_iso || market.endDate
+            const cat = market._category || 'other'
+            const badge = getCategoryBadge(cat)
+            const resolved = isResolved(market)
+            
+            return (
+              <div 
+                key={market.condition_id || market.id || idx} 
+                className="market-card"
+                onClick={() => setSelectedMarket(market)}
+              >
+                <div className="market-header">
+                  <span className="category-badge">{badge.icon} {badge.label}</span>
+                  {resolved ? (
+                    <span className="status-badge resolved">Resolved</span>
+                  ) : (
+                    <span className="status-badge active">Active</span>
+                  )}
                 </div>
-                <div className="price-row">
-                  <span className="price-label">NO</span>
-                  <div className="price-bar-container">
-                    <div 
-                      className="price-bar no-bar" 
-                      style={{width: `${noPrice * 100}%`}}
-                    />
+                
+                <div className="market-question">{market.question || market.title}</div>
+                
+                <div className="market-prices">
+                  <div className="price-row">
+                    <span className="price-label">YES</span>
+                    <div className="price-bar-container">
+                      <div 
+                        className="price-bar yes-bar" 
+                        style={{width: `${yesPrice * 100}%`}}
+                      />
+                    </div>
+                    <span className="price-value">{formatPrice(yesPrice)}</span>
                   </div>
-                  <span className="price-value">{formatPrice(noPrice)}</span>
+                  <div className="price-row">
+                    <span className="price-label">NO</span>
+                    <div className="price-bar-container">
+                      <div 
+                        className="price-bar no-bar" 
+                        style={{width: `${noPrice * 100}%`}}
+                      />
+                    </div>
+                    <span className="price-value">{formatPrice(noPrice)}</span>
+                  </div>
                 </div>
+                
+                <div className="market-meta">
+                  <span>📊 {formatVolume(volume)}</span>
+                  <span>📅 {formatDate(endDate)}</span>
+                </div>
+                
+                <button className="view-detail-btn">View Detail →</button>
               </div>
-              
-              <div className="market-meta">
-                <span>📊 {formatVolume(volume)}</span>
-                <span>📅 {formatDate(endDate)}</span>
-              </div>
-              
-              <button className="view-detail-btn">View Detail →</button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Weather Markets Tab */}
+      {activeTab === 'weather' && (
+        <div className="weather-markets-grid">
+          {weatherMarkets.length === 0 ? (
+            <div className="empty-state">
+              <p>No weather markets tracked yet</p>
+              <p style={{fontSize: '14px', color: 'var(--text-secondary)', marginTop: '8px'}}>
+                Markets will appear here once the bot identifies and tracks weather prediction markets
+              </p>
             </div>
-          )
-        })}
-      </div>
+          ) : (
+            weatherMarkets.map((market, idx) => (
+              <div key={market.market_id || idx} className="weather-market-card">
+                <div className="weather-market-header">
+                  <h3>{market.title}</h3>
+                  <span className={`status-badge ${market.active ? 'active' : 'inactive'}`}>
+                    {market.active ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+                
+                <div className="weather-market-info">
+                  <div className="info-row">
+                    <span className="info-label">🏙️ City:</span>
+                    <span className="info-value">{market.city}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">📡 Station:</span>
+                    <span className="info-value">{market.station_icao}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">🎯 Threshold:</span>
+                    <span className="info-value">
+                      {market.threshold_type} {market.threshold_value}{market.threshold_unit}
+                    </span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">📅 Resolution:</span>
+                    <span className="info-value">{formatDate(market.resolution_date)}</span>
+                  </div>
+                </div>
+                
+                <div className="market-prices">
+                  <div className="price-row">
+                    <span className="price-label">YES</span>
+                    <div className="price-bar-container">
+                      <div 
+                        className="price-bar yes-bar" 
+                        style={{width: `${(market.yes_price || 0.5) * 100}%`}}
+                      />
+                    </div>
+                    <span className="price-value">{formatPrice(market.yes_price)}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">NO</span>
+                    <div className="price-bar-container">
+                      <div 
+                        className="price-bar no-bar" 
+                        style={{width: `${(market.no_price || 0.5) * 100}%`}}
+                      />
+                    </div>
+                    <span className="price-value">{formatPrice(market.no_price)}</span>
+                  </div>
+                </div>
+                
+                <div className="market-meta">
+                  <span>📊 {formatVolume(market.volume_usd)}</span>
+                  <span>💧 {formatVolume(market.liquidity_usd)} liquidity</span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Load More */}
-      {hasMore && !loading && (
+      {activeTab === 'all' && hasMore && !loading && (
         <div className="load-more-container">
           <button className="load-more-btn" onClick={handleLoadMore}>
             Load More Markets
@@ -229,7 +368,7 @@ export default function Explorer() {
                     </div>
                     <div className="detail-item">
                       <span className="detail-label">Volume:</span>
-                      <span className="detail-value">{formatVolume(selectedMarket.volume)}</span>
+                      <span className="detail-value">{formatVolume(selectedMarket._volume || selectedMarket.volume)}</span>
                     </div>
                     <div className="detail-item">
                       <span className="detail-label">Liquidity:</span>
