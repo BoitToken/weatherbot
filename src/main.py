@@ -207,9 +207,9 @@ async def get_latest_metar():
         SELECT DISTINCT ON (station_icao)
             station_icao, temperature_c, dewpoint_c,
             wind_speed_kt, wind_dir, raw_metar,
-            observed_at as observation_time, fetched_at as created_at
+            observation_time, created_at
         FROM metar_readings
-        ORDER BY station_icao, observed_at DESC
+        ORDER BY station_icao, observation_time DESC
     """
     results = await fetch_all(query)
     return {"data": results, "count": len(results)}
@@ -222,10 +222,10 @@ async def get_metar_history(icao: str, hours: int = 24):
     query = """
         SELECT station_icao, temperature_c, dewpoint_c,
                wind_speed_kt, raw_metar,
-               observed_at as observation_time
+               observation_time
         FROM metar_readings
-        WHERE station_icao = %s AND observed_at >= %s
-        ORDER BY observed_at DESC
+        WHERE station_icao = %s AND observation_time >= %s
+        ORDER BY observation_time DESC
     """
     results = await fetch_all(query, (icao, since))
     if not results:
