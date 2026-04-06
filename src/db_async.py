@@ -22,6 +22,39 @@ def _convert_params(query, args):
     return converted, args
 
 
+class AsyncCursor:
+    """Wraps psycopg2 cursor for async context manager."""
+    
+    def __init__(self, conn):
+        self._conn = conn
+        self._cursor = None
+    
+    async def __aenter__(self):
+        loop = asyncio.get_event_loop()
+        self._cursor = await loop.run_in_executor(None, self._conn.cursor)
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._cursor.close)
+    
+    async def execute(self, query, params=None):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._cursor.execute, query, params)
+    
+    async def fetchone(self):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._cursor.fetchone)
+    
+    async def fetchall(self):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._cursor.fetchall)
+    
+    @property
+    def description(self):
+        return self._cursor.description
+
+
 class AsyncConnection:
     """Wraps a psycopg2 connection to look like asyncpg."""
 
@@ -57,6 +90,15 @@ class AsyncConnection:
                 cur.execute(q, p)
             self._conn.commit()
         return await loop.run_in_executor(None, _exec)
+    
+    def cursor(self):
+        """Return async cursor context manager."""
+        return AsyncCursor(self._conn)
+    
+    async def commit(self):
+        """Commit transaction."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._conn.commit)
 
 
 class AsyncPoolWrapper:
@@ -70,6 +112,12 @@ class AsyncPoolWrapper:
             yield AsyncConnection(conn)
         finally:
             pool.putconn(conn)
+    
+    @asynccontextmanager
+    async def connection(self):
+        """Alias for acquire() — psycopg v3 style."""
+        async with self.acquire() as conn:
+            yield conn
 
 
 def get_async_pool():

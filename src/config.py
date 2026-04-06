@@ -14,7 +14,8 @@ DB_URL = os.getenv("DB_URL", "postgresql://node@localhost:5432/polyedge")
 # API Keys
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Admin chat ID for manual broadcasts
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", ""))  # Alias
 
 # Mode
 MODE = os.getenv("MODE", "live")  # "live" or "backtest"

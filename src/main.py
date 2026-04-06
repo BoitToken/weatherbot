@@ -87,11 +87,125 @@ async def scheduled_sports_scan():
         logger.error(f"❌ Sports scan failed: {e}\n{traceback.format_exc()}")
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
+# ═══════════════════════════════════════════════════════════════
+_telegram_bot = None
+
+
+async def check_and_broadcast_signals():
+    """Check for new HIGH confidence signals and broadcast to subscribers."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    
+    try:
+        # Get signals created in last 3 minutes with >10% edge
+        async_pool = get_async_pool()
+        async with async_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT id, sport, market_id, market_title, polymarket_price, fair_value, 
+                           edge_pct, signal, confidence, reasoning, created_at
+                    FROM sports_signals
+                    WHERE created_at >= NOW() - INTERVAL '3 minutes'
+                      AND confidence = 'HIGH'
+                      AND edge_pct > 10
+                    ORDER BY created_at DESC
+                """)
+                rows = await cur.fetchall()
+                
+                for row in rows:
+                    signal_dict = {
+                        'id': row[0],
+                        'sport': row[1],
+                        'market_id': row[2],
+                        'market_title': row[3],
+                        'polymarket_price': float(row[4]) if row[4] else 0,
+                        'fair_value': float(row[5]) if row[5] else 0,
+                        'edge_pct': float(row[6]) if row[6] else 0,
+                        'signal': row[7],
+                        'confidence': row[8],
+                        'reasoning': row[9],
+                        'created_at': row[10],
+                        'sportsbooks': 'DraftKings, Pinnacle, Betfair',
+                        'source_count': 22,
+                        'start_time': 'TBD'
+                    }
+                    await _telegram_bot.broadcast_signal_alert(signal_dict)
+                    logger.info(f"📢 Broadcasted signal: {signal_dict['market_title'][:40]}")
+    except Exception as e:
+        logger.error(f"❌ Signal broadcast failed: {e}")
+
+
+async def daily_summary_task():
+    """Send daily summary at 9 AM IST."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    
+    try:
+        await _telegram_bot.broadcast_daily_summary()
+        logger.info("📊 Daily summary sent")
+    except Exception as e:
+        logger.error(f"❌ Daily summary failed: {e}")
+
+
+async def pre_match_alerts():
+    """Check for matches starting in 1 hour and send alerts."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    
+    try:
+        one_hour_later = datetime.utcnow() + timedelta(hours=1)
+        async_pool = get_async_pool()
+        
+        async with async_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Find matches starting in 55-65 minutes
+                await cur.execute("""
+                    SELECT event_name, sport, start_time
+                    FROM live_events
+                    WHERE status = 'scheduled'
+                      AND start_time BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'
+                """)
+                rows = await cur.fetchall()
+                
+                for row in rows:
+                    event_name, sport, start_time = row
+                    
+                    # Get our position for this match
+                    await cur.execute("""
+                        SELECT market_title, size_usd, signal, edge_pct
+                        FROM paper_trades_live
+                        WHERE market_title LIKE %s AND status = 'open'
+                        LIMIT 1
+                    """, (f"%{event_name}%",))
+                    trade_row = await cur.fetchone()
+                    
+                    match_dict = {
+                        'event_name': event_name,
+                        'sport': sport,
+                        'size_usd': float(trade_row[1]) if trade_row else 0,
+                        'pick': trade_row[2] if trade_row else 'No position',
+                        'edge_pct': float(trade_row[3]) if trade_row else 0,
+                        'odds_display': 'TBD',
+                        'source_count': 22
+                    }
+                    
+                    if trade_row:  # Only alert if we have a position
+                        await _telegram_bot.broadcast_pre_match_alert(match_dict)
+                        logger.info(f"⏰ Pre-match alert sent: {event_name}")
+    except Exception as e:
+        logger.error(f"❌ Pre-match alerts failed: {e}")
+# ═══════════════════════════════════════════════════════════════
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
-    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine
+    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine, _telegram_bot
 
     logger.info("🚀 WeatherBot starting...")
     _startup_time = datetime.utcnow()
@@ -142,6 +256,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ Bankroll init failed: {e}")
 
+    # Initialize Telegram subscriber bot
+    try:
+        from src.alerts.subscriber_bot import init_bot
+        from src.alerts.invite_gate import InviteGate
+        if config.TELEGRAM_BOT_TOKEN:
+            _telegram_bot = await init_bot(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_ADMIN_CHAT_ID)
+            # Wire invite gate
+            if _telegram_bot and hasattr(_telegram_bot, 'pool'):
+                _telegram_bot.invite_gate = InviteGate(_telegram_bot.pool, config.TELEGRAM_ADMIN_CHAT_ID)
+            logger.info("✅ Telegram subscriber bot initialized (invite-only mode)")
+        else:
+            logger.warning("⚠️ Telegram bot disabled: no token")
+    except Exception as e:
+        logger.error(f"⚠️ Telegram bot init failed: {e}")
+    
     # Start scheduler
     scheduler.add_job(scheduled_data_scan, 'interval', minutes=30, id='data_loop', replace_existing=True)
     scheduler.add_job(scheduled_signal_scan, 'interval', minutes=5, id='signal_loop', replace_existing=True)
@@ -151,8 +280,17 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_sports_scan, 'interval', minutes=3, id='sports_loop', replace_existing=True)
     
+    # ═══════════════════════════════════════════════════════════════
+    # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
+    # ═══════════════════════════════════════════════════════════════
+    if _telegram_bot:
+        scheduler.add_job(check_and_broadcast_signals, 'interval', minutes=3, id='telegram_signals', replace_existing=True)
+        scheduler.add_job(daily_summary_task, 'cron', hour=3, minute=30, id='telegram_daily', replace_existing=True)  # 9 AM IST
+        scheduler.add_job(pre_match_alerts, 'interval', minutes=15, id='telegram_prematch', replace_existing=True)
+        logger.info("✅ Telegram broadcast jobs scheduled")
+    
     scheduler.start()
-    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min)")
+    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min, telegram: enabled)")
     logger.info("✅ WeatherBot ready")
 
     yield
@@ -160,6 +298,12 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 WeatherBot shutting down...")
     scheduler.shutdown(wait=False)
+    
+    # Shutdown Telegram bot
+    if _telegram_bot:
+        from src.alerts.subscriber_bot import shutdown_bot
+        await shutdown_bot()
+    
     await close_pool()
 
 
@@ -1961,6 +2105,84 @@ async def sports_performance():
         }
     except Exception as e:
         return {"by_edge_type": [], "error": str(e)}
+
+
+# =============================================================================
+# Telegram Subscriber Bot API
+# =============================================================================
+
+@app.get("/api/telegram/subscribers")
+async def get_telegram_subscribers():
+    """Get subscriber count and stats."""
+    try:
+        async_pool = get_async_pool()
+        async with async_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN is_active = true THEN 1 END) as active,
+                        COUNT(CASE WHEN alert_frequency = 'instant' THEN 1 END) as instant,
+                        COUNT(CASE WHEN alert_frequency = 'daily' THEN 1 END) as daily,
+                        SUM(total_alerts_sent) as total_alerts
+                    FROM telegram_subscribers
+                """)
+                row = await cur.fetchone()
+                
+        return {
+            "total": row[0] if row else 0,
+            "active": row[1] if row else 0,
+            "instant": row[2] if row else 0,
+            "daily": row[3] if row else 0,
+            "total_alerts_sent": row[4] if row else 0,
+            "bot_enabled": _telegram_bot is not None,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Telegram subscribers error: {e}")
+        return {"total": 0, "active": 0, "error": str(e)}
+
+
+@app.post("/api/telegram/broadcast")
+async def manual_broadcast(data: dict):
+    """Manually broadcast a message (admin only)."""
+    global _telegram_bot
+    
+    if not _telegram_bot:
+        raise HTTPException(status_code=503, detail="Telegram bot not initialized")
+    
+    message = data.get("message")
+    if not message:
+        raise HTTPException(status_code=400, detail="message required")
+    
+    # Admin check (compare with TELEGRAM_ADMIN_CHAT_ID)
+    admin_chat_id = data.get("admin_chat_id")
+    if str(admin_chat_id) != str(_telegram_bot.admin_chat_id):
+        raise HTTPException(status_code=403, detail="Admin only")
+    
+    try:
+        subscribers = await _telegram_bot.get_all_subscribers()
+        sent = 0
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(
+                    chat_id=sub['chat_id'],
+                    text=message,
+                    parse_mode='HTML'
+                )
+                sent += 1
+            except Exception as e:
+                logger.error(f"Failed to send to {sub['chat_id']}: {e}")
+        
+        return {
+            "status": "broadcast_complete",
+            "sent": sent,
+            "total_subscribers": len(subscribers),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Manual broadcast error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
