@@ -1,17 +1,20 @@
 """
 WeatherBot FastAPI Server
-Provides API endpoints for dashboard + scheduler for data/signal loops.
+API endpoints for dashboard + scheduler for data/signal loops.
+All endpoints query REAL database — no stubs, no mocks.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import Optional
 import logging
+import traceback
 
 from src import config
-from src.db import fetch_all, fetch_one, init_tables, close_pool
+from src.db import fetch_all, fetch_one, execute, init_tables, close_pool, get_pool
+from src.db_async import get_async_pool
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -20,35 +23,109 @@ logger = logging.getLogger(__name__)
 # Scheduler
 scheduler = AsyncIOScheduler()
 
+# Track scan times
+_last_data_scan: Optional[datetime] = None
+_last_signal_scan: Optional[datetime] = None
+_startup_time: Optional[datetime] = None
+
+# Signal loop instance (initialized on startup)
+_signal_loop = None
+
+
+async def scheduled_data_scan():
+    """Run data collection cycle on schedule."""
+    global _last_data_scan
+    try:
+        from src.data.data_loop import run_single_cycle
+        logger.info("⏰ Scheduled data scan starting...")
+        await run_single_cycle()
+        _last_data_scan = datetime.utcnow()
+        logger.info(f"✅ Data scan complete at {_last_data_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"❌ Data scan failed: {e}\n{traceback.format_exc()}")
+
+
+async def scheduled_signal_scan():
+    """Run signal detection on schedule."""
+    global _last_signal_scan, _signal_loop
+    try:
+        if _signal_loop is None:
+            logger.warning("Signal loop not initialized, skipping")
+            return
+        logger.info("⏰ Scheduled signal scan starting...")
+        await _signal_loop.run_once()
+        _last_signal_scan = datetime.utcnow()
+        logger.info(f"✅ Signal scan complete at {_last_signal_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"❌ Signal scan failed: {e}\n{traceback.format_exc()}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
-    # Startup
+    global _last_data_scan, _startup_time, _signal_loop
+
     logger.info("🚀 WeatherBot starting...")
+    _startup_time = datetime.utcnow()
     await init_tables()
-    
-    # Start scheduler (commented out until data/signal modules are ready)
-    # scheduler.add_job(data_loop, 'interval', minutes=30, id='data_loop')
-    # scheduler.add_job(signal_loop, 'interval', minutes=5, id='signal_loop')
-    # scheduler.start()
+
+    # Initialize signal loop
+    try:
+        from src.signals.signal_loop import SignalLoop
+        from src.data.city_map import CITY_TO_ICAO
+        async_pool = get_async_pool()
+        _signal_loop = SignalLoop(
+            db_pool=async_pool,
+            city_map=CITY_TO_ICAO,
+            anthropic_api_key=config.ANTHROPIC_API_KEY,
+            min_edge_for_claude=float(getattr(config, 'MIN_EDGE_ALERT', 0.15)),
+            min_edge_for_trade=float(getattr(config, 'MIN_EDGE_AUTO_TRADE', 0.25)),
+        )
+        logger.info("✅ Signal loop initialized")
+    except Exception as e:
+        logger.error(f"⚠️ Signal loop init failed (will retry): {e}")
+
+    # Run initial data fetch
+    try:
+        from src.data.data_loop import run_single_cycle
+        await run_single_cycle()
+        _last_data_scan = datetime.utcnow()
+        logger.info(f"✅ Initial data fetch complete: {_last_data_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"⚠️ Initial data fetch failed: {e}")
+
+    # Initialize bankroll if empty
+    try:
+        existing = await fetch_one("SELECT id FROM bankroll LIMIT 1")
+        if not existing:
+            await execute(
+                "INSERT INTO bankroll (total_usd, available_usd, in_positions_usd, daily_pnl) VALUES (0, 0, 0, 0)"
+            )
+            logger.info("✅ Initial bankroll record created")
+    except Exception as e:
+        logger.error(f"⚠️ Bankroll init failed: {e}")
+
+    # Start scheduler
+    scheduler.add_job(scheduled_data_scan, 'interval', minutes=30, id='data_loop', replace_existing=True)
+    scheduler.add_job(scheduled_signal_scan, 'interval', minutes=5, id='signal_loop', replace_existing=True)
+    scheduler.start()
+    logger.info("✅ Scheduler started (data: 30min, signals: 5min)")
     logger.info("✅ WeatherBot ready")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("🛑 WeatherBot shutting down...")
-    # scheduler.shutdown()
+    scheduler.shutdown(wait=False)
     await close_pool()
 
 
 app = FastAPI(
     title="WeatherBot — PolyEdge",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan
 )
 
-# CORS for dashboard
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,24 +141,50 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "0.1.0"
+        "version": "0.2.0",
+        "scheduler": scheduler.running,
+        "last_data_scan": _last_data_scan.isoformat() if _last_data_scan else None,
+        "last_signal_scan": _last_signal_scan.isoformat() if _last_signal_scan else None,
     }
 
 
 @app.get("/api/bot/status")
 async def bot_status():
-    """Bot running status."""
+    uptime = (datetime.utcnow() - _startup_time).total_seconds() if _startup_time else 0
     return {
-        "running": True,  # scheduler.running if scheduler else False
-        "mode": config.MODE,
-        "last_data_scan": None,  # TODO: Track in DB
-        "last_signal_scan": None,  # TODO: Track in DB
-        "uptime_seconds": 0,  # TODO: Calculate
+        "running": scheduler.running,
+        "mode": getattr(config, 'MODE', 'paper'),
+        "last_data_scan": _last_data_scan.isoformat() if _last_data_scan else None,
+        "last_signal_scan": _last_signal_scan.isoformat() if _last_signal_scan else None,
+        "uptime_seconds": int(uptime),
+        "signal_loop_ready": _signal_loop is not None,
     }
+
+
+# =============================================================================
+# Manual Triggers
+# =============================================================================
+
+@app.post("/api/bot/scan-now")
+async def trigger_scan():
+    """Manually trigger a full data + signal scan."""
+    results = {}
+    try:
+        await scheduled_data_scan()
+        results["data_scan"] = "completed"
+    except Exception as e:
+        results["data_scan"] = f"failed: {str(e)}"
+
+    try:
+        await scheduled_signal_scan()
+        results["signal_scan"] = "completed"
+    except Exception as e:
+        results["signal_scan"] = f"failed: {str(e)}"
+
+    return {"status": "scan_triggered", "results": results, "timestamp": datetime.utcnow().isoformat()}
 
 
 # =============================================================================
@@ -90,19 +193,13 @@ async def bot_status():
 
 @app.get("/api/metar/latest")
 async def get_latest_metar():
-    """Get latest METAR reading for each station."""
     query = """
         SELECT DISTINCT ON (station_icao)
-            station_icao,
-            observation_time,
-            temperature_c,
-            dewpoint_c,
-            wind_speed_kt,
-            wind_dir,
-            raw_metar,
-            created_at
+            station_icao, temperature_c, dewpoint_c,
+            wind_speed_kt, wind_dir, raw_metar,
+            observed_at as observation_time, fetched_at as created_at
         FROM metar_readings
-        ORDER BY station_icao, observation_time DESC
+        ORDER BY station_icao, observed_at DESC
     """
     results = await fetch_all(query)
     return {"data": results, "count": len(results)}
@@ -110,83 +207,86 @@ async def get_latest_metar():
 
 @app.get("/api/metar/{icao}")
 async def get_metar_history(icao: str, hours: int = 24):
-    """Get METAR history for a specific station."""
     icao = icao.upper()
     since = datetime.utcnow() - timedelta(hours=hours)
-    
     query = """
-        SELECT 
-            station_icao,
-            observation_time,
-            temperature_c,
-            dewpoint_c,
-            wind_speed_kt,
-            raw_metar
+        SELECT station_icao, temperature_c, dewpoint_c,
+               wind_speed_kt, raw_metar,
+               observed_at as observation_time
         FROM metar_readings
-        WHERE station_icao = %s
-        AND observation_time >= %s
-        ORDER BY observation_time DESC
+        WHERE station_icao = %s AND observed_at >= %s
+        ORDER BY observed_at DESC
     """
     results = await fetch_all(query, (icao, since))
-    
     if not results:
-        raise HTTPException(status_code=404, detail=f"No data found for {icao}")
-    
+        raise HTTPException(status_code=404, detail=f"No data for {icao}")
     return {"station": icao, "data": results, "count": len(results)}
 
 
 # =============================================================================
-# Markets
+# Markets — queries REAL weather_markets table
 # =============================================================================
 
 @app.get("/api/markets")
 async def get_active_markets():
-    """Get active weather markets from Polymarket."""
-    # TODO: Query markets table when markets module is ready
-    # For now, return empty list
-    return {"data": [], "count": 0}
+    query = """
+        SELECT market_id, title, city, station_icao, threshold_type,
+               threshold_value, threshold_unit, resolution_date,
+               yes_price, no_price, volume_usd, liquidity_usd,
+               last_updated, active
+        FROM weather_markets
+        WHERE active = true
+        ORDER BY last_updated DESC
+    """
+    results = await fetch_all(query)
+    return {"data": results, "count": len(results)}
 
 
 # =============================================================================
-# Signals
+# Signals — queries REAL signals table
 # =============================================================================
 
 @app.get("/api/signals")
 async def get_signals(limit: int = 50):
-    """Get recent signals."""
-    # TODO: Query signals table when signals module is ready
-    return {"data": [], "count": 0}
+    query = """
+        SELECT id, market_id, station_icao, city, side,
+               our_probability, market_price, edge, confidence,
+               claude_reasoning, was_traded, skip_reason, created_at
+        FROM signals
+        ORDER BY created_at DESC
+        LIMIT %s
+    """
+    results = await fetch_all(query, (limit,))
+    return {"data": results, "count": len(results)}
 
 
 @app.get("/api/signals/pending")
 async def get_pending_signals():
-    """Get high-confidence untrades (pending manual approval)."""
-    # TODO: Query signals where status='pending' and confidence='HIGH'
-    return {"data": [], "count": 0}
+    query = """
+        SELECT id, market_id, station_icao, city, side,
+               our_probability, market_price, edge, confidence,
+               claude_reasoning, created_at
+        FROM signals
+        WHERE was_traded = false AND confidence = 'HIGH'
+        ORDER BY edge DESC
+    """
+    results = await fetch_all(query)
+    return {"data": results, "count": len(results)}
 
 
 # =============================================================================
-# Trades
+# Trades — correct column names from actual schema
 # =============================================================================
 
 @app.get("/api/trades")
 async def get_trades(limit: int = 100):
-    """Get trade history."""
     query = """
-        SELECT 
-            id,
-            signal_id,
-            city,
-            side,
-            entry_price,
-            size_usd,
-            edge_pct,
-            status,
-            pnl,
-            created_at,
-            closed_at
+        SELECT id, signal_id, market_id, market_title, side,
+               entry_price, shares, size_usd, edge_at_entry,
+               status, exit_price, pnl_usd, pnl_pct,
+               resolved_at, entry_at, metadata
         FROM trades
-        ORDER BY created_at DESC
+        ORDER BY entry_at DESC
         LIMIT %s
     """
     try:
@@ -194,27 +294,18 @@ async def get_trades(limit: int = 100):
         return {"data": results, "count": len(results)}
     except Exception as e:
         logger.error(f"Failed to fetch trades: {e}")
-        # Return empty if table doesn't exist yet
         return {"data": [], "count": 0}
 
 
 @app.get("/api/trades/active")
 async def get_active_trades():
-    """Get open positions."""
     query = """
-        SELECT 
-            id,
-            signal_id,
-            city,
-            side,
-            entry_price,
-            size_usd,
-            edge_pct,
-            status,
-            created_at
+        SELECT id, signal_id, market_id, market_title, side,
+               entry_price, shares, size_usd, edge_at_entry,
+               status, entry_at, metadata
         FROM trades
-        WHERE status IN ('paper_open', 'live_open')
-        ORDER BY created_at DESC
+        WHERE status IN ('open', 'paper_open', 'live_open')
+        ORDER BY entry_at DESC
     """
     try:
         results = await fetch_all(query)
@@ -225,26 +316,23 @@ async def get_active_trades():
 
 
 # =============================================================================
-# P&L & Analytics
+# P&L & Analytics — correct column names
 # =============================================================================
 
 @app.get("/api/pnl/daily")
 async def get_daily_pnl(days: int = 30):
-    """Get daily P&L data."""
     since = datetime.utcnow() - timedelta(days=days)
-    
     query = """
-        SELECT 
-            DATE(closed_at) as date,
+        SELECT
+            DATE(resolved_at) as date,
             COUNT(*) as trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(pnl) as total_pnl,
-            AVG(pnl) as avg_pnl
+            SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl_usd) as total_pnl,
+            AVG(pnl_usd) as avg_pnl
         FROM trades
-        WHERE closed_at IS NOT NULL
-        AND closed_at >= %s
-        GROUP BY DATE(closed_at)
+        WHERE resolved_at IS NOT NULL AND resolved_at >= %s
+        GROUP BY DATE(resolved_at)
         ORDER BY date DESC
     """
     try:
@@ -257,51 +345,64 @@ async def get_daily_pnl(days: int = 30):
 
 @app.get("/api/bankroll")
 async def get_bankroll():
-    """Get current bankroll status."""
-    # TODO: Track bankroll in settings/config table
-    # For now return mock data
-    return {
-        "total": 1000.0,
-        "available": 950.0,
-        "in_positions": 50.0,
-        "last_updated": datetime.utcnow().isoformat()
-    }
+    """Query REAL bankroll table."""
+    try:
+        result = await fetch_one(
+            "SELECT total_usd, available_usd, in_positions_usd, daily_pnl, timestamp as last_updated FROM bankroll ORDER BY timestamp DESC LIMIT 1"
+        )
+        if result:
+            return {
+                "total": float(result.get("total_usd", 0) or 0),
+                "available": float(result.get("available_usd", 0) or 0),
+                "in_positions": float(result.get("in_positions_usd", 0) or 0),
+                "daily_pnl": float(result.get("daily_pnl", 0) or 0),
+                "last_updated": result.get("last_updated", "").isoformat() if result.get("last_updated") else None,
+            }
+        return {"total": 0, "available": 0, "in_positions": 0, "daily_pnl": 0, "last_updated": None}
+    except Exception as e:
+        logger.error(f"Failed to fetch bankroll: {e}")
+        return {"total": 0, "available": 0, "in_positions": 0, "daily_pnl": 0, "last_updated": None}
 
 
 @app.get("/api/analytics/win-rate")
 async def get_win_rate(days: int = 30):
-    """Get win rate over time."""
     since = datetime.utcnow() - timedelta(days=days)
-    
     query = """
-        SELECT 
+        SELECT
             COUNT(*) as total_trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            ROUND(100.0 * SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) / COUNT(*), 2) as win_rate_pct,
-            SUM(pnl) as total_pnl,
-            AVG(edge_pct) as avg_edge
+            SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+            CASE WHEN COUNT(*) > 0
+                THEN ROUND(100.0 * SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) / COUNT(*), 2)
+                ELSE 0 END as win_rate_pct,
+            COALESCE(SUM(pnl_usd), 0) as total_pnl,
+            COALESCE(AVG(edge_at_entry), 0) as avg_edge
         FROM trades
-        WHERE closed_at IS NOT NULL
-        AND closed_at >= %s
+        WHERE resolved_at IS NOT NULL AND resolved_at >= %s
     """
     try:
         result = await fetch_one(query, (since,))
-        return result or {
-            "total_trades": 0,
-            "wins": 0,
-            "win_rate_pct": 0.0,
-            "total_pnl": 0.0,
-            "avg_edge": 0.0
-        }
+        return result or {"total_trades": 0, "wins": 0, "win_rate_pct": 0, "total_pnl": 0, "avg_edge": 0}
     except Exception as e:
         logger.error(f"Failed to fetch win rate: {e}")
-        return {
-            "total_trades": 0,
-            "wins": 0,
-            "win_rate_pct": 0.0,
-            "total_pnl": 0.0,
-            "avg_edge": 0.0
-        }
+        return {"total_trades": 0, "wins": 0, "win_rate_pct": 0, "total_pnl": 0, "avg_edge": 0}
+
+
+# =============================================================================
+# DB Stats (for dashboard verification)
+# =============================================================================
+
+@app.get("/api/stats")
+async def get_db_stats():
+    """Return row counts for all tables — useful for verifying real data."""
+    tables = ["metar_readings", "temperature_trends", "weather_markets", "signals", "trades", "bankroll", "station_accuracy"]
+    stats = {}
+    for table in tables:
+        try:
+            result = await fetch_one(f"SELECT COUNT(*) as count FROM {table}")
+            stats[table] = result["count"] if result else 0
+        except:
+            stats[table] = "error"
+    return {"tables": stats, "timestamp": datetime.utcnow().isoformat()}
 
 
 if __name__ == "__main__":

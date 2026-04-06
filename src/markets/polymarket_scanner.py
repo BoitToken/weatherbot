@@ -3,6 +3,7 @@ Polymarket Scanner — Fetch and store weather markets
 """
 import httpx
 import asyncio
+import json
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -213,7 +214,7 @@ class PolymarketScanner:
                     """, 
                         market.market_id, market.title, market.yes_price, market.no_price,
                         market.volume, market.liquidity, market.resolution_date, market.active,
-                        market.created_at, market.updated_at, market.metadata
+                        market.created_at, market.updated_at, json.dumps(market.metadata) if isinstance(market.metadata, dict) else market.metadata
                     )
                     stored += 1
                 except Exception as e:
