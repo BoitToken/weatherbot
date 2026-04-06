@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import './Explorer.css'
 
-export default function Explorer() {
+export default function Explorer({ activeOnly = true }) {
   const [activeTab, setActiveTab] = useState('all') // 'all' or 'weather'
   const [markets, setMarkets] = useState([])
   const [weatherMarkets, setWeatherMarkets] = useState([])
@@ -32,7 +32,7 @@ export default function Explorer() {
       const params = new URLSearchParams({
         limit: '50',
         cursor: cursor,
-        active_only: 'true',
+        active_only: activeOnly ? 'true' : 'false',
       })
       if (search) params.append('search', search)
       if (category) params.append('category', category)
@@ -85,7 +85,7 @@ export default function Explorer() {
     } else {
       fetchWeatherMarkets()
     }
-  }, [search, category, activeTab])
+  }, [search, category, activeTab, activeOnly])
 
   useEffect(() => {
     if (selectedMarket) {
@@ -343,78 +343,135 @@ export default function Explorer() {
         </div>
       )}
 
-      {/* Market Detail Modal */}
-      {selectedMarket && (
+      {/* Market Detail Modal — Enhanced */}
+      {selectedMarket && (() => {
+        const m = selectedMarket
+        const yesPrice = m._yes_price || m.tokens?.[0]?.price || 0.5
+        const noPrice = m._no_price || m.tokens?.[1]?.price || 0.5
+        const cat = m._category || m.tags?.[0] || 'Other'
+        const isActive = m.active && !m.closed
+        const desc = m.description || ''
+        const vol = m._volume || m.volume || 0
+        const liq = m.liquidity || 0
+        const slug = m.market_slug || ''
+        const img = m.image || m.icon || ''
+        const endDate = m.end_date_iso || m.endDate || ''
+        const tags = m.tags || []
+        
+        return (
         <div className="modal-overlay" onClick={() => setSelectedMarket(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>{selectedMarket.question || selectedMarket.title}</h2>
+          <div className="modal-content modal-enhanced" onClick={(e) => e.stopPropagation()}>
+            {/* Header with image */}
+            <div className="modal-header-enhanced">
+              {img && <img src={img} alt="" style={{ width: 48, height: 48, borderRadius: 12, objectFit: 'cover', flexShrink: 0 }} onError={e => e.target.style.display='none'} />}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h2 style={{ fontSize: '1.1rem', margin: 0, lineHeight: 1.3 }}>{m.question || m.title}</h2>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                  <span style={{ padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, background: isActive ? 'rgba(16,185,129,0.15)' : 'rgba(107,114,128,0.2)', color: isActive ? '#10B981' : '#6b7280' }}>{isActive ? '🟢 Active' : '⚫ Resolved'}</span>
+                  <span style={{ padding: '2px 8px', borderRadius: 10, fontSize: 11, background: 'rgba(124,58,237,0.15)', color: '#a78bfa' }}>{cat}</span>
+                </div>
+              </div>
               <button className="close-btn" onClick={() => setSelectedMarket(null)}>✕</button>
             </div>
-            
-            {detailLoading ? (
-              <div className="modal-loading">
-                <div className="spinner"></div>
-                <p>Loading details...</p>
+
+            <div className="modal-body">
+              {/* YES / NO Price Cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
+                <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 12, padding: 16, textAlign: 'center' }}>
+                  <div style={{ fontSize: 12, color: '#10B981', fontWeight: 600, marginBottom: 4 }}>YES</div>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: '#10B981' }}>{Math.round(yesPrice * 100)}¢</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{(yesPrice * 100).toFixed(1)}% implied</div>
+                </div>
+                <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 12, padding: 16, textAlign: 'center' }}>
+                  <div style={{ fontSize: 12, color: '#EF4444', fontWeight: 600, marginBottom: 4 }}>NO</div>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: '#EF4444' }}>{Math.round(noPrice * 100)}¢</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{(noPrice * 100).toFixed(1)}% implied</div>
+                </div>
               </div>
-            ) : marketDetail ? (
-              <div className="modal-body">
-                <div className="detail-section">
-                  <h3>Market Info</h3>
-                  <div className="detail-grid">
-                    <div className="detail-item">
-                      <span className="detail-label">Market ID:</span>
-                      <span className="detail-value">{selectedMarket.condition_id || selectedMarket.id}</span>
+
+              {/* Key Metrics Row */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
+                <div style={{ background: 'var(--bg-tertiary, #111)', borderRadius: 10, padding: 12, textAlign: 'center' }}>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>Volume</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{formatVolume(vol)}</div>
+                </div>
+                <div style={{ background: 'var(--bg-tertiary, #111)', borderRadius: 10, padding: 12, textAlign: 'center' }}>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>Liquidity</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{formatVolume(liq)}</div>
+                </div>
+                <div style={{ background: 'var(--bg-tertiary, #111)', borderRadius: 10, padding: 12, textAlign: 'center' }}>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>Resolves</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>{endDate ? new Date(endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'TBD'}</div>
+                </div>
+              </div>
+
+              {/* Description */}
+              {desc && (
+                <div style={{ marginBottom: 20 }}>
+                  <h4 style={{ fontSize: 13, color: '#9ca3af', fontWeight: 600, marginBottom: 6 }}>Description</h4>
+                  <p style={{ fontSize: 13, color: '#d1d5db', lineHeight: 1.5, margin: 0, maxHeight: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{desc.slice(0, 400)}{desc.length > 400 ? '...' : ''}</p>
+                </div>
+              )}
+
+              {/* Tags */}
+              {tags.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <h4 style={{ fontSize: 13, color: '#9ca3af', fontWeight: 600, marginBottom: 6 }}>Tags</h4>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {tags.filter(t => t !== 'All').slice(0, 8).map((tag, i) => (
+                      <span key={i} style={{ padding: '3px 10px', borderRadius: 12, fontSize: 11, background: 'rgba(124,58,237,0.1)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.2)' }}>{tag}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Order Book (if loaded) */}
+              {marketDetail?.order_book && (
+                <div style={{ marginBottom: 20 }}>
+                  <h4 style={{ fontSize: 13, color: '#9ca3af', fontWeight: 600, marginBottom: 8 }}>Order Book</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: '#10B981', fontWeight: 600, marginBottom: 4 }}>Bids ({marketDetail.order_book.bids?.length || 0})</div>
+                      {(marketDetail.order_book.bids || []).slice(0, 5).map((bid, i) => (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', background: 'rgba(16,185,129,0.05)', borderRadius: 6, marginBottom: 3, fontSize: 12 }}>
+                          <span style={{ color: '#10B981' }}>{formatPrice(bid.price)}</span>
+                          <span style={{ color: '#6b7280' }}>{bid.size || 0}</span>
+                        </div>
+                      ))}
+                      {(!marketDetail.order_book.bids || marketDetail.order_book.bids.length === 0) && <div style={{ fontSize: 12, color: '#4b5563' }}>No bids</div>}
                     </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Volume:</span>
-                      <span className="detail-value">{formatVolume(selectedMarket._volume || selectedMarket.volume)}</span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Liquidity:</span>
-                      <span className="detail-value">{formatVolume(selectedMarket.liquidity)}</span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Resolution:</span>
-                      <span className="detail-value">{formatDate(selectedMarket.end_date_iso || selectedMarket.endDate)}</span>
+                    <div>
+                      <div style={{ fontSize: 11, color: '#EF4444', fontWeight: 600, marginBottom: 4 }}>Asks ({marketDetail.order_book.asks?.length || 0})</div>
+                      {(marketDetail.order_book.asks || []).slice(0, 5).map((ask, i) => (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', background: 'rgba(239,68,68,0.05)', borderRadius: 6, marginBottom: 3, fontSize: 12 }}>
+                          <span style={{ color: '#EF4444' }}>{formatPrice(ask.price)}</span>
+                          <span style={{ color: '#6b7280' }}>{ask.size || 0}</span>
+                        </div>
+                      ))}
+                      {(!marketDetail.order_book.asks || marketDetail.order_book.asks.length === 0) && <div style={{ fontSize: 12, color: '#4b5563' }}>No asks</div>}
                     </div>
                   </div>
                 </div>
+              )}
 
-                {marketDetail.order_book && (
-                  <div className="detail-section">
-                    <h3>Order Book</h3>
-                    <div className="order-book">
-                      <div className="book-column">
-                        <h4>Bids ({marketDetail.order_book.bids?.length || 0})</h4>
-                        {marketDetail.order_book.bids?.slice(0, 5).map((bid, idx) => (
-                          <div key={idx} className="order-row bid">
-                            <span>{formatPrice(bid.price)}</span>
-                            <span>{bid.size || 0}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="book-column">
-                        <h4>Asks ({marketDetail.order_book.asks?.length || 0})</h4>
-                        {marketDetail.order_book.asks?.slice(0, 5).map((ask, idx) => (
-                          <div key={idx} className="order-row ask">
-                            <span>{formatPrice(ask.price)}</span>
-                            <span>{ask.size || 0}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
+              {/* Market ID (collapsed) */}
+              <div style={{ marginBottom: 16 }}>
+                <h4 style={{ fontSize: 13, color: '#9ca3af', fontWeight: 600, marginBottom: 4 }}>Market ID</h4>
+                <div style={{ fontSize: 11, color: '#4b5563', wordBreak: 'break-all', background: 'var(--bg-tertiary, #111)', padding: 8, borderRadius: 8, fontFamily: 'monospace' }}>{m.condition_id || m.id}</div>
               </div>
-            ) : (
-              <div className="modal-error">
-                <p>Failed to load market details</p>
-              </div>
-            )}
+
+              {/* Action: Open on Polymarket */}
+              {slug && (
+                <a href={`https://polymarket.com/market/${slug}`} target="_blank" rel="noopener noreferrer"
+                  style={{ display: 'block', textAlign: 'center', padding: '14px 20px', background: 'linear-gradient(135deg, #7c3aed, #6d28d9)', borderRadius: 12, color: '#fff', fontWeight: 700, fontSize: 14, textDecoration: 'none', marginTop: 8 }}>
+                  Open on Polymarket →
+                </a>
+              )}
+            </div>
           </div>
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }

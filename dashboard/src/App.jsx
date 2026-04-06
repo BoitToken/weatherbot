@@ -1,27 +1,44 @@
+import React, { Component } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom'
 import './App.css'
 
 // Pages
 import Overview from './pages/Overview'
-import Signals from './pages/Signals'
+import Markets from './pages/Markets'
+import Performance from './pages/Performance'
 import Trades from './pages/Trades'
-import METAR from './pages/METAR'
 import Settings from './pages/Settings'
-import Explorer from './pages/Explorer'
-import Intelligence from './pages/Intelligence'
-import SportsIntelligence from './pages/SportsIntelligence'
+
+// Global error boundary
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 48, textAlign: 'center', color: '#94a3b8', minHeight: '60vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ fontSize: 56, marginBottom: 16 }}>⚠️</div>
+          <h2 style={{ color: '#fff', marginBottom: 8 }}>Page crashed</h2>
+          <p style={{ fontSize: 14, marginBottom: 20, maxWidth: 400 }}>{this.state.error?.message || 'Something went wrong rendering this page'}</p>
+          <button onClick={() => { this.setState({ hasError: false }); window.location.reload(); }}
+            style={{ padding: '12px 24px', background: '#7c3aed', border: 'none', borderRadius: 8, color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function Sidebar() {
   const location = useLocation()
   
   const navItems = [
-    { path: '/', label: 'Overview', icon: '📊' },
-    { path: '/signals', label: 'Signals', icon: '⚡' },
+    { path: '/', label: 'Home', icon: '🏠' },
+    { path: '/markets', label: 'Markets', icon: '📊' },
+    { path: '/performance', label: 'Performance', icon: '🏆' },
     { path: '/trades', label: 'Trades', icon: '💰' },
-    { path: '/metar', label: 'METAR', icon: '🌡️' },
-    { path: '/intelligence', label: 'Intelligence', icon: '🧠' },
-    { path: '/explorer', label: 'Explorer', icon: '🔍' },
-    { path: '/sports', label: 'Sports', icon: '🏆' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
@@ -37,8 +54,8 @@ function Sidebar() {
               to={item.path}
               className={location.pathname === item.path ? 'active' : ''}
             >
-              <span>{item.icon}</span>
-              <span>{item.label}</span>
+              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-label">{item.label}</span>
             </Link>
           </li>
         ))}
@@ -53,16 +70,16 @@ function App() {
       <div className="app">
         <Sidebar />
         <div className="main-content">
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/signals" element={<Signals />} />
-            <Route path="/trades" element={<Trades />} />
-            <Route path="/metar" element={<METAR />} />
-            <Route path="/intelligence" element={<Intelligence />} />
-            <Route path="/explorer" element={<Explorer />} />
-            <Route path="/sports" element={<SportsIntelligence />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
+          <ErrorBoundary>
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/markets" element={<Markets />} />
+              <Route path="/markets/:industry" element={<Markets />} />
+              <Route path="/performance" element={<Performance />} />
+              <Route path="/trades" element={<Trades />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </ErrorBoundary>
           
           <div className="footer">
             Powered by Claude + OpenClaw + Actual Intelligence

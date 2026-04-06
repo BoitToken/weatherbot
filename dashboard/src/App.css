@@ -306,3 +306,134 @@ tr:hover {
   border-top: 1px solid var(--border);
   margin-top: 64px;
 }
+
+/* Trades Dashboard Specific */
+.trades-table-desktop {
+  display: table;
+}
+
+.trades-cards-mobile {
+  display: none;
+}
+
+.trade-card {
+  transition: all 0.2s;
+}
+
+.trade-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+/* ═══ MOBILE RESPONSIVE ═══ */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    bottom: 0;
+    top: auto;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: 70px;
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    padding: 8px 0;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    z-index: 100;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: var(--bg-secondary);
+  }
+  .sidebar-logo { display: none; }
+  .sidebar-nav {
+    display: flex;
+    width: 100%;
+    justify-content: space-evenly;
+    align-items: center;
+    padding: 0;
+    margin: 0;
+    gap: 4px;
+  }
+  .sidebar-nav li { 
+    margin: 0;
+    flex: 1;
+    display: flex;
+    justify-content: center;
+  }
+  .sidebar-nav a {
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 12px;
+    font-size: 11px;
+    text-align: center;
+    border-left: none !important;
+    min-width: 64px;
+    border-radius: 10px;
+    transition: all 0.2s;
+  }
+  .sidebar-nav a .nav-icon { 
+    font-size: 24px;
+    display: block;
+  }
+  .sidebar-nav a .nav-label {
+    display: block;
+    font-weight: 600;
+  }
+  .sidebar-nav a.active {
+    border-left: none;
+    border-bottom: none;
+    background: rgba(124, 58, 237, 0.15);
+    color: var(--accent-purple);
+  }
+  .sidebar-nav a:hover {
+    background: rgba(124, 58, 237, 0.1);
+  }
+  .main-content {
+    margin-left: 0;
+    padding: 16px;
+    padding-bottom: 80px;
+    max-width: 100%;
+  }
+  .page-title { font-size: 22px; }
+  .page-subtitle { font-size: 13px; }
+  .card-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .card { padding: 16px; }
+  .card-value { font-size: 28px; }
+  .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { min-width: 600px; }
+  th, td { padding: 10px 12px; font-size: 13px; }
+  .btn { padding: 12px 16px; min-height: 44px; }
+  .page-header { margin-bottom: 16px; }
+}
+@media (max-width: 480px) {
+  .card-value { font-size: 24px; }
+  .page-title { font-size: 20px; }
+  .main-content { padding: 12px; padding-bottom: 76px; }
+}
+
+/* Mobile: Hide desktop table, show cards */
+@media (max-width: 768px) {
+  .trades-table-desktop {
+    display: none !important;
+  }
+  
+  .trades-cards-mobile {
+    display: block;
+  }
+}
+
+/* Desktop: Show table, hide cards */
+@media (min-width: 769px) {
+  .trades-table-desktop {
+    display: table !important;
+  }
+  
+  .trades-cards-mobile {
+    display: none !important;
+  }
+}

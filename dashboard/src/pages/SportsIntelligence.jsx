@@ -55,7 +55,7 @@ function SportsIntelligence() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {['overview', 'arbitrage', 'live', 'signals'].map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             style={{ padding: '8px 16px', borderRadius: 8, border: activeTab === tab ? '1px solid #F59E0B' : '1px solid var(--border)',

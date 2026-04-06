@@ -61,6 +61,33 @@ async def scheduled_signal_scan():
         logger.error(f"❌ Signal scan failed: {e}\n{traceback.format_exc()}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# SPORTS INTELLIGENCE — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_sports_loop = None
+_last_sports_scan: Optional[datetime] = None
+
+
+async def scheduled_sports_scan():
+    """Run sports intelligence cycle on schedule."""
+    global _last_sports_scan, _sports_loop
+    try:
+        if _sports_loop is None:
+            # Initialize on first run
+            from src.sports.sports_signal_loop import SportsSignalLoop
+            async_pool = get_async_pool()
+            _sports_loop = SportsSignalLoop(async_pool)
+            logger.info("✅ Sports signal loop initialized")
+        
+        logger.info("⏰ Scheduled sports scan starting...")
+        result = await _sports_loop.run_once()
+        _last_sports_scan = datetime.utcnow()
+        logger.info(f"✅ Sports scan complete: {result}")
+    except Exception as e:
+        logger.error(f"❌ Sports scan failed: {e}\n{traceback.format_exc()}")
+# ═══════════════════════════════════════════════════════════════
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
@@ -118,8 +145,14 @@ async def lifespan(app: FastAPI):
     # Start scheduler
     scheduler.add_job(scheduled_data_scan, 'interval', minutes=30, id='data_loop', replace_existing=True)
     scheduler.add_job(scheduled_signal_scan, 'interval', minutes=5, id='signal_loop', replace_existing=True)
+    
+    # ═══════════════════════════════════════════════════════════════
+    # SPORTS INTELLIGENCE — Scheduled Jobs
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_sports_scan, 'interval', minutes=3, id='sports_loop', replace_existing=True)
+    
     scheduler.start()
-    logger.info("✅ Scheduler started (data: 30min, signals: 5min)")
+    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min)")
     logger.info("✅ WeatherBot ready")
 
     yield
@@ -1117,6 +1150,306 @@ async def get_intelligence_dashboard():
     except Exception as e:
         logger.error(f"Intelligence dashboard error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# PERFORMANCE — CEO Command Center Endpoints
+# =============================================================================
+
+@app.get("/api/performance/strategies")
+async def get_performance_strategies():
+    """Returns all strategies with their signal stats."""
+    try:
+        # Sports strategies from sports_signals
+        sports_cross_odds = await fetch_one("""
+            SELECT COUNT(*) as signal_count,
+                   AVG(edge_pct) as avg_edge,
+                   COUNT(CASE WHEN signal = 'BUY' OR signal LIKE 'BUY%' THEN 1 END) as buy_count,
+                   COUNT(CASE WHEN signal = 'SELL' OR signal LIKE 'SELL%' THEN 1 END) as sell_count,
+                   MAX(created_at) as last_signal_time,
+                   string_agg(DISTINCT sport, ', ' ORDER BY sport) as sports_covered
+            FROM sports_signals
+            WHERE edge_type = 'cross_odds'
+        """)
+        
+        sports_logical_arb = await fetch_one("""
+            SELECT COUNT(*) as signal_count,
+                   AVG(edge_pct) as avg_edge,
+                   COUNT(CASE WHEN signal = 'BUY' OR signal LIKE 'BUY%' THEN 1 END) as buy_count,
+                   COUNT(CASE WHEN signal = 'SELL' OR signal LIKE 'SELL%' THEN 1 END) as sell_count,
+                   MAX(created_at) as last_signal_time,
+                   string_agg(DISTINCT sport, ', ' ORDER BY sport) as sports_covered
+            FROM sports_signals
+            WHERE edge_type = 'logical_arb'
+        """)
+        
+        # Weather strategies from signals table
+        forecast_edge = await fetch_one("""
+            SELECT COUNT(*) as signal_count,
+                   AVG(edge) as avg_edge,
+                   COUNT(CASE WHEN side = 'YES' THEN 1 END) as buy_count,
+                   COUNT(CASE WHEN side = 'NO' THEN 1 END) as sell_count,
+                   MAX(created_at) as last_signal_time
+            FROM signals
+            WHERE strategy = 'forecast_edge'
+        """)
+        
+        intelligence_layer = await fetch_one("""
+            SELECT COUNT(*) as signal_count,
+                   AVG(edge) as avg_edge,
+                   COUNT(CASE WHEN side = 'YES' THEN 1 END) as buy_count,
+                   COUNT(CASE WHEN side = 'NO' THEN 1 END) as sell_count,
+                   MAX(created_at) as last_signal_time
+            FROM signals
+            WHERE strategy = 'intelligence_layer'
+        """)
+        
+        strategies = [
+            {
+                "id": "cross_odds",
+                "name": "Cross-Odds Arbitrage",
+                "emoji": "⚡",
+                "description": "DraftKings vs Polymarket price discrepancies",
+                "signal_count": sports_cross_odds.get('signal_count', 0) if sports_cross_odds else 0,
+                "avg_edge": float(sports_cross_odds.get('avg_edge', 0) or 0) if sports_cross_odds else 0,
+                "buy_count": sports_cross_odds.get('buy_count', 0) if sports_cross_odds else 0,
+                "sell_count": sports_cross_odds.get('sell_count', 0) if sports_cross_odds else 0,
+                "last_signal_time": str(sports_cross_odds.get('last_signal_time', '')) if sports_cross_odds and sports_cross_odds.get('last_signal_time') else None,
+                "sports_covered": (sports_cross_odds.get('sports_covered', '') or '').split(', ') if sports_cross_odds and sports_cross_odds.get('sports_covered') else [],
+                "status": "active"
+            },
+            {
+                "id": "logical_arb",
+                "name": "Logical Arbitrage",
+                "emoji": "🔗",
+                "description": "Group overpricing (e.g., Stanley Cup teams > 100%)",
+                "signal_count": sports_logical_arb.get('signal_count', 0) if sports_logical_arb else 0,
+                "avg_edge": float(sports_logical_arb.get('avg_edge', 0) or 0) if sports_logical_arb else 0,
+                "buy_count": sports_logical_arb.get('buy_count', 0) if sports_logical_arb else 0,
+                "sell_count": sports_logical_arb.get('sell_count', 0) if sports_logical_arb else 0,
+                "last_signal_time": str(sports_logical_arb.get('last_signal_time', '')) if sports_logical_arb and sports_logical_arb.get('last_signal_time') else None,
+                "sports_covered": (sports_logical_arb.get('sports_covered', '') or '').split(', ') if sports_logical_arb and sports_logical_arb.get('sports_covered') else [],
+                "status": "active"
+            },
+            {
+                "id": "forecast_edge",
+                "name": "Forecast Edge",
+                "emoji": "🌡️",
+                "description": "Weather model predictions vs market prices",
+                "signal_count": forecast_edge.get('signal_count', 0) if forecast_edge else 0,
+                "avg_edge": float(forecast_edge.get('avg_edge', 0) or 0) if forecast_edge else 0,
+                "buy_count": forecast_edge.get('buy_count', 0) if forecast_edge else 0,
+                "sell_count": forecast_edge.get('sell_count', 0) if forecast_edge else 0,
+                "last_signal_time": str(forecast_edge.get('last_signal_time', '')) if forecast_edge and forecast_edge.get('last_signal_time') else None,
+                "sports_covered": ["Weather"],
+                "status": "active"
+            },
+            {
+                "id": "intelligence_layer",
+                "name": "8-Gate Intelligence",
+                "emoji": "🧠",
+                "description": "Multi-source convergence + Claude analysis",
+                "signal_count": intelligence_layer.get('signal_count', 0) if intelligence_layer else 0,
+                "avg_edge": float(intelligence_layer.get('avg_edge', 0) or 0) if intelligence_layer else 0,
+                "buy_count": intelligence_layer.get('buy_count', 0) if intelligence_layer else 0,
+                "sell_count": intelligence_layer.get('sell_count', 0) if intelligence_layer else 0,
+                "last_signal_time": str(intelligence_layer.get('last_signal_time', '')) if intelligence_layer and intelligence_layer.get('last_signal_time') else None,
+                "sports_covered": ["Weather"],
+                "status": "active"
+            },
+            {
+                "id": "live_momentum",
+                "name": "Live Momentum",
+                "emoji": "🏃",
+                "description": "Real-time event tracking + price movements",
+                "signal_count": 0,
+                "avg_edge": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "last_signal_time": None,
+                "sports_covered": [],
+                "status": "coming_soon"
+            }
+        ]
+        
+        return {"strategies": strategies, "count": len(strategies)}
+    except Exception as e:
+        logger.error(f"Performance strategies error: {e}")
+        return {"strategies": [], "count": 0}
+
+
+@app.get("/api/performance/signals/timeline")
+async def get_signals_timeline():
+    """Signal generation over time (hourly for 24h)."""
+    try:
+        # Hourly buckets for last 24 hours
+        query = """
+            SELECT
+                DATE_TRUNC('hour', created_at) as time_bucket,
+                COUNT(CASE WHEN edge_type = 'cross_odds' THEN 1 END) as cross_odds_count,
+                COUNT(CASE WHEN edge_type = 'logical_arb' THEN 1 END) as logical_arb_count,
+                COUNT(*) as total
+            FROM sports_signals
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY time_bucket
+            ORDER BY time_bucket ASC
+        """
+        results = await fetch_all(query)
+        
+        buckets = [{
+            "time": str(r['time_bucket']),
+            "cross_odds_count": r['cross_odds_count'],
+            "logical_arb_count": r['logical_arb_count'],
+            "total": r['total']
+        } for r in results]
+        
+        return {"buckets": buckets, "count": len(buckets)}
+    except Exception as e:
+        logger.error(f"Signals timeline error: {e}")
+        return {"buckets": [], "count": 0}
+
+
+@app.get("/api/performance/signals/latest")
+async def get_latest_signals_feed(limit: int = 50):
+    """Latest 50 signals with full detail for live feed."""
+    try:
+        query = """
+            SELECT
+                id, edge_type, sport, market_id, market_title,
+                polymarket_price, fair_value,
+                edge_pct, signal, confidence,
+                reasoning, created_at
+            FROM sports_signals
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
+        
+        signals = [{
+            "id": r['id'],
+            "strategy": "Cross-Odds" if r['edge_type'] == 'cross_odds' else "Logical Arb",
+            "sport": r['sport'],
+            "market_id": r['market_id'],
+            "market_title": r['market_title'],
+            "polymarket_price": float(r['polymarket_price']) if r['polymarket_price'] else 0,
+            "fair_value": float(r['fair_value']) if r['fair_value'] else 0,
+            "edge": float(r['edge_pct']) if r['edge_pct'] else 0,
+            "side": r['signal'] or 'HOLD',
+            "confidence": r['confidence'] or 'MEDIUM',
+            "reasoning": r['reasoning'],
+            "created_at": str(r['created_at'])
+        } for r in results]
+        
+        return {"signals": signals, "count": len(signals)}
+    except Exception as e:
+        logger.error(f"Latest signals error: {e}")
+        return {"signals": [], "count": 0}
+
+
+@app.get("/api/performance/edge-distribution")
+async def get_edge_distribution():
+    """Edge % distribution for histogram."""
+    try:
+        query = """
+            SELECT
+                CASE
+                    WHEN edge_pct < 5 THEN '0-5%'
+                    WHEN edge_pct < 10 THEN '5-10%'
+                    WHEN edge_pct < 15 THEN '10-15%'
+                    WHEN edge_pct < 20 THEN '15-20%'
+                    ELSE '20%+'
+                END as range,
+                COUNT(*) as count
+            FROM sports_signals
+            GROUP BY range
+            ORDER BY
+                CASE range
+                    WHEN '0-5%' THEN 1
+                    WHEN '5-10%' THEN 2
+                    WHEN '10-15%' THEN 3
+                    WHEN '15-20%' THEN 4
+                    ELSE 5
+                END
+        """
+        results = await fetch_all(query)
+        
+        buckets = [{
+            "range": r['range'],
+            "count": r['count']
+        } for r in results]
+        
+        return {"buckets": buckets, "count": len(buckets)}
+    except Exception as e:
+        logger.error(f"Edge distribution error: {e}")
+        return {"buckets": [], "count": 0}
+
+
+@app.get("/api/performance/sports-breakdown")
+async def get_sports_breakdown():
+    """Signals grouped by sport."""
+    try:
+        query = """
+            SELECT
+                sport,
+                COUNT(*) as signals,
+                AVG(edge_pct) as avg_edge,
+                COUNT(DISTINCT market_id) as markets
+            FROM sports_signals
+            GROUP BY sport
+            ORDER BY signals DESC
+        """
+        results = await fetch_all(query)
+        
+        sports = [{
+            "sport": r['sport'],
+            "signals": r['signals'],
+            "avg_edge": round(float(r['avg_edge'] or 0), 2),
+            "markets": r['markets']
+        } for r in results]
+        
+        return {"sports": sports, "count": len(sports)}
+    except Exception as e:
+        logger.error(f"Sports breakdown error: {e}")
+        return {"sports": [], "count": 0}
+
+
+@app.get("/api/performance/odds-comparison")
+async def get_odds_comparison(limit: int = 50):
+    """Sportsbook vs Polymarket comparison for matched markets."""
+    try:
+        # Join sportsbook_odds with sports_markets to find matches
+        query = """
+            SELECT DISTINCT ON (sm.market_id)
+                sm.market_id,
+                sm.question as event,
+                sm.sport,
+                sm.yes_price as polymarket_price,
+                so.odds_decimal as book_odds,
+                so.bookmaker as book_name,
+                ABS((1.0 / NULLIF(so.odds_decimal, 0)) - sm.yes_price) * 100 as edge_pct
+            FROM sports_markets sm
+            INNER JOIN sportsbook_odds so ON sm.question ILIKE '%' || so.event_name || '%'
+            WHERE sm.yes_price IS NOT NULL
+              AND so.odds_decimal IS NOT NULL
+              AND so.odds_decimal > 0
+            ORDER BY sm.market_id, ABS((1.0 / NULLIF(so.odds_decimal, 0)) - sm.yes_price) DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
+        
+        comparisons = [{
+            "event": r['event'],
+            "polymarket_price": round(float(r['polymarket_price']), 3),
+            "book_price": round(1.0 / float(r['book_odds']) if r['book_odds'] > 0 else 0, 3),
+            "book_name": r['book_name'],
+            "edge": round(float(r['edge_pct']), 2),
+            "sport": r['sport']
+        } for r in results]
+        
+        return {"comparisons": comparisons, "count": len(comparisons)}
+    except Exception as e:
+        logger.error(f"Odds comparison error: {e}")
+        return {"comparisons": [], "count": 0}
 
 
 # =============================================================================

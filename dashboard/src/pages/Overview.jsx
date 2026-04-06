@@ -48,7 +48,7 @@ function Overview() {
     return <div className="loading">Loading...</div>
   }
 
-  const pnlChartData = dailyPnl.map(d => ({
+  const pnlChartData = (Array.isArray(dailyPnl) ? dailyPnl : []).map(d => ({
     date: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
     pnl: d.total_pnl
   })).reverse()
@@ -169,7 +169,7 @@ function Overview() {
               </tr>
             </thead>
             <tbody>
-              {activeTrades.map((trade) => (
+              {(Array.isArray(activeTrades) ? activeTrades : []).map((trade) => (
                 <tr key={trade.id}>
                   <td>{trade.city}</td>
                   <td><span className="badge">{trade.side}</span></td>

@@ -117,19 +117,20 @@ class ESPNLiveScores:
         try:
             async with self.db_pool.acquire() as conn:
                 # Search for markets mentioning these teams
+                home_pattern = f'%{home_team}%'
+                away_pattern = f'%{away_team}%'
+                
                 rows = await conn.fetch("""
                     SELECT market_id FROM sports_markets
                     WHERE sport = $1
                     AND (
                         question ILIKE $2
                         OR question ILIKE $3
-                        OR team_a ILIKE $2
-                        OR team_a ILIKE $3
-                        OR team_b ILIKE $2
-                        OR team_b ILIKE $3
+                        OR (team_a IS NOT NULL AND (team_a ILIKE $2 OR team_a ILIKE $3))
+                        OR (team_b IS NOT NULL AND (team_b ILIKE $2 OR team_b ILIKE $3))
                     )
                     AND is_active = true
-                """, sport, f'%{home_team}%', f'%{away_team}%')
+                """, sport, home_pattern, away_pattern)
                 
                 return [row['market_id'] for row in rows]
         except Exception as e:
@@ -180,3 +181,97 @@ class ESPNLiveScores:
         
         logger.info(f"✅ Updated {total_updated} live events")
         return total_updated
+    
+    async def detect_momentum_signals(self) -> List[Dict]:
+        """
+        Detect score changes in live games and check if Polymarket markets adjusted.
+        If score changes significantly but price hasn't moved, emit signal.
+        """
+        signals = []
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Get live events with recent score changes
+                rows = await conn.fetch("""
+                    WITH recent_scores AS (
+                        SELECT DISTINCT ON (event_id)
+                            event_id, home_score, away_score, last_updated,
+                            LAG(home_score) OVER (PARTITION BY event_id ORDER BY last_updated) as prev_home,
+                            LAG(away_score) OVER (PARTITION BY event_id ORDER BY last_updated) as prev_away
+                        FROM live_events
+                        WHERE status = 'in'
+                        AND last_updated > NOW() - INTERVAL '15 minutes'
+                        ORDER BY event_id, last_updated DESC
+                    )
+                    SELECT 
+                        e.sport, e.event_id, e.home_team, e.away_team,
+                        e.home_score, e.away_score, e.linked_market_ids,
+                        s.prev_home, s.prev_away
+                    FROM live_events e
+                    JOIN recent_scores s ON e.event_id = s.event_id
+                    WHERE e.status = 'in'
+                    AND (e.home_score != s.prev_home OR e.away_score != s.prev_away)
+                    AND e.linked_market_ids IS NOT NULL
+                    AND array_length(e.linked_market_ids, 1) > 0
+                """)
+                
+                for row in rows:
+                    home_score = row['home_score']
+                    away_score = row['away_score']
+                    prev_home = row['prev_home'] or 0
+                    prev_away = row['prev_away'] or 0
+                    
+                    # Calculate momentum shift
+                    home_momentum = home_score - prev_home
+                    away_momentum = away_score - prev_away
+                    
+                    # Determine which team has momentum
+                    if home_momentum > away_momentum:
+                        momentum_team = row['home_team']
+                        momentum_shift = home_momentum
+                    else:
+                        momentum_team = row['away_team']
+                        momentum_shift = away_momentum
+                    
+                    # Check linked Polymarket markets
+                    market_ids = row['linked_market_ids']
+                    
+                    for market_id in market_ids:
+                        # Get current and previous Polymarket price
+                        market_data = await conn.fetchrow("""
+                            SELECT question, yes_price, last_updated
+                            FROM sports_markets
+                            WHERE market_id = $1
+                        """, market_id)
+                        
+                        if not market_data:
+                            continue
+                        
+                        # If market is about the momentum team winning
+                        if momentum_team.lower() in market_data['question'].lower():
+                            # Check if price has moved in last 5 minutes
+                            # (We'd need historical price tracking for this)
+                            # For now, we'll signal if momentum is strong
+                            
+                            if momentum_shift >= 2:  # At least 2 points scored
+                                signals.append({
+                                    'edge_type': 'momentum',
+                                    'sport': row['sport'],
+                                    'market_id': market_id,
+                                    'market_title': market_data['question'],
+                                    'group_id': None,
+                                    'polymarket_price': float(market_data['yes_price'] or 0.5),
+                                    'fair_value': None,  # Unknown fair value
+                                    'edge_pct': None,
+                                    'signal': 'BUY',  # Buy the team with momentum
+                                    'confidence': 'LOW',  # Momentum can reverse
+                                    'reasoning': f"{momentum_team} scored {momentum_shift} point(s) recently in live game. Score now {home_score}-{away_score}. Market may not have adjusted yet.",
+                                    'data_sources': {'espn_live_scores': True},
+                                })
+            
+            logger.info(f"  ✅ Found {len(signals)} momentum signals")
+        
+        except Exception as e:
+            logger.error(f"Failed to detect momentum signals: {e}")
+        
+        return signals

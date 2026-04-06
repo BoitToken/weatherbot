@@ -46,14 +46,22 @@ class SportsSignalLoop:
             correlation_signals = await self.correlation.run_all_checks()
             logger.info(f"  ✅ Found {len(correlation_signals)} correlation signals")
             
-            # Step 4: Run cross-odds engine
+            # Step 4: Run cross-odds engine (includes sportsbook comparison + line movement)
             cross_odds_signals = await self.cross_odds.run_analysis()
             logger.info(f"  ✅ Found {len(cross_odds_signals)} cross-odds signals")
             
-            # Step 5: Store all signals in DB
-            all_signals = correlation_signals + cross_odds_signals
+            # Step 5: Detect momentum signals from live scores
+            momentum_signals = await self.espn.detect_momentum_signals()
+            logger.info(f"  ✅ Found {len(momentum_signals)} momentum signals")
+            
+            # Step 6: Store all signals in DB
+            all_signals = correlation_signals + cross_odds_signals + momentum_signals
             stored_count = await self.store_signals(all_signals)
             logger.info(f"  ✅ Stored {stored_count} signals")
+            
+            # Step 7: Create paper trades for high-confidence signals
+            trades_created = await self.create_paper_trades(all_signals)
+            logger.info(f"  ✅ Created {trades_created} paper trades")
             
             elapsed = (datetime.utcnow() - start_time).total_seconds()
             logger.info(f"✅ Sports signal loop complete ({elapsed:.1f}s)")
@@ -63,6 +71,7 @@ class SportsSignalLoop:
                 'live_events_updated': events_count,
                 'signals_generated': len(all_signals),
                 'signals_stored': stored_count,
+                'paper_trades_created': trades_created,
                 'elapsed_seconds': elapsed,
             }
         except Exception as e:
@@ -107,3 +116,81 @@ class SportsSignalLoop:
             logger.error(f"Failed to store signals: {e}")
         
         return stored
+    
+    async def create_paper_trades(self, signals: list) -> int:
+        """
+        Create paper trades for high-confidence sports signals.
+        Uses shared src/execution/paper_trader.py.
+        """
+        trades_created = 0
+        
+        try:
+            # Import paper trader
+            import sys
+            import os
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from execution.paper_trader import PaperTrader
+            
+            trader = PaperTrader(self.db_pool)
+            
+            for signal in signals:
+                # Only trade high-confidence signals
+                if signal.get('confidence') != 'HIGH':
+                    continue
+                
+                # Skip if no clear edge
+                edge_pct = signal.get('edge_pct')
+                if edge_pct is None or abs(edge_pct) < 5:
+                    continue
+                
+                # Determine position size based on edge and confidence
+                position_size = 100  # Base size in USD
+                if abs(edge_pct) > 10:
+                    position_size = 200  # Larger for bigger edges
+                
+                # Create paper trade
+                trade_signal = signal.get('signal', 'BUY')
+                
+                if trade_signal in ['BUY', 'SELL']:
+                    side = 'BUY' if trade_signal == 'BUY' else 'SELL'
+                    
+                    await trader.create_trade(
+                        market_id=signal.get('market_id'),
+                        side=side,
+                        amount_usd=position_size,
+                        price=signal.get('polymarket_price', 0.5),
+                        source='sports',
+                        strategy=signal.get('edge_type', 'unknown'),
+                        metadata={
+                            'signal': signal.get('signal'),
+                            'confidence': signal.get('confidence'),
+                            'edge_pct': edge_pct,
+                            'reasoning': signal.get('reasoning'),
+                        }
+                    )
+                    
+                    trades_created += 1
+                
+                elif trade_signal == 'BUY_BOTH':
+                    # Binary arbitrage: buy both YES and NO
+                    await trader.create_trade(
+                        market_id=signal.get('market_id'),
+                        side='BUY',
+                        amount_usd=position_size / 2,
+                        price=signal.get('polymarket_price', 0.5),
+                        source='sports',
+                        strategy='binary_arb',
+                        metadata={'reasoning': signal.get('reasoning')}
+                    )
+                    
+                    # Buy NO side too (would need NO price)
+                    # For now, just log
+                    logger.info(f"  Binary arb opportunity: {signal.get('market_title')}")
+                    trades_created += 1
+        
+        except ImportError:
+            logger.warning("⚠️ PaperTrader not found - skipping paper trade creation")
+        except Exception as e:
+            logger.error(f"Failed to create paper trades: {e}")
+        
+        return trades_created

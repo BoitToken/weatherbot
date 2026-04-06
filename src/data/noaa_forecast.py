@@ -4,6 +4,7 @@ Primary forecast source for Strategy A (Forecast Edge)
 Fetches from api.weather.gov gridpoints endpoint
 """
 import httpx
+import json
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
@@ -244,7 +245,7 @@ async def store_noaa_forecast(forecast: Dict, db_pool) -> bool:
                 forecast.get("forecast_low_f"),
                 forecast["confidence"],
                 forecast["source"],
-                forecast  # Store entire forecast as JSONB
+                json.dumps({k: v for k, v in forecast.items() if k != '_cached_at'}, default=str)  # JSONB-safe
             )
         return True
     except Exception as e:
