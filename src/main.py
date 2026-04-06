@@ -64,7 +64,7 @@ async def scheduled_signal_scan():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
-    global _last_data_scan, _startup_time, _signal_loop
+    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine
 
     logger.info("🚀 WeatherBot starting...")
     _startup_time = datetime.utcnow()
@@ -611,7 +611,154 @@ async def get_price_history(condition_id: str, interval: str = "1h", fidelity: i
 
 
 # =============================================================================
-# Intelligence & Improvement — NEW ENDPOINTS
+# Intelligence Data — Forecasts, Historical, Combined View
+# =============================================================================
+
+@app.get("/api/intelligence/forecast/{icao}")
+async def get_forecast(icao: str):
+    """Get Open-Meteo forecast for a station."""
+    from src.data.openmeteo import fetch_forecast
+    try:
+        result = await fetch_forecast(icao.upper())
+        if not result:
+            raise HTTPException(status_code=404, detail=f"No forecast data for {icao}")
+        return {"station": icao.upper(), **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/intelligence/forecasts")
+async def get_all_forecasts():
+    """Get Open-Meteo forecasts for all tracked stations."""
+    from src.data.openmeteo import fetch_all_forecasts, CITY_COORDS
+    try:
+        stations = list(CITY_COORDS.keys())
+        results = await fetch_all_forecasts(stations)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/intelligence/historical/{icao}")
+async def get_historical(icao: str):
+    """Get historical temperature pattern for a station."""
+    from src.data.historical import fetch_historical_pattern
+    from datetime import datetime
+    try:
+        result = await fetch_historical_pattern(icao.upper(), datetime.utcnow())
+        if not result:
+            raise HTTPException(status_code=404, detail=f"No historical data for {icao}")
+        return {"station": icao.upper(), **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/intelligence/dashboard")
+async def get_intelligence_dashboard():
+    """Combined intelligence view — METAR + forecasts + trends + comparison.
+    Returns all data needed for the Intelligence dashboard page."""
+    from src.data.openmeteo import fetch_forecast, CITY_COORDS
+    from src.data.city_map import CITY_TO_ICAO
+    import asyncio
+    
+    try:
+        # Get latest METAR data
+        metar_data = await fetch_all("""SELECT DISTINCT ON (station_icao)
+            station_icao, temperature_c, dewpoint_c, wind_speed_kt, wind_dir,
+            observation_time, created_at
+            FROM metar_readings ORDER BY station_icao, observation_time DESC""")
+        
+        # Get temperature trends
+        trends = await fetch_all("""SELECT DISTINCT ON (station_icao)
+            station_icao, trend_per_hour, projected_high, projected_low, confidence, num_readings
+            FROM temperature_trends ORDER BY station_icao, calculated_at DESC""")
+        trend_map = {t['station_icao']: t for t in trends}
+        
+        # Get Open-Meteo forecasts for top 10 stations (to keep response fast)
+        top_stations = [m['station_icao'] for m in metar_data[:10]]
+        forecasts = {}
+        for icao in top_stations:
+            try:
+                f = await fetch_forecast(icao)
+                if f:
+                    forecasts[icao] = f
+            except:
+                pass
+        
+        # Build combined view per station
+        stations = []
+        for m in metar_data:
+            icao = m['station_icao']
+            trend = trend_map.get(icao, {})
+            forecast = forecasts.get(icao, {})
+            
+            # Calculate data convergence (Gate 1 preview)
+            metar_temp = m.get('temperature_c', 0)
+            forecast_high = forecast.get('forecast_high_c')
+            trend_projected = trend.get('projected_high')
+            
+            sources_agree = 0
+            total_sources = 1  # METAR always counts
+            if forecast_high is not None:
+                total_sources += 1
+                if abs(forecast_high - metar_temp) < 5:  # Within 5°C
+                    sources_agree += 1
+            if trend_projected is not None:
+                total_sources += 1
+                if abs(trend_projected - metar_temp) < 5:
+                    sources_agree += 1
+            
+            stations.append({
+                'station_icao': icao,
+                'metar': {
+                    'temperature_c': metar_temp,
+                    'dewpoint_c': m.get('dewpoint_c'),
+                    'wind_speed_kt': m.get('wind_speed_kt'),
+                    'wind_dir': m.get('wind_dir'),
+                    'observation_time': str(m.get('observation_time', '')),
+                },
+                'trend': {
+                    'per_hour': trend.get('trend_per_hour'),
+                    'projected_high': trend.get('projected_high'),
+                    'projected_low': trend.get('projected_low'),
+                    'confidence': trend.get('confidence'),
+                },
+                'forecast': {
+                    'high_c': forecast_high,
+                    'low_c': forecast.get('forecast_low_c'),
+                    'hourly_temps': forecast.get('hourly_temps', [])[:12],
+                    'precip_probs': forecast.get('precipitation_probs', [])[:12],
+                },
+                'convergence': {
+                    'sources_agree': sources_agree,
+                    'total_sources': total_sources,
+                    'status': 'high' if sources_agree >= 2 else 'medium' if sources_agree == 1 else 'low',
+                },
+            })
+        
+        # Get signal count and recent activity
+        signal_count = await fetch_all("SELECT COUNT(*) as count FROM signals")
+        trade_count = await fetch_all("SELECT COUNT(*) as count FROM trades")
+        
+        return {
+            'stations': stations,
+            'station_count': len(stations),
+            'signal_count': signal_count[0]['count'] if signal_count else 0,
+            'trade_count': trade_count[0]['count'] if trade_count else 0,
+            'forecast_count': len(forecasts),
+            'trend_count': len(trends),
+        }
+    except Exception as e:
+        logger.error(f"Intelligence dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Intelligence & Improvement — Analysis Endpoints
 # =============================================================================
 
 @app.get("/api/intelligence/daily")
