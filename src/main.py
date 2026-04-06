@@ -257,16 +257,29 @@ async def get_active_markets():
 # =============================================================================
 
 @app.get("/api/signals")
-async def get_signals(limit: int = 50):
-    query = """
-        SELECT id, market_id, station_icao, city, side,
-               our_probability, market_price, edge, confidence,
-               claude_reasoning, was_traded, skip_reason, created_at
-        FROM signals
-        ORDER BY created_at DESC
-        LIMIT %s
-    """
-    results = await fetch_all(query, (limit,))
+async def get_signals(limit: int = 50, strategy: str = None):
+    """Get signals, optionally filtered by strategy"""
+    if strategy:
+        query = """
+            SELECT id, market_id, station_icao, city, side,
+                   our_probability, market_price, edge, confidence,
+                   claude_reasoning, was_traded, skip_reason, strategy, created_at
+            FROM signals
+            WHERE strategy = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (strategy, limit))
+    else:
+        query = """
+            SELECT id, market_id, station_icao, city, side,
+                   our_probability, market_price, edge, confidence,
+                   claude_reasoning, was_traded, skip_reason, strategy, created_at
+            FROM signals
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
     return {"data": results, "count": len(results)}
 
 
@@ -275,13 +288,138 @@ async def get_pending_signals():
     query = """
         SELECT id, market_id, station_icao, city, side,
                our_probability, market_price, edge, confidence,
-               claude_reasoning, created_at
+               claude_reasoning, strategy, created_at
         FROM signals
-        WHERE was_traded = false AND confidence = 'HIGH'
+        WHERE was_traded = false AND confidence IN ('HIGH', 'MEDIUM')
         ORDER BY edge DESC
     """
     results = await fetch_all(query)
     return {"data": results, "count": len(results)}
+
+
+# =============================================================================
+# Dual Strategy Endpoints
+# =============================================================================
+
+@app.get("/api/strategy/comparison")
+async def get_strategy_comparison():
+    """Side-by-side performance comparison of Strategy A vs Strategy B"""
+    try:
+        # Get performance metrics for both strategies
+        query = """
+            SELECT
+                strategy,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(100.0 * SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) as win_rate,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                COALESCE(AVG(edge_at_entry), 0) as avg_edge,
+                COUNT(CASE WHEN status = 'open' THEN 1 END) as open_positions
+            FROM trades
+            WHERE strategy IN ('forecast_edge', 'intelligence_layer')
+            GROUP BY strategy
+        """
+        results = await fetch_all(query)
+        
+        # Format as dict
+        comparison = {
+            "forecast_edge": {
+                "name": "Strategy A: Forecast Edge",
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "avg_edge": 0,
+                "open_positions": 0
+            },
+            "intelligence_layer": {
+                "name": "Strategy B: Intelligence Layer",
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "avg_edge": 0,
+                "open_positions": 0
+            }
+        }
+        
+        for row in results:
+            strategy = row['strategy']
+            if strategy in comparison:
+                comparison[strategy].update({
+                    "total_trades": row['total_trades'],
+                    "wins": row['wins'],
+                    "losses": row['losses'],
+                    "win_rate": float(row['win_rate'] or 0),
+                    "total_pnl": float(row['total_pnl'] or 0),
+                    "avg_edge": float(row['avg_edge'] or 0),
+                    "open_positions": row['open_positions']
+                })
+        
+        return {
+            "strategies": comparison,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Strategy comparison error: {e}")
+        return {"strategies": {}, "error": str(e)}
+
+
+@app.get("/api/strategy/a/signals")
+async def get_strategy_a_signals(limit: int = 20):
+    """Latest Strategy A (Forecast Edge) signals"""
+    return await get_signals(limit=limit, strategy='forecast_edge')
+
+
+@app.get("/api/strategy/b/signals")
+async def get_strategy_b_signals(limit: int = 20):
+    """Latest Strategy B (Intelligence Layer) signals"""
+    return await get_signals(limit=limit, strategy='intelligence_layer')
+
+
+@app.get("/api/positions/open")
+async def get_open_positions():
+    """All open positions with current P/L"""
+    query = """
+        SELECT
+            p.id, p.market_id, p.market_title, p.city, p.strategy,
+            p.side, p.entry_price, p.current_price, p.size_usd,
+            p.entered_at,
+            CASE
+                WHEN p.side = 'YES' THEN (p.current_price - p.entry_price) * p.size_usd / p.entry_price
+                ELSE (p.entry_price - p.current_price) * p.size_usd / p.entry_price
+            END as unrealized_pnl,
+            w.yes_price, w.no_price
+        FROM positions p
+        LEFT JOIN weather_markets w ON p.market_id = w.market_id
+        WHERE p.status = 'open'
+        ORDER BY p.entered_at DESC
+    """
+    try:
+        results = await fetch_all(query)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Open positions error: {e}")
+        return {"data": [], "count": 0}
+
+
+@app.get("/api/noaa/forecast/{city}")
+async def get_noaa_forecast(city: str):
+    """Get NOAA forecast for a city"""
+    try:
+        from src.data.noaa_forecast import fetch_noaa_forecast
+        forecast = await fetch_noaa_forecast(city)
+        if not forecast:
+            raise HTTPException(status_code=404, detail=f"No NOAA forecast for {city} (may not be in US)")
+        return forecast
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"NOAA forecast error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================

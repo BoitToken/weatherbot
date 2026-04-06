@@ -15,6 +15,8 @@ function Intelligence() {
   const [selectedStation, setSelectedStation] = useState(null)
   const [stationForecast, setStationForecast] = useState(null)
   const [stationHistory, setStationHistory] = useState(null)
+  const [strategyComparison, setStrategyComparison] = useState(null)
+  const [openPositions, setOpenPositions] = useState([])
 
   useEffect(() => {
     fetchSignals()
@@ -24,9 +26,11 @@ function Intelligence() {
 
   const fetchSignals = async () => {
     try {
-      const [sigRes, dashRes] = await Promise.all([
+      const [sigRes, dashRes, compRes, posRes] = await Promise.all([
         axios.get('/api/intelligence/live-signals'),
-        axios.get('/api/intelligence/dashboard').catch(() => ({ data: null }))
+        axios.get('/api/intelligence/dashboard').catch(() => ({ data: null })),
+        axios.get('/api/strategy/comparison').catch(() => ({ data: null })),
+        axios.get('/api/positions/open').catch(() => ({ data: { data: [] } }))
       ])
       setSignals(sigRes.data.signals || [])
       setSummary({
@@ -35,6 +39,8 @@ function Intelligence() {
         arbitrage: sigRes.data.arbitrage || 0
       })
       if (dashRes.data) setDashData(dashRes.data)
+      if (compRes.data) setStrategyComparison(compRes.data.strategies)
+      setOpenPositions(posRes.data.data || [])
       setLastUpdate(new Date())
       setLoading(false)
     } catch (error) {

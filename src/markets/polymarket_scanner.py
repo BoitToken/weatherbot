@@ -45,6 +45,14 @@ class PolymarketScanner:
         'high of', 'low of', 'temperature in',  # Weather phrasing
     ]
     
+    # Temperature BUCKET market patterns (for Strategy A targeting)
+    BUCKET_PATTERNS = [
+        r'\d+\s*-\s*\d+\s*°?[FC]',  # "40-45°F" or "8-9°C"
+        r'between\s+\d+\s+and\s+\d+',  # "between 40 and 45"
+        r'high temperature be',  # "What will the high temperature be..."
+        r'temperature bucket',  # "NYC temperature bucket"
+    ]
+    
     def __init__(self, db_pool=None):
         self.db_pool = db_pool
         self.client = httpx.AsyncClient(timeout=30.0)
@@ -66,6 +74,18 @@ class PolymarketScanner:
         # Must contain weather keywords
         return any(kw in question_lower for kw in self.WEATHER_KEYWORDS)
     
+    def is_temp_bucket_market(self, question: str) -> bool:
+        """Check if market is specifically a temperature BUCKET market (for Strategy A)"""
+        import re
+        question_lower = question.lower()
+        
+        # Must match bucket patterns
+        for pattern in self.BUCKET_PATTERNS:
+            if re.search(pattern, question_lower, re.IGNORECASE):
+                return True
+        
+        return False
+    
     def _parse_market(self, raw: Dict) -> Optional[WeatherMarket]:
         """Parse raw CLOB API response into WeatherMarket"""
         try:
@@ -79,6 +99,18 @@ class PolymarketScanner:
             # Filter out non-weather markets
             if not self.is_weather_market(question):
                 return None
+            
+            # Tag if it's a bucket market (important for Strategy A)
+            is_bucket = self.is_temp_bucket_market(question)
+            if 'metadata' not in raw:
+                raw['metadata'] = {}
+            elif isinstance(raw['metadata'], str):
+                import json
+                try:
+                    raw['metadata'] = json.loads(raw['metadata'])
+                except:
+                    raw['metadata'] = {}
+            raw['metadata']['is_bucket_market'] = is_bucket
             
             # Parse tokens array for YES/NO prices
             tokens = raw.get("tokens", [])

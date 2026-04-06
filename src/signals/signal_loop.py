@@ -73,12 +73,29 @@ class SignalLoop:
             except Exception as e:
                 logger.warning(f"Claude analyzer not available: {e}")
         
-        # Initialize Intelligence Layer (8-gate system)
+        # Initialize Intelligence Layer (8-gate system) - Strategy B
         self.intelligence = IntelligenceLayer(db_pool, config)
         logger.info("Intelligence layer initialized (8-gate pre-trade system)")
         
+        # Initialize Strategy A (Forecast Edge) - DUAL STRATEGY
+        try:
+            from .strategy_a import StrategyA
+            from ..data import noaa_forecast, openmeteo
+            self.strategy_a = StrategyA(
+                db_pool=db_pool,
+                noaa_module=noaa_forecast,
+                openmeteo_module=openmeteo,
+                polymarket_scanner=self.scanner
+            )
+            logger.info("✅ Strategy A (Forecast Edge) initialized")
+        except Exception as e:
+            logger.error(f"⚠️ Strategy A init failed: {e}")
+            self.strategy_a = None
+        
         self.running = False
         self.loop_count = 0
+        self.last_strategy_a_scan = None
+        self.last_strategy_b_scan = None
     
     async def refresh_markets(self) -> int:
         """
@@ -275,7 +292,7 @@ class SignalLoop:
         )
     
     async def run_once(self):
-        """Run one iteration of the signal loop"""
+        """Run one iteration of the signal loop - DUAL STRATEGY version"""
         self.loop_count += 1
         start_time = datetime.utcnow()
         
@@ -284,10 +301,107 @@ class SignalLoop:
         logger.info(f"Time: {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         logger.info(f"{'='*60}\n")
         
-        # Step 1: Refresh market prices
+        # Step 1: Refresh market prices (shared by both strategies)
         markets_updated = await self.refresh_markets()
         
-        # Step 2: Detect mismatches (uses latest METAR from DB)
+        # DUAL STRATEGY EXECUTION
+        # Strategy A: every 120 seconds
+        # Strategy B: every 300 seconds
+        
+        strategy_a_ran = False
+        strategy_b_ran = False
+        
+        # Run Strategy A if 120+ seconds have passed
+        if self.strategy_a is not None:
+            should_run_a = (
+                self.last_strategy_a_scan is None or 
+                (start_time - self.last_strategy_a_scan).total_seconds() >= 120
+            )
+            if should_run_a:
+                try:
+                    logger.info("🚨 Running Strategy A (Forecast Edge)...")
+                    await self.run_strategy_a()
+                    self.last_strategy_a_scan = start_time
+                    strategy_a_ran = True
+                except Exception as e:
+                    logger.error(f"Strategy A error: {e}")
+        
+        # Run Strategy B if 300+ seconds have passed
+        should_run_b = (
+            self.last_strategy_b_scan is None or 
+            (start_time - self.last_strategy_b_scan).total_seconds() >= 300
+        )
+        if should_run_b:
+            try:
+                logger.info("🧠 Running Strategy B (Intelligence Layer)...")
+                await self.run_strategy_b()
+                self.last_strategy_b_scan = start_time
+                strategy_b_ran = True
+            except Exception as e:
+                logger.error(f"Strategy B error: {e}")
+        
+        # Summary
+        elapsed = (datetime.utcnow() - start_time).total_seconds()
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Loop #{self.loop_count} Complete")
+        logger.info(f"  Markets scanned: {markets_updated}")
+        logger.info(f"  Strategy A ran: {strategy_a_ran}")
+        logger.info(f"  Strategy B ran: {strategy_b_ran}")
+        logger.info(f"  Duration: {elapsed:.1f}s")
+        logger.info(f"{'='*60}\n")
+    
+    async def run_strategy_a(self):
+        """Run Strategy A (Forecast Edge) scan"""
+        if not self.strategy_a:
+            return
+        
+        result = await self.strategy_a.run_scan()
+        
+        # Store signals in DB with strategy='forecast_edge'
+        for signal in result['signals']:
+            try:
+                async with self.db_pool.acquire() as conn:
+                    if signal['action'] == 'BUY':
+                        # Store BUY signal
+                        await conn.execute("""
+                            INSERT INTO signals (
+                                market_id, city, side, our_probability,
+                                market_price, edge, confidence, strategy,
+                                entry_price, exit_threshold, was_traded, created_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, NOW())
+                        """,
+                            signal['market_id'],
+                            signal['city'],
+                            signal['side'],
+                            signal['forecast']['confidence'],
+                            signal['entry_price'],
+                            signal['edge'],
+                            'MEDIUM',
+                            'forecast_edge',
+                            signal['entry_price'],
+                            0.45
+                        )
+                    elif signal['action'] == 'SELL':
+                        # Update position to exited
+                        await conn.execute("""
+                            UPDATE positions SET
+                                status = 'exited',
+                                exit_price = $1,
+                                exited_at = NOW()
+                            WHERE id = $2
+                        """,
+                            signal['exit_price'],
+                            signal['position_id']
+                        )
+            except Exception as e:
+                logger.error(f"Error storing Strategy A signal: {e}")
+    
+    async def run_strategy_b(self):
+        """Run Strategy B (Intelligence Layer - 8 gates) scan"""
+        # This is the existing signal detection logic (8-gate system)
+        
+        # Detect mismatches (uses latest METAR from DB)
         flagged_signals = await self.detector.detect_mismatches()
         
         logger.info(f"\n📊 Scan Results:")
