@@ -7,6 +7,7 @@ import Signals from './pages/Signals'
 import Trades from './pages/Trades'
 import METAR from './pages/METAR'
 import Settings from './pages/Settings'
+import Explorer from './pages/Explorer'
 
 function Sidebar() {
   const location = useLocation()
@@ -16,6 +17,7 @@ function Sidebar() {
     { path: '/signals', label: 'Signals', icon: '⚡' },
     { path: '/trades', label: 'Trades', icon: '💰' },
     { path: '/metar', label: 'METAR', icon: '🌡️' },
+    { path: '/explorer', label: 'Explorer', icon: '🔍' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
@@ -52,6 +54,7 @@ function App() {
             <Route path="/signals" element={<Signals />} />
             <Route path="/trades" element={<Trades />} />
             <Route path="/metar" element={<METAR />} />
+            <Route path="/explorer" element={<Explorer />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
           

@@ -1,5 +1,6 @@
 """
 Polymarket Scanner — Fetch and store weather markets
+FIXED: Uses CLOB API pagination instead of broken Gamma tag filtering
 """
 import httpx
 import asyncio
@@ -29,10 +30,20 @@ class WeatherMarket:
 
 
 class PolymarketScanner:
-    """Scan Polymarket for active weather markets"""
+    """Scan Polymarket for active weather markets using CLOB API pagination"""
     
     CLOB_API = "https://clob.polymarket.com/markets"
-    GAMMA_API = "https://gamma-api.polymarket.com/markets"
+    GAMMA_EVENTS_API = "https://gamma-api.polymarket.com/events"
+    
+    # Comprehensive weather keywords for text filtering (more specific)
+    WEATHER_KEYWORDS = [
+        'temperature', 'high temp', 'low temp', '°f', '°c',
+        'fahrenheit', 'celsius', 'will it rain', 'will it snow', 
+        'weather forecast', 'precipitation', 'degrees celsius',
+        'degrees fahrenheit', 'climate', 'atmospheric',
+        'reach 100', 'reach 90', 'reach 80', 'reach 70',  # Temperature thresholds
+        'high of', 'low of', 'temperature in',  # Weather phrasing
+    ]
     
     def __init__(self, db_pool=None):
         self.db_pool = db_pool
@@ -42,91 +53,66 @@ class PolymarketScanner:
         """Close HTTP client"""
         await self.client.aclose()
     
-    async def fetch_from_clob(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """Fetch markets from CLOB API"""
-        try:
-            params = {
-                "limit": limit,
-                "offset": offset,
-                "active": "true"
-            }
-            response = await self.client.get(self.CLOB_API, params=params)
-            response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else data.get("data", [])
-        except Exception as e:
-            logger.error(f"CLOB API error: {e}")
-            return []
+    def is_weather_market(self, question: str) -> bool:
+        """Check if market question is weather-related (stricter filtering)"""
+        question_lower = question.lower()
+        
+        # Exclude obvious sports markets
+        sports_keywords = ['nba', 'nfl', 'mlb', 'nhl', 'formula', 'soccer', 'football', 
+                          'basketball', 'baseball', 'hockey', 'game', 'match', 'vs.']
+        if any(kw in question_lower for kw in sports_keywords):
+            return False
+        
+        # Must contain weather keywords
+        return any(kw in question_lower for kw in self.WEATHER_KEYWORDS)
     
-    async def fetch_from_gamma(self, tag: str = "weather") -> List[Dict]:
-        """Fetch weather markets from Gamma API"""
+    def _parse_market(self, raw: Dict) -> Optional[WeatherMarket]:
+        """Parse raw CLOB API response into WeatherMarket"""
         try:
-            params = {
-                "tag": tag,
-                "active": "true",
-                "limit": 1000
-            }
-            response = await self.client.get(self.GAMMA_API, params=params)
-            response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else data.get("data", [])
-        except Exception as e:
-            logger.error(f"Gamma API error: {e}")
-            return []
-    
-    def is_weather_market(self, title: str) -> bool:
-        """Check if market title is weather-related"""
-        weather_keywords = [
-            "temperature", "weather", "rain", "snow", "precipitation",
-            "high", "low", "degrees", "°f", "°c", "celsius", "fahrenheit"
-        ]
-        title_lower = title.lower()
-        return any(keyword in title_lower for keyword in weather_keywords)
-    
-    def parse_market(self, raw: Dict) -> Optional[WeatherMarket]:
-        """Parse raw API response into WeatherMarket"""
-        try:
+            # Extract core fields
             market_id = raw.get("condition_id") or raw.get("id") or raw.get("market_id")
-            title = raw.get("question") or raw.get("title") or raw.get("description", "")
+            question = raw.get("question") or raw.get("title") or raw.get("description", "")
             
-            if not market_id or not title:
+            if not market_id or not question:
                 return None
             
             # Filter out non-weather markets
-            if not self.is_weather_market(title):
+            if not self.is_weather_market(question):
                 return None
             
-            # Parse prices
-            outcomes = raw.get("outcomes", [])
+            # Parse tokens array for YES/NO prices
+            tokens = raw.get("tokens", [])
             yes_price = 0.5
             no_price = 0.5
             
-            if len(outcomes) >= 2:
-                yes_price = float(outcomes[0].get("price", 0.5))
-                no_price = float(outcomes[1].get("price", 0.5))
-            elif "yes_price" in raw:
-                yes_price = float(raw["yes_price"])
-                no_price = float(raw.get("no_price", 1.0 - yes_price))
+            if len(tokens) >= 2:
+                # Tokens typically have YES at index 0, NO at index 1
+                yes_price = float(tokens[0].get("price", 0.5))
+                no_price = float(tokens[1].get("price", 0.5))
+            elif "outcomes" in raw and len(raw["outcomes"]) >= 2:
+                yes_price = float(raw["outcomes"][0].get("price", 0.5))
+                no_price = float(raw["outcomes"][1].get("price", 0.5))
             
             # Parse volume and liquidity
             volume = float(raw.get("volume", 0) or 0)
             liquidity = float(raw.get("liquidity", 0) or 0)
             
-            # Parse resolution date
+            # Parse resolution date (end_date_iso in CLOB API)
             resolution_date = None
-            if raw.get("end_date"):
+            end_date_field = raw.get("end_date_iso") or raw.get("end_date") or raw.get("endDate")
+            if end_date_field:
                 try:
                     resolution_date = datetime.fromisoformat(
-                        raw["end_date"].replace("Z", "+00:00")
+                        end_date_field.replace("Z", "+00:00")
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to parse date {end_date_field}: {e}")
             
             active = raw.get("active", True)
             
             return WeatherMarket(
                 market_id=str(market_id),
-                title=title,
+                title=question,
                 yes_price=yes_price,
                 no_price=no_price,
                 volume=volume,
@@ -143,44 +129,96 @@ class PolymarketScanner:
     
     async def scan_weather_markets(self) -> List[WeatherMarket]:
         """
-        Scan Polymarket for all active weather markets
-        Returns list of WeatherMarket objects
+        Fetch ALL active weather markets from Polymarket using CLOB API pagination.
+        Returns list of WeatherMarket objects.
         """
-        markets = []
+        all_markets = []
+        seen_ids = set()
         
-        # Try Gamma API first (has weather tag)
-        logger.info("Fetching from Gamma API...")
-        gamma_data = await self.fetch_from_gamma(tag="weather")
+        # Method 1: CLOB API pagination with text filter
+        logger.info("🔍 Scanning CLOB API for weather markets...")
+        cursor = "MA=="  # Initial cursor
+        page_count = 0
+        max_pages = 50  # Safety limit (5000 markets max)
         
-        for raw in gamma_data:
-            market = self.parse_market(raw)
-            if market:
-                markets.append(market)
-        
-        # Also try CLOB API with pagination
-        logger.info("Fetching from CLOB API...")
-        offset = 0
-        while True:
-            clob_data = await self.fetch_from_clob(limit=100, offset=offset)
-            if not clob_data:
+        while cursor and page_count < max_pages:
+            try:
+                params = {
+                    "next_cursor": cursor,
+                    "limit": 100
+                }
+                
+                resp = await self.client.get(self.CLOB_API, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                markets_data = data.get("data", [])
+                logger.info(f"  Page {page_count + 1}: {len(markets_data)} markets")
+                
+                for market_raw in markets_data:
+                    question = market_raw.get("question", "")
+                    if self.is_weather_market(question):
+                        parsed = self._parse_market(market_raw)
+                        if parsed and parsed.market_id not in seen_ids:
+                            all_markets.append(parsed)
+                            seen_ids.add(parsed.market_id)
+                
+                # Get next cursor
+                next_cursor = data.get("next_cursor")
+                
+                # Prevent infinite loop (cursor unchanged)
+                if next_cursor == cursor or not next_cursor:
+                    break
+                    
+                cursor = next_cursor
+                page_count += 1
+                
+            except Exception as e:
+                logger.error(f"CLOB API error on page {page_count}: {e}")
                 break
-            
-            for raw in clob_data:
-                market = self.parse_market(raw)
-                if market and market.market_id not in [m.market_id for m in markets]:
-                    markets.append(market)
-            
-            # Handle pagination
-            if len(clob_data) < 100:
-                break
-            offset += 100
-            
-            # Safety limit
-            if offset > 1000:
-                break
         
-        logger.info(f"Found {len(markets)} weather markets")
-        return markets
+        logger.info(f"📊 CLOB scan complete: {len(all_markets)} weather markets from {page_count} pages")
+        
+        # Method 2: Try events endpoint for temperature/weather events
+        logger.info("🔍 Checking Gamma events API...")
+        try:
+            # Try a few event searches
+            search_terms = ["temperature", "weather", "rain"]
+            for term in search_terms:
+                try:
+                    params = {
+                        "active": "true",
+                        "closed": "false",
+                        "limit": 100
+                    }
+                    resp = await self.client.get(self.GAMMA_EVENTS_API, params=params)
+                    resp.raise_for_status()
+                    events = resp.json()
+                    
+                    if isinstance(events, list):
+                        for event in events:
+                            # Events may contain markets array
+                            event_title = event.get("title", "").lower()
+                            if term in event_title:
+                                logger.info(f"  Found weather event: {event.get('title')}")
+                                # Extract markets from event
+                                for market_raw in event.get("markets", []):
+                                    # Skip if market_raw is a string (id only)
+                                    if isinstance(market_raw, str):
+                                        continue
+                                    parsed = self._parse_market(market_raw)
+                                    if parsed and parsed.market_id not in seen_ids:
+                                        all_markets.append(parsed)
+                                        seen_ids.add(parsed.market_id)
+                    
+                except Exception as e:
+                    logger.debug(f"Events search for '{term}' failed: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Gamma events API error: {e}")
+        
+        logger.info(f"✅ Total weather markets found: {len(all_markets)}")
+        return all_markets
     
     async def store_markets(self, markets: List[WeatherMarket]) -> int:
         """
@@ -220,7 +258,7 @@ class PolymarketScanner:
                 except Exception as e:
                     logger.error(f"Error storing market {market.market_id}: {e}")
         
-        logger.info(f"Stored {stored} markets to database")
+        logger.info(f"💾 Stored {stored} markets to database")
         return stored
 
 
@@ -229,7 +267,7 @@ async def main():
     scanner = PolymarketScanner()
     try:
         markets = await scanner.scan_weather_markets()
-        print(f"\nFound {len(markets)} weather markets:\n")
+        print(f"\n✅ Found {len(markets)} weather markets:\n")
         for m in markets[:10]:  # Show first 10
             print(f"ID: {m.market_id}")
             print(f"Title: {m.title}")

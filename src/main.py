@@ -30,6 +30,7 @@ _startup_time: Optional[datetime] = None
 
 # Signal loop instance (initialized on startup)
 _signal_loop = None
+_improvement_engine = None
 
 
 async def scheduled_data_scan():
@@ -84,6 +85,15 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Signal loop initialized")
     except Exception as e:
         logger.error(f"⚠️ Signal loop init failed (will retry): {e}")
+    
+    # Initialize improvement engine
+    try:
+        from src.learning.improvement import ImprovementEngine
+        async_pool = get_async_pool()
+        _improvement_engine = ImprovementEngine(async_pool, config)
+        logger.info("✅ Improvement engine initialized")
+    except Exception as e:
+        logger.error(f"⚠️ Improvement engine init failed: {e}")
 
     # Run initial data fetch
     try:
@@ -403,6 +413,201 @@ async def get_db_stats():
         except:
             stats[table] = "error"
     return {"tables": stats, "timestamp": datetime.utcnow().isoformat()}
+
+
+# =============================================================================
+# Polymarket Explorer — Proxy to bypass ISP blocks
+# =============================================================================
+
+@app.get("/api/explorer/markets")
+async def explore_markets(category: str = None, search: str = None, limit: int = 50, cursor: str = "MA=="):
+    """Proxy to Polymarket — browse all markets. Bypasses ISP blocks."""
+    import httpx
+    params = {"limit": limit, "next_cursor": cursor}
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://clob.polymarket.com/markets", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        
+        markets = data.get("data", [])
+        
+        # Filter by search text
+        if search:
+            search_lower = search.lower()
+            markets = [m for m in markets if search_lower in m.get("question", "").lower()]
+        
+        # Filter by category keyword
+        if category:
+            cat_lower = category.lower()
+            markets = [
+                m for m in markets 
+                if cat_lower in m.get("question", "").lower() 
+                or cat_lower in str(m.get("tags", [])).lower()
+            ]
+        
+        return {
+            "data": markets,
+            "count": len(markets),
+            "next_cursor": data.get("next_cursor"),
+            "source": "polymarket_proxy"
+        }
+    except Exception as e:
+        logger.error(f"Explorer markets error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)}")
+
+
+@app.get("/api/explorer/events")
+async def explore_events(tag: str = None, search: str = None, limit: int = 20):
+    """Proxy to Polymarket events."""
+    import httpx
+    params = {"limit": limit, "active": "true", "closed": "false"}
+    if tag:
+        params["tag"] = tag
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/events", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        
+        # Ensure data is a list
+        if not isinstance(data, list):
+            data = data.get("data", []) if isinstance(data, dict) else []
+        
+        # Filter by search
+        if search:
+            search_lower = search.lower()
+            data = [
+                e for e in data 
+                if search_lower in e.get("title", "").lower() 
+                or search_lower in e.get("question", "").lower()
+            ]
+        
+        return {"data": data, "count": len(data)}
+    except Exception as e:
+        logger.error(f"Explorer events error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch events: {str(e)}")
+
+
+@app.get("/api/explorer/market/{condition_id}")
+async def get_market_detail(condition_id: str):
+    """Get detailed market data including order book."""
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get market data
+            market_resp = await client.get(f"https://clob.polymarket.com/markets/{condition_id}")
+            market_resp.raise_for_status()
+            market = market_resp.json()
+            
+            # Get order book
+            try:
+                book_resp = await client.get(f"https://clob.polymarket.com/book?token_id={condition_id}")
+                book_resp.raise_for_status()
+                order_book = book_resp.json()
+            except:
+                order_book = {"bids": [], "asks": []}
+        
+        return {
+            "market": market,
+            "order_book": order_book
+        }
+    except Exception as e:
+        logger.error(f"Explorer market detail error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch market detail: {str(e)}")
+
+
+@app.get("/api/explorer/prices/{condition_id}")
+async def get_price_history(condition_id: str, interval: str = "1h", fidelity: int = 60):
+    """Get price history for charting."""
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://clob.polymarket.com/prices-history",
+                params={"market": condition_id, "interval": interval, "fidelity": fidelity}
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Explorer price history error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch price history: {str(e)}")
+
+
+# =============================================================================
+# Intelligence & Improvement — NEW ENDPOINTS
+# =============================================================================
+
+@app.get("/api/intelligence/daily")
+async def get_daily_analysis():
+    """Get daily performance analysis from improvement engine."""
+    global _improvement_engine
+    
+    if not _improvement_engine:
+        raise HTTPException(status_code=503, detail="Improvement engine not initialized")
+    
+    try:
+        analysis = await _improvement_engine.daily_analysis()
+        return analysis
+    except Exception as e:
+        logger.error(f"Daily analysis error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate daily analysis: {str(e)}")
+
+
+@app.get("/api/intelligence/weekly")
+async def get_weekly_review():
+    """Get weekly strategy review with findings and proposals."""
+    global _improvement_engine
+    
+    if not _improvement_engine:
+        raise HTTPException(status_code=503, detail="Improvement engine not initialized")
+    
+    try:
+        review = await _improvement_engine.weekly_review()
+        return review
+    except Exception as e:
+        logger.error(f"Weekly review error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate weekly review: {str(e)}")
+
+
+@app.get("/api/intelligence/calibration")
+async def get_probability_calibration():
+    """Get probability model calibration metrics."""
+    global _improvement_engine
+    
+    if not _improvement_engine:
+        raise HTTPException(status_code=503, detail="Improvement engine not initialized")
+    
+    try:
+        calibration = await _improvement_engine.calibrate_probability_model()
+        return calibration
+    except Exception as e:
+        logger.error(f"Calibration error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate calibration: {str(e)}")
+
+
+@app.post("/api/intelligence/approve/{proposal_id}")
+async def approve_proposal(proposal_id: str):
+    """CEO approves a strategy change proposal.
+    
+    NOTE: This is a placeholder. Real implementation would:
+    1. Fetch proposal from DB
+    2. Parse parameter changes
+    3. Update STRATEGY.md
+    4. Update config values
+    5. Log approval in changelog
+    """
+    # TODO: Implement proposal approval workflow
+    return {
+        "status": "approved",
+        "proposal_id": proposal_id,
+        "message": "Proposal approval not yet implemented. See STRATEGY.md for manual updates.",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 
 if __name__ == "__main__":

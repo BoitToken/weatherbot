@@ -11,6 +11,7 @@ import logging
 from .mismatch_detector import MismatchDetector, Signal
 from .claude_analyzer import ClaudeAnalyzer, AnalysisResult
 from .signal_bus import SignalBus, TradingSignal
+from .intelligence import IntelligenceLayer, IntelligenceReport
 
 # Import market components
 from ..markets.polymarket_scanner import PolymarketScanner
@@ -70,6 +71,10 @@ class SignalLoop:
                 logger.info("Claude analyzer initialized")
             except Exception as e:
                 logger.warning(f"Claude analyzer not available: {e}")
+        
+        # Initialize Intelligence Layer (8-gate system)
+        self.intelligence = IntelligenceLayer(db_pool, config)
+        logger.info("Intelligence layer initialized (8-gate pre-trade system)")
         
         self.running = False
         self.loop_count = 0
@@ -249,26 +254,65 @@ class SignalLoop:
         logger.info(f"  Markets scanned: {markets_updated}")
         logger.info(f"  Mismatches found: {len(flagged_signals)}")
         
-        # Step 3: Analyze flagged signals with Claude
+        # Step 3: Run flagged signals through 8-gate intelligence layer
         confirmed_count = 0
         skipped_count = 0
+        alert_count = 0
         
         for signal in flagged_signals:
             try:
-                # Should we analyze with Claude?
-                if abs(signal.edge) >= self.min_edge_for_claude and self.claude:
-                    logger.info(f"\n🔍 Analyzing: {signal.city} ({signal.icao}) | Edge: {signal.edge:+.1%}")
-                    claude_result = await self.analyze_with_claude(signal)
-                else:
-                    claude_result = None
+                # Build market dict from signal
+                market = {
+                    "market_id": signal.market_id,
+                    "title": signal.market_title,
+                    "city": signal.city,
+                    "station_icao": signal.icao,
+                    "threshold_value": signal.threshold_c,
+                    "threshold_type": signal.threshold_type,
+                    "yes_price": signal.yes_price,
+                    "no_price": signal.no_price,
+                    "volume_usd": signal.metadata.get("volume_usd", 0),
+                    "liquidity_usd": signal.metadata.get("liquidity_usd", 0),
+                }
                 
-                # Should we emit?
-                if self.should_emit_signal(signal, claude_result):
-                    trading_signal = self.signal_to_trading_signal(signal, claude_result)
+                # Build METAR data dict
+                metar_data = {
+                    "temperature_c": signal.current_temp_c,
+                    "trend_per_hour": signal.trend_per_hour,
+                }
+                
+                # Run through intelligence layer (ALL 8 gates)
+                logger.info(f"\n🧠 Intelligence check: {signal.city} ({signal.icao}) | Edge: {signal.edge:+.1%}")
+                report = await self.intelligence.run_full_check(market, metar_data, None)
+                
+                # Store report in DB for learning
+                await self.intelligence.store_report(report)
+                
+                # Log gate results
+                logger.info(f"  Gates passed: {sum(1 for g in report.gates if g.passed)}/8")
+                for gate in report.gates:
+                    status = "✅" if gate.passed else "❌"
+                    logger.info(f"  {status} {gate.gate}: {gate.details[:80]}...")
+                
+                # Take action based on recommendation
+                if report.recommended_action == "TRADE":
+                    trading_signal = self.signal_to_trading_signal(signal, None)
+                    trading_signal.recommended_size_usd = report.recommended_size_usd
+                    trading_signal.confidence = "HIGH" if report.all_gates_passed else "MEDIUM"
+                    trading_signal.claude_reasoning = report.reasoning
+                    
                     signal_id = await self.signal_bus.emit_signal(trading_signal, self.bankroll_usd)
                     confirmed_count += 1
-                    logger.info(f"✅ Emitted signal #{signal_id}: {signal.city} | {signal.recommended_side} | ${trading_signal.recommended_size_usd:.0f}")
-                else:
+                    logger.info(f"✅ TRADE: {signal.city} | {report.recommended_side} | ${report.recommended_size_usd:.0f}")
+                    
+                elif report.recommended_action == "ALERT_ONLY":
+                    # High potential but missing some gates — alert CEO
+                    logger.info(f"⚠️  ALERT: {signal.city} | Edge {signal.edge:+.1%} | Manual review needed")
+                    alert_count += 1
+                    # TODO: Send alert to CEO (Telegram/Discord)
+                    
+                else:  # SKIP
+                    logger.info(f"⏭️  SKIP: {signal.city} | {report.reasoning.split(chr(10))[0][:60]}...")
                     skipped_count += 1
                 
             except Exception as e:
@@ -282,8 +326,9 @@ class SignalLoop:
         logger.info(f"Loop #{self.loop_count} Complete")
         logger.info(f"  Scanned: {markets_updated} markets")
         logger.info(f"  Mismatches: {len(flagged_signals)}")
-        logger.info(f"  Confirmed: {confirmed_count}")
-        logger.info(f"  Skipped: {skipped_count}")
+        logger.info(f"  ✅ Trades: {confirmed_count}")
+        logger.info(f"  ⚠️  Alerts: {alert_count}")
+        logger.info(f"  ⏭️  Skipped: {skipped_count}")
         logger.info(f"  Duration: {elapsed:.1f}s")
         logger.info(f"{'='*60}\n")
     
