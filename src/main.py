@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
+import json
+import base64
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -817,39 +819,42 @@ def detect_category(question: str) -> str:
 
 @app.get("/api/explorer/markets")
 async def explore_markets(category: str = None, search: str = None, limit: int = 50, cursor: str = "MA==", active_only: bool = True):
-    """Proxy to Polymarket — filtered, categorized markets."""
+    """Proxy to Polymarket Gamma API — filtered, categorized markets."""
     import httpx
     
     all_markets = []
-    current_cursor = cursor
-    pages_fetched = 0
-    max_pages = 5  # Don't fetch too many pages
+    offset = 0
+    try:
+        offset = int.from_bytes(base64.b64decode(cursor), 'big') if cursor and cursor != 'MA==' else 0
+    except Exception:
+        offset = 0
     
     async with httpx.AsyncClient(timeout=15) as client:
-        while pages_fetched < max_pages and len(all_markets) < limit:
-            params = {"limit": 100, "next_cursor": current_cursor}
-            try:
-                resp = await client.get("https://clob.polymarket.com/markets", params=params)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                logger.error(f"Explorer markets error: {e}")
-                break
+        try:
+            # Use Gamma API which supports server-side active/closed filtering
+            params = {
+                "limit": min(limit * 2, 200),  # fetch extra for client-side filters
+                "offset": offset,
+                "order": "volume",
+                "ascending": "false",
+            }
+            if active_only:
+                params["active"] = "true"
+                params["closed"] = "false"
+            else:
+                params["closed"] = "true"
             
-            batch = data.get("data", [])
-            if not batch:
-                break
+            if search:
+                params["tag"] = search
+            
+            resp = await client.get("https://gamma-api.polymarket.com/markets", params=params)
+            resp.raise_for_status()
+            batch = resp.json()
+            
+            if not isinstance(batch, list):
+                batch = batch.get("data", []) if isinstance(batch, dict) else []
             
             for market in batch:
-                # Skip inactive markets (use 'active' field from API)
-                if active_only and not market.get("active", True):
-                    continue
-                
-                # Also skip if both closed AND not accepting orders (truly dead markets)
-                if active_only and market.get("closed") and not market.get("accepting_orders"):
-                    continue
-                
-                # Add category detection
                 question = (market.get("question") or "").lower()
                 market["_category"] = detect_category(question)
                 
@@ -857,31 +862,38 @@ async def explore_markets(category: str = None, search: str = None, limit: int =
                 if category and market["_category"] != category.lower():
                     continue
                 
-                # Apply search filter
+                # Apply search filter (text match beyond tag search)
                 if search and search.lower() not in question:
                     continue
                 
-                # Extract clean price data
-                tokens = market.get("tokens", [])
-                market["_yes_price"] = float(tokens[0].get("price", 0.5)) if tokens else 0.5
-                market["_no_price"] = float(tokens[1].get("price", 0.5)) if len(tokens) > 1 else 0.5
+                # Extract price data from Gamma format
+                out_price = market.get("outcomePrices", "")
+                try:
+                    prices = json.loads(out_price) if isinstance(out_price, str) and out_price else []
+                except Exception:
+                    prices = []
+                market["_yes_price"] = float(prices[0]) if len(prices) > 0 else 0.5
+                market["_no_price"] = float(prices[1]) if len(prices) > 1 else 0.5
                 market["_volume"] = float(market.get("volume", 0) or 0)
+                market["active"] = market.get("active", True)
+                market["closed"] = market.get("closed", False)
                 
                 all_markets.append(market)
-            
-            current_cursor = data.get("next_cursor")
-            if not current_cursor:
-                break
-            pages_fetched += 1
+                if len(all_markets) >= limit:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Explorer markets error: {e}")
     
-    # Sort by volume (most active first)
-    all_markets.sort(key=lambda m: m.get("_volume", 0), reverse=True)
+    # Next cursor for pagination
+    next_offset = offset + len(all_markets)
+    next_cursor = base64.b64encode(next_offset.to_bytes(4, 'big')).decode() if len(all_markets) >= limit else None
     
     return {
         "data": all_markets[:limit],
         "count": len(all_markets[:limit]),
-        "next_cursor": current_cursor,
-        "source": "polymarket_proxy"
+        "next_cursor": next_cursor,
+        "source": "polymarket_gamma"
     }
 
 
