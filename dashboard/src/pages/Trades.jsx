@@ -543,7 +543,7 @@ function Trades() {
           }}>
             <div>
               <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Total Deployed</div>
-              <div style={{ fontSize: 24, fontWeight: 800 }}>${activeTrades.reduce((sum, t) => sum + (t.size_usd || 0), 0).toFixed(2)}</div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>${(Array.isArray(activePositions) ? activePositions : []).reduce((sum, t) => sum + (t.size_usd || 0), 0).toFixed(2)}</div>
             </div>
             <div>
               <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Won</div>
