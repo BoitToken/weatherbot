@@ -90,7 +90,17 @@ function Performance() {
     return '#6B7280'
   }
 
-  const filteredSignals = signals.filter(s => {
+  const getSportInfo = (signal) => {
+    const sport = (signal.sport || '').toLowerCase()
+    if (sport.includes('ipl')) return { emoji: '🏏', name: 'IPL', color: '#FF6B00' }
+    if (sport.includes('nba')) return { emoji: '🏀', name: 'NBA', color: '#1D428A' }
+    if (sport.includes('nhl')) return { emoji: '🏒', name: 'NHL', color: '#A2AAAD' }
+    if (sport.includes('soccer')) return { emoji: '⚽', name: 'Soccer', color: '#00B140' }
+    if (sport.includes('mlb')) return { emoji: '⚾', name: 'MLB', color: '#002D72' }
+    return { emoji: '🎯', name: sport || 'N/A', color: '#7c3aed' }
+  }
+
+  const filteredSignals = (Array.isArray(signals) ? signals : []).filter(s => {
     if (signalFilter === 'all') return true
     if (signalFilter === 'buy') return s.side === 'BUY'
     if (signalFilter === 'sell') return s.side === 'SELL'
@@ -194,6 +204,10 @@ function Performance() {
             filteredSignals.slice(0, 20).map((signal, idx) => {
               const sideColor = signal.side === 'BUY' ? '#10B981' : '#EF4444'
               const edgeColor = signal.edge > 0 ? '#10B981' : '#EF4444'
+              const sportInfo = getSportInfo(signal)
+              const marketTitle = (signal.market_title || 'Unknown Market').length > 50
+                ? signal.market_title.substring(0, 50) + '...'
+                : signal.market_title || 'Unknown Market'
               
               return (
                 <div key={signal.id || idx} className="signal-card">
@@ -203,13 +217,18 @@ function Performance() {
                       <span className="signal-strategy">{getStrategyIcon(signal.strategy.toLowerCase().replace(/[^a-z]/g, '_'))} {signal.strategy}</span>
                       <span className="signal-time">{getRelativeTime(signal.created_at)}</span>
                     </div>
-                    <div className="signal-market">{signal.market_title || 'Unknown Market'}</div>
+                    <div className="signal-market">{marketTitle}</div>
                     <div className="signal-bottom">
                       <span className="signal-edge" style={{ color: edgeColor }}>
                         {signal.edge > 0 ? '+' : ''}{signal.edge.toFixed(2)}%
                       </span>
-                      <span className="sport-badge">{signal.sport || 'N/A'}</span>
-                      <span className="confidence-badge" style={{ background: getConfidenceBadgeColor(signal.confidence) }}>
+                      <span className="sport-badge" style={{ background: `${sportInfo.color}15`, color: sportInfo.color, padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 600 }}>
+                        {sportInfo.emoji} {sportInfo.name}
+                      </span>
+                      <span className="signal-side" style={{ background: sideColor + '20', color: sideColor, padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 700 }}>
+                        {signal.side || 'BUY'}
+                      </span>
+                      <span className="confidence-badge" style={{ background: getConfidenceBadgeColor(signal.confidence), color: '#fff', padding: '4px 8px', borderRadius: '6px', fontSize: '10px', fontWeight: 600 }}>
                         {signal.confidence || 'MEDIUM'}
                       </span>
                     </div>

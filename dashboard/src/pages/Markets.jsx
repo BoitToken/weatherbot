@@ -47,6 +47,7 @@ function Markets() {
   const [showActive, setShowActive] = useState(true)  // Active vs Resolved toggle
   const [markets, setMarkets] = useState([])
   const [loading, setLoading] = useState(false)
+  const [btcPrice, setBtcPrice] = useState(null)
 
   // Parse route to pre-select industry (e.g., /markets/weather → weather tab)
   useEffect(() => {
@@ -59,22 +60,67 @@ function Markets() {
     else setActiveIndustry('all')
   }, [location])
 
+  // Fetch BTC price when crypto tab is active
+  useEffect(() => {
+    if (activeIndustry === 'crypto') {
+      fetchBtcPrice()
+      const interval = setInterval(fetchBtcPrice, 30000)
+      return () => clearInterval(interval)
+    }
+  }, [activeIndustry])
+
+  const fetchBtcPrice = async () => {
+    try {
+      const res = await axios.get('/api/ghost/price')
+      setBtcPrice(res.data)
+    } catch (err) {
+      console.error('Failed to fetch BTC price:', err)
+    }
+  }
+
   const currentIndustry = INDUSTRIES.find(i => i.id === activeIndustry) || INDUSTRIES[0]
 
   const renderContent = () => {
     return (
       <ErrorBoundary key={currentIndustry.id}>
-        
-          {currentIndustry.component === 'explorer' && <Explorer activeOnly={showActive} />}
-          {currentIndustry.component === 'intelligence' && (
-            <>
-              <Intelligence />
-              <div style={{ marginTop: 24 }}><METAR /></div>
-            </>
-          )}
-          {currentIndustry.component === 'sports' && <SportsIntelligence />}
-          {currentIndustry.component === 'explorer-filtered' && <FilteredExplorer category={currentIndustry.id} activeOnly={showActive} />}
-        
+        {currentIndustry.component === 'explorer' && <Explorer activeOnly={showActive} />}
+        {currentIndustry.component === 'intelligence' && (
+          <>
+            <Intelligence />
+            <div style={{ marginTop: 24 }}><METAR /></div>
+          </>
+        )}
+        {currentIndustry.component === 'sports' && <SportsIntelligence />}
+        {currentIndustry.component === 'explorer-filtered' && currentIndustry.id !== 'crypto' && <FilteredExplorer category={currentIndustry.id} activeOnly={showActive} />}
+        {currentIndustry.component === 'explorer-filtered' && currentIndustry.id === 'crypto' && (
+          <>
+            {/* BTC Price Card */}
+            {btcPrice && (
+              <div style={{ marginBottom: '24px', background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px', padding: '24px' }}>
+                <h3 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '16px' }}>₿ Bitcoin</h3>
+                <div style={{ fontSize: '36px', fontWeight: 800, marginBottom: '8px', color: btcPrice.change_24h >= 0 ? '#10B981' : '#EF4444' }}>
+                  ${btcPrice.price?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <div style={{ fontSize: '16px', marginBottom: '12px', color: btcPrice.change_24h >= 0 ? '#10B981' : '#EF4444' }}>
+                  {btcPrice.change_24h >= 0 ? '▲' : '▼'} {btcPrice.change_24h?.toFixed(2)}% (24h)
+                </div>
+                <div style={{ fontSize: '14px', color: '#94a3b8' }}>
+                  24H Range: ${btcPrice.low_24h?.toLocaleString()} — ${btcPrice.high_24h?.toLocaleString()} | Vol: ${(btcPrice.volume_24h / 1e9).toFixed(2)}B
+                </div>
+              </div>
+            )}
+
+            {/* 15-min Bot Preview */}
+            <div style={{ marginBottom: '24px', background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.06)', borderLeft: '3px solid #F59E0B', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: 700, marginBottom: '12px' }}>⚡ 15-Min Up/Down Bot</h3>
+              <p style={{ fontSize: '14px', marginBottom: '8px' }}>Coming Soon — BTC/ETH 15-minute arbitrage resolution bot</p>
+              <p style={{ color: '#94a3b8', fontSize: '13px' }}>Resolves pricing discrepancies from chart providers using 15-min candle analysis</p>
+            </div>
+
+            {/* Crypto Markets */}
+            <FilteredExplorer category="crypto" activeOnly={showActive} />
+          </>
+        )}
       </ErrorBoundary>
     );
   }

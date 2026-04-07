@@ -326,6 +326,62 @@ app.add_middleware(
 
 
 # =============================================================================
+# Ghost Trading Bot API Bridge
+# =============================================================================
+try:
+    import sys
+    sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+    from api_bridge import router as ghost_router
+    app.include_router(ghost_router)
+    logger.info("\u2705 Ghost trading bot API mounted at /api/ghost")
+except Exception as e:
+    logger.warning(f"\u26a0\ufe0f Ghost API not loaded: {e}")
+
+# =============================================================================
+# Paper Trades
+# =============================================================================
+
+@app.get("/api/paper-trades")
+async def get_paper_trades():
+    """Return all paper trades from paper_trades_live table."""
+    try:
+        query = """
+            SELECT id, match_name, sport, team_backed, entry_price, fair_value,
+                   edge_pct, position_size, shares, strategy, books_consensus,
+                   book_count, status, exit_price, pnl, match_time, entry_at,
+                   resolved_at, notes
+            FROM paper_trades_live
+            ORDER BY entry_at DESC
+        """
+        results = await fetch_all(query)
+        trades = [{
+            "id": r['id'],
+            "match_name": r['match_name'],
+            "sport": r['sport'],
+            "team_backed": r['team_backed'],
+            "entry_price": float(r['entry_price']) if r['entry_price'] else 0,
+            "fair_value": float(r['fair_value']) if r['fair_value'] else 0,
+            "edge_pct": float(r['edge_pct']) if r['edge_pct'] else 0,
+            "position_size": float(r['position_size']) if r['position_size'] else 0,
+            "shares": float(r['shares']) if r['shares'] else 0,
+            "strategy": r['strategy'],
+            "books_consensus": r['books_consensus'],
+            "book_count": r['book_count'],
+            "status": r['status'],
+            "exit_price": float(r['exit_price']) if r['exit_price'] else None,
+            "pnl": float(r['pnl']) if r['pnl'] else None,
+            "match_time": str(r['match_time']) if r['match_time'] else None,
+            "entry_at": str(r['entry_at']) if r['entry_at'] else None,
+            "resolved_at": str(r['resolved_at']) if r['resolved_at'] else None,
+            "notes": r['notes'],
+        } for r in results]
+        return {"trades": trades, "count": len(trades)}
+    except Exception as e:
+        logger.error(f"Paper trades error: {e}")
+        return {"trades": [], "count": 0}
+
+
+# =============================================================================
 # Health & Status
 # =============================================================================
 

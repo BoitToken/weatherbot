@@ -7,6 +7,7 @@ function SportsIntelligence() {
   const [arbitrage, setArbitrage] = useState(null)
   const [live, setLive] = useState(null)
   const [signals, setSignals] = useState([])
+  const [paperTrades, setPaperTrades] = useState([])
   const [loading, setLoading] = useState(true)
   const [sportFilter, setSportFilter] = useState('all')
   const [activeTab, setActiveTab] = useState('overview')
@@ -19,18 +20,20 @@ function SportsIntelligence() {
 
   const fetchAll = async () => {
     try {
-      const [mRes, gRes, aRes, lRes, sRes] = await Promise.all([
+      const [mRes, gRes, aRes, lRes, sRes, pRes] = await Promise.all([
         axios.get('/api/sports/markets?limit=200').catch(() => ({ data: { total: 0, by_sport: {}, markets: [] } })),
         axios.get('/api/sports/groups').catch(() => ({ data: { groups: [] } })),
         axios.get('/api/sports/arbitrage').catch(() => ({ data: { opportunities: [] } })),
         axios.get('/api/sports/live').catch(() => ({ data: { events: [] } })),
         axios.get('/api/sports/signals').catch(() => ({ data: { signals: [] } })),
+        axios.get('/api/paper-trades').catch(() => ({ data: { data: [] } })),
       ])
       setMarkets(mRes.data)
       setGroups(gRes.data)
       setArbitrage(aRes.data)
       setLive(lRes.data)
       setSignals(sRes.data.signals || [])
+      setPaperTrades(pRes.data.data || [])
       setLoading(false)
     } catch { setLoading(false) }
   }
@@ -45,7 +48,8 @@ function SportsIntelligence() {
 
   const filteredMarkets = (markets?.markets || []).filter(m => sportFilter === 'all' || m.sport === sportFilter)
 
-  const sportEmoji = { nhl: '🏒', nba: '🏀', soccer: '⚽', mlb: '⚾', nfl: '🏈', tennis: '🎾', cricket: '🏏', f1: '🏎️', combat: '🥊', other: '🎯' }
+  const sportEmoji = { nhl: '🏒', nba: '🏀', soccer: '⚽', mlb: '⚾', nfl: '🏈', tennis: '🎾', cricket: '🏏', ipl: '🏏', f1: '🏎️', combat: '🥊', other: '🎯' }
+  const sportColors = { ipl: '#FF6B00', nba: '#1D428A', nhl: '#A2AAAD', soccer: '#00B140', mlb: '#002D72' }
 
   return (
     <div>
@@ -66,27 +70,64 @@ function SportsIntelligence() {
         ))}
       </div>
 
-      {/* Sport Filter Chips */}
+      {/* Sport Filter Buttons (Top) */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
         <button onClick={() => setSportFilter('all')}
-          style={{ padding: '5px 12px', borderRadius: 12, border: sportFilter === 'all' ? '1px solid #8B5CF6' : '1px solid var(--border)',
+          style={{ padding: '8px 16px', borderRadius: 12, minHeight: 44,
+            border: sportFilter === 'all' ? '1px solid #8B5CF6' : '1px solid var(--border)',
             background: sportFilter === 'all' ? 'rgba(139,92,246,0.12)' : 'transparent',
-            color: sportFilter === 'all' ? '#8B5CF6' : 'var(--text-secondary)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-          All ({markets?.total || 0})
+            color: sportFilter === 'all' ? '#8B5CF6' : 'var(--text-secondary)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+          All
         </button>
-        {allSports.map(s => (
-          <button key={s} onClick={() => setSportFilter(s)}
-            style={{ padding: '5px 12px', borderRadius: 12, border: sportFilter === s ? '1px solid #8B5CF6' : '1px solid var(--border)',
-              background: sportFilter === s ? 'rgba(139,92,246,0.12)' : 'transparent',
-              color: sportFilter === s ? '#8B5CF6' : 'var(--text-secondary)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-            {sportEmoji[s] || '🎯'} {s.toUpperCase()} ({sportCounts[s]?.count || 0})
-          </button>
-        ))}
+        {['ipl', 'nba', 'nhl', 'soccer', 'mlb'].map(s => {
+          const count = sportCounts[s]?.count || 0
+          const color = sportColors[s] || '#8B5CF6'
+          return (
+            <button key={s} onClick={() => setSportFilter(s)}
+              style={{ padding: '8px 16px', borderRadius: 12, minHeight: 44,
+                border: sportFilter === s ? `1px solid ${color}` : '1px solid var(--border)',
+                background: sportFilter === s ? `${color}15` : 'transparent',
+                color: sportFilter === s ? color : 'var(--text-secondary)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+              {sportEmoji[s] || '🎯'} {s.toUpperCase()} {count > 0 ? `(${count})` : ''}
+            </button>
+          )
+        })}
       </div>
 
       {/* OVERVIEW TAB */}
       {activeTab === 'overview' && (
         <>
+          {/* IPL Paper Trades (when IPL filter active) */}
+          {sportFilter === 'ipl' && paperTrades.length > 0 && (
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12, color: sportColors.ipl }}>🏏 IPL Paper Trades</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+                {(Array.isArray(paperTrades) ? paperTrades : []).map((trade, idx) => (
+                  <div key={idx} style={{ background: '#1a1a2e', border: `1px solid ${sportColors.ipl}30`, borderRadius: 12, padding: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <span style={{ fontSize: 20 }}>🏏</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {trade.match_name || 'Unknown Match'}
+                        </div>
+                        <div style={{ fontSize: 12, color: '#94a3b8' }}>{trade.team_backed || ''}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, color: '#d1d5db', marginBottom: 8 }}>
+                      Entry: <strong>{((trade.entry_price || 0) * 100).toFixed(0)}¢</strong> | Fair: <strong>{((trade.fair_value || 0) * 100).toFixed(1)}¢</strong> | Edge: <strong style={{ color: sportColors.ipl }}>{((trade.edge_pct || 0) * 100).toFixed(1)}%</strong>
+                    </div>
+                    <div style={{ fontSize: 13, marginBottom: 10 }}>Size: <strong>${(trade.position_size || 0).toFixed(2)}</strong></div>
+                    <div style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, textAlign: 'center',
+                      background: trade.status === 'open' ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.15)',
+                      color: trade.status === 'open' ? '#F59E0B' : '#10B981' }}>
+                      {trade.status === 'open' ? '⏳ Open' : '✅ Closed'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Sport Summary Cards */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
             {allSports.map(s => (

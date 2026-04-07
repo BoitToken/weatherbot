@@ -184,15 +184,20 @@ function Trades() {
     })
   }
 
+  const getSportInfo = (trade) => {
+    const title = (trade.market_title || trade.match_name || '').toLowerCase()
+    const sport = (trade.sport || '').toLowerCase()
+    if (title.includes('ipl') || sport.includes('ipl') || sport.includes('cricket')) return { emoji: '🏏', name: 'IPL', color: '#FF6B00' }
+    if (title.includes('nba') || sport.includes('nba') || sport.includes('basketball')) return { emoji: '🏀', name: 'NBA', color: '#1D428A' }
+    if (title.includes('nhl') || sport.includes('nhl') || sport.includes('hockey')) return { emoji: '🏒', name: 'NHL', color: '#A2AAAD' }
+    if (title.includes('soccer') || sport.includes('soccer') || sport.includes('football')) return { emoji: '⚽', name: 'Soccer', color: '#00B140' }
+    if (sport.includes('mlb') || sport.includes('baseball')) return { emoji: '⚾', name: 'MLB', color: '#002D72' }
+    if (sport.includes('nfl')) return { emoji: '🏈', name: 'NFL', color: '#A2AAAD' }
+    return { emoji: '🎯', name: 'Other', color: '#7c3aed' }
+  }
+
   const getSportEmoji = (sport) => {
-    const s = (sport || '').toLowerCase()
-    if (s.includes('ipl') || s.includes('cricket')) return '🏏'
-    if (s.includes('nba') || s.includes('basketball')) return '🏀'
-    if (s.includes('nhl') || s.includes('hockey')) return '🏒'
-    if (s.includes('soccer') || s.includes('football')) return '⚽'
-    if (s.includes('nfl')) return '🏈'
-    if (s.includes('baseball') || s.includes('mlb')) return '⚾'
-    return '🎯'
+    return getSportInfo({ sport }).emoji
   }
 
   if (loading) {
@@ -276,23 +281,26 @@ function Trades() {
         <div className="scanner-tab">
           {/* Sport Filter */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
-            {['all', 'IPL', 'NBA', 'NHL', 'Soccer'].map(sport => (
-              <button
-                key={sport}
-                onClick={() => setSportFilter(sport)}
-                className={`btn ${sportFilter === sport ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ 
-                  padding: '8px 16px', 
-                  fontSize: 13,
-                  minHeight: 44,
-                  background: sportFilter === sport ? '#7c3aed' : 'var(--bg-secondary)',
-                  color: sportFilter === sport ? '#fff' : 'var(--text-primary)',
-                  border: sportFilter === sport ? 'none' : '1px solid var(--border)'
-                }}
-              >
-                {sport === 'all' ? 'All Sports' : sport}
-              </button>
-            ))}
+            {['all', 'IPL', 'NBA', 'NHL', 'Soccer', 'MLB'].map(sport => {
+              const sportInfo = getSportInfo({ sport })
+              return (
+                <button
+                  key={sport}
+                  onClick={() => setSportFilter(sport)}
+                  className={`btn ${sportFilter === sport ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ 
+                    padding: '8px 16px', 
+                    fontSize: 13,
+                    minHeight: 44,
+                    background: sportFilter === sport ? (sport === 'all' ? '#7c3aed' : sportInfo.color) : 'var(--bg-secondary)',
+                    color: sportFilter === sport ? '#fff' : 'var(--text-primary)',
+                    border: sportFilter === sport ? 'none' : '1px solid var(--border)'
+                  }}
+                >
+                  {sport === 'all' ? 'All' : `${sportInfo.emoji} ${sport}`}
+                </button>
+              )
+            })}
           </div>
 
           {/* Opportunities Grid */}
@@ -318,10 +326,11 @@ function Trades() {
             }}>
               {(Array.isArray(filteredOpportunities) ? filteredOpportunities : []).map((opp, idx) => {
                 const edge = (opp.edge || opp.edge_pct || (opp.sum_probability ? (opp.sum_probability - 1) * 100 : 0)) * (opp.edge < 1 ? 100 : 1)
-                const matchName = opp.market_title || opp.match_name || opp.group_name || 'Unknown Market'
-                const sport = opp.sport || matchName
+                const matchName = opp.market_title || opp.event || opp.match_name || opp.group_name || 'Unknown Market'
+                const sportInfo = getSportInfo(opp)
                 const polymarketPrice = opp.polymarket_price || opp.pm_price || null
-                const sportsbookPrice = opp.sportsbook_price || opp.sb_price || null
+                const sportsbookPrice = opp.sportsbook_price || opp.book_price || opp.sb_price || null
+                const bookName = opp.book_name || opp.sportsbook || 'Multiple'
                 const numBooks = opp.num_books || opp.agreeing_books || 1
                 const signal = edge > 0 ? 'BUY' : 'SELL'
 
@@ -346,11 +355,20 @@ function Trades() {
                       e.currentTarget.style.boxShadow = 'none'
                     }}
                   >
-                    {/* Sport emoji + match name */}
-                    <div style={{ marginBottom: 12 }}>
-                      <span style={{ fontSize: 20, marginRight: 8 }}>{getSportEmoji(sport)}</span>
-                      <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {matchName.length > 50 ? matchName.substring(0, 50) + '...' : matchName}
+                    {/* Sport badge + match name */}
+                    <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ 
+                        padding: '4px 8px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        background: `${sportInfo.color}20`,
+                        color: sportInfo.color
+                      }}>
+                        {sportInfo.emoji} {sportInfo.name}
+                      </span>
+                      <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
+                        {matchName.length > 40 ? matchName.substring(0, 40) + '...' : matchName}
                       </span>
                     </div>
 
@@ -407,7 +425,7 @@ function Trades() {
                       </div>
                     )}
 
-                    {/* Footer: Signal + Books */}
+                    {/* Footer: Signal + Book Name */}
                     <div style={{ 
                       display: 'flex', 
                       justifyContent: 'space-between',
@@ -426,7 +444,7 @@ function Trades() {
                         {signal}
                       </span>
                       <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                        {numBooks} book{numBooks > 1 ? 's' : ''} agree
+                        {bookName}
                       </span>
                     </div>
 
@@ -510,6 +528,39 @@ function Trades() {
       {/* TRADES TAB */}
       {activeTab === 'trades' && (
         <div className="trades-tab">
+          {/* Summary Banner */}
+          <div style={{
+            background: '#1a1a2e',
+            border: '1px solid rgba(255,255,255,0.06)',
+            borderRadius: 12,
+            padding: 20,
+            marginBottom: 24,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 16
+          }}>
+            <div>
+              <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Total Deployed</div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>${activeTrades.reduce((sum, t) => sum + (t.size_usd || 0), 0).toFixed(2)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Won</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: '#10B981' }}>{performanceSummary.wins}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Open</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: '#F59E0B' }}>{performanceSummary.activePositions}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>P&L</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: performanceSummary.totalPnl >= 0 ? '#10B981' : '#EF4444' }}>
+                {performanceSummary.totalPnl >= 0 ? '+' : ''}${performanceSummary.totalPnl.toFixed(2)}
+              </div>
+            </div>
+          </div>
+
           {/* Performance Summary Cards */}
           <div style={{ 
             display: 'grid',
@@ -652,6 +703,7 @@ function Trades() {
                   const statusEmoji = isOpen ? '⏳' : isWin ? '✅' : '❌'
                   const statusLabel = isOpen ? 'Open' : isWin ? 'Won' : 'Lost'
                   const accentColor = isOpen ? '#F59E0B' : isWin ? '#10B981' : '#EF4444'
+                  const sportInfo = getSportInfo(trade)
                   
                   return (
                     <div
@@ -693,14 +745,31 @@ function Trades() {
                         </span>
                       </div>
 
-                      {/* Market name */}
+                      {/* Market name + Sport badge */}
                       <div style={{ 
                         fontWeight: 600, 
                         marginBottom: 12,
                         fontSize: 15,
-                        color: 'var(--text-primary)'
+                        color: 'var(--text-primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        flexWrap: 'wrap'
                       }}>
-                        {trade.market_title || trade.market_id || 'Unknown Market'}
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          {trade.market_title || trade.market_id || 'Unknown Market'}
+                        </span>
+                        <span style={{
+                          padding: '4px 8px',
+                          borderRadius: 6,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          background: `${sportInfo.color}20`,
+                          color: sportInfo.color,
+                          flexShrink: 0
+                        }}>
+                          {sportInfo.emoji} {sportInfo.name}
+                        </span>
                       </div>
 
                       {/* Trade details grid */}
