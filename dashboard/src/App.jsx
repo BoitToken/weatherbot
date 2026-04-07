@@ -9,6 +9,7 @@ import Performance from './pages/Performance'
 import Trades from './pages/Trades'
 import Settings from './pages/Settings'
 import PolymarketEmbed from './pages/PolymarketEmbed'
+import LeaderStrategy from './pages/LeaderStrategy'
 
 // Global error boundary
 class ErrorBoundary extends Component {
@@ -41,6 +42,7 @@ function Sidebar() {
     { path: '/performance', label: 'Performance', icon: '🏆' },
     { path: '/trades', label: 'Trades', icon: '💰' },
     { path: '/polymarket', label: 'Polymarket', icon: '🔮' },
+    { path: '/leader', label: 'Leader', icon: '🎯' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
@@ -80,6 +82,7 @@ function App() {
               <Route path="/performance" element={<Performance />} />
               <Route path="/trades" element={<Trades />} />
               <Route path="/polymarket" element={<PolymarketEmbed />} />
+              <Route path="/leader" element={<LeaderStrategy />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </ErrorBoundary>

@@ -168,6 +168,86 @@ async def init_tables():
     
     CREATE INDEX IF NOT EXISTS idx_taf_station_time 
     ON taf_forecasts(station_icao, issue_time DESC);
+    
+    -- LEADER STRATEGY - Copy-Trading Tables
+    
+    -- Leader wallets to track
+    CREATE TABLE IF NOT EXISTS leader_wallets (
+        id SERIAL PRIMARY KEY,
+        wallet TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL DEFAULT 'Unknown',
+        active BOOLEAN DEFAULT true,
+        scale_factor REAL DEFAULT 0.00025,  -- $25 per $100K = 0.00025
+        max_position REAL DEFAULT 50.0,     -- max $50 per trade
+        min_edge REAL DEFAULT 0.0,          -- minimum edge to copy (0 = copy all)
+        created_at TIMESTAMP DEFAULT NOW()
+    );
+    
+    -- Track leader's detected trades
+    CREATE TABLE IF NOT EXISTS leader_trades (
+        id SERIAL PRIMARY KEY,
+        wallet TEXT NOT NULL,
+        condition_id TEXT NOT NULL,
+        market_slug TEXT,
+        market_title TEXT,
+        trade_type TEXT,          -- SPREAD, TOTAL, MONEYLINE
+        sport TEXT,               -- NBA, NHL, NCAA, etc
+        side TEXT,                -- BUY/SELL  
+        outcome_index INT,
+        leader_price REAL,
+        leader_size REAL,
+        leader_total_position REAL DEFAULT 0,  -- accumulated position on this market
+        our_size REAL DEFAULT 0,               -- what we'd deploy
+        our_price REAL DEFAULT 0,              -- price when we detected
+        status TEXT DEFAULT 'detected',        -- detected, copied, skipped, settled
+        result TEXT,                            -- won, lost, push
+        pnl REAL DEFAULT 0,
+        detected_at TIMESTAMP DEFAULT NOW(),
+        settled_at TIMESTAMP,
+        polymarket_url TEXT,
+        UNIQUE(wallet, condition_id, detected_at)
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_leader_trades_wallet 
+    ON leader_trades(wallet, detected_at DESC);
+    
+    CREATE INDEX IF NOT EXISTS idx_leader_trades_status 
+    ON leader_trades(status, detected_at DESC);
+    
+    -- Track leader performance over time
+    CREATE TABLE IF NOT EXISTS leader_performance (
+        id SERIAL PRIMARY KEY,
+        wallet TEXT NOT NULL,
+        date DATE NOT NULL,
+        trades_count INT DEFAULT 0,
+        volume REAL DEFAULT 0,
+        pnl REAL DEFAULT 0,
+        win_count INT DEFAULT 0,
+        loss_count INT DEFAULT 0,
+        avg_entry_price REAL DEFAULT 0,
+        UNIQUE(wallet, date)
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_leader_performance_wallet 
+    ON leader_performance(wallet, date DESC);
+    
+    -- Our copy positions  
+    CREATE TABLE IF NOT EXISTS leader_copy_positions (
+        id SERIAL PRIMARY KEY,
+        leader_trade_id INT REFERENCES leader_trades(id),
+        condition_id TEXT NOT NULL,
+        market_title TEXT,
+        our_entry_price REAL,
+        our_size REAL,
+        outcome_index INT,
+        status TEXT DEFAULT 'open',  -- open, won, lost, expired
+        pnl REAL DEFAULT 0,
+        opened_at TIMESTAMP DEFAULT NOW(),
+        closed_at TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_leader_copy_positions_status 
+    ON leader_copy_positions(status, opened_at DESC);
     """
     
     for statement in tables_sql.split(';'):

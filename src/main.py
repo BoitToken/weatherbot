@@ -210,7 +210,7 @@ async def pre_match_alerts():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
-    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine, _telegram_bot
+    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine, _telegram_bot, _leader_poller
 
     logger.info("🚀 WeatherBot starting...")
     _startup_time = datetime.utcnow()
@@ -276,6 +276,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ Telegram bot init failed: {e}")
     
+    # ═══════════════════════════════════════════════════════════════
+    # LEADER STRATEGY — Copy-Trading Poller
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        from src.leader_poller import LeaderPoller
+        async_pool = get_async_pool()
+        _leader_poller = LeaderPoller(
+            db_pool=async_pool,
+            telegram_bot=_telegram_bot if '_telegram_bot' in dir() else None
+        )
+        asyncio.create_task(_leader_poller.start())
+        logger.info("✅ Leader Poller started (tracking 0x4924...3782)")
+    except Exception as e:
+        logger.error(f"⚠️ Leader Poller init failed: {e}")
+    
     # Start scheduler
     scheduler.add_job(scheduled_data_scan, 'interval', minutes=30, id='data_loop', replace_existing=True)
     scheduler.add_job(scheduled_signal_scan, 'interval', minutes=5, id='signal_loop', replace_existing=True)
@@ -303,6 +318,10 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 WeatherBot shutting down...")
     scheduler.shutdown(wait=False)
+    
+    # Shutdown Leader Poller
+    if '_leader_poller' in globals() and _leader_poller:
+        await _leader_poller.stop()
     
     # Shutdown Telegram bot
     if _telegram_bot:
@@ -2431,6 +2450,150 @@ async def manual_broadcast(data: dict):
     except Exception as e:
         logger.error(f"Manual broadcast error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Leader Strategy — Copy-Trading System
+# =============================================================================
+
+LEADER_WALLET = "0x492442eab586f242b53bda933fd5de859c8a3782"
+
+
+@app.get("/api/leader/trades")
+async def get_leader_trades(limit: int = 50, status: str = None, sport: str = None):
+    """Get tracked leader trades."""
+    query = "SELECT * FROM leader_trades ORDER BY detected_at DESC LIMIT %s"
+    params = (min(limit, 200),)
+    
+    if status:
+        query = "SELECT * FROM leader_trades WHERE status = %s ORDER BY detected_at DESC LIMIT %s"
+        params = (status, min(limit, 200))
+    
+    rows = await fetch_all(query, tuple(params))
+    return {"trades": rows or [], "count": len(rows or [])}
+
+
+@app.get("/api/leader/stats")
+async def get_leader_stats():
+    """Get leader strategy statistics."""
+    # Overall stats
+    stats = await fetch_one("""
+        SELECT 
+            COUNT(*) as total_trades,
+            SUM(leader_size) as total_volume,
+            AVG(leader_price) as avg_entry_price,
+            COUNT(CASE WHEN status = 'detected' THEN 1 END) as active,
+            COUNT(CASE WHEN result = 'won' THEN 1 END) as wins,
+            COUNT(CASE WHEN result = 'lost' THEN 1 END) as losses,
+            SUM(CASE WHEN result IS NOT NULL THEN pnl ELSE 0 END) as total_pnl,
+            SUM(our_size) as our_total_deployed
+        FROM leader_trades
+    """)
+    
+    # By sport breakdown
+    by_sport = await fetch_all("""
+        SELECT sport, COUNT(*) as count, SUM(leader_size) as volume, 
+               AVG(leader_price) as avg_price
+        FROM leader_trades 
+        GROUP BY sport ORDER BY volume DESC
+    """)
+    
+    # By type breakdown
+    by_type = await fetch_all("""
+        SELECT trade_type, COUNT(*) as count, SUM(leader_size) as volume
+        FROM leader_trades
+        GROUP BY trade_type ORDER BY volume DESC
+    """)
+    
+    # Daily performance
+    daily = await fetch_all("""
+        SELECT * FROM leader_performance 
+        WHERE wallet = %s 
+        ORDER BY date DESC LIMIT 14
+    """, (LEADER_WALLET,))
+    
+    return {
+        "stats": stats or {},
+        "by_sport": by_sport or [],
+        "by_type": by_type or [],
+        "daily_performance": daily or [],
+        "leader_wallet": LEADER_WALLET,
+        "leader_name": "Multicolored-Self",
+        "leader_rank": "#1 Monthly"
+    }
+
+
+@app.get("/api/leader/live")  
+async def get_leader_live_activity():
+    """Get leader's live activity feed (real-time from Polymarket API)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://data-api.polymarket.com/v1/activity",
+                params={"user": LEADER_WALLET, "limit": 20}
+            )
+            data = resp.json()
+            
+            activities = []
+            for a in data:
+                slug = a.get('slug', '').lower()
+                # Classify
+                if 'spread' in slug: 
+                    trade_type = 'SPREAD'
+                elif 'total' in slug: 
+                    trade_type = 'TOTAL'
+                else: 
+                    trade_type = 'ML'
+                
+                sport = 'OTHER'
+                for s, kw in [('NBA','nba'),('NHL','nhl'),('NCAA','ncaa'),('MLB','mlb')]:
+                    if kw in slug:
+                        sport = s
+                        break
+                
+                activities.append({
+                    "type": a.get("type"),
+                    "title": a.get("title"),
+                    "slug": a.get("slug"),
+                    "price": float(a.get("price", 0)),
+                    "size": float(a.get("usdcSize", 0)),
+                    "side": a.get("side", ""),
+                    "outcome": a.get("outcome", ""),
+                    "outcome_index": a.get("outcomeIndex"),
+                    "timestamp": a.get("timestamp"),
+                    "trade_type": trade_type,
+                    "sport": sport,
+                    "condition_id": a.get("conditionId"),
+                })
+            
+            return {"activities": activities, "count": len(activities)}
+    except Exception as e:
+        logger.error(f"Leader live activity error: {e}")
+        return {"activities": [], "error": str(e)}
+
+
+@app.get("/api/leader/config")
+async def get_leader_config():
+    """Get leader tracking configuration."""
+    wallets = await fetch_all("SELECT * FROM leader_wallets WHERE active = true")
+    return {
+        "wallets": wallets or [{
+            "wallet": LEADER_WALLET,
+            "name": "Multicolored-Self (#1 Monthly)",
+            "scale_factor": 0.00025,
+            "max_position": 50.0,
+            "active": True
+        }],
+        "poll_interval": 60,
+        "strategy_rules": {
+            "only_spreads_totals": True,
+            "max_entry_price": 0.60,
+            "min_leader_size": 10000,
+            "sports_filter": ["NBA", "NHL", "NCAA"],
+            "copy_delay_seconds": 5,
+        }
+    }
 
 
 # =============================================================================
