@@ -13,6 +13,14 @@ function getSportInfo(trade) {
   return { emoji: '📊', name: 'Other', color: '#7c3aed' }
 }
 
+function formatLargeNumber(num) {
+  const val = parseFloat(num) || 0
+  if (val >= 1e9) return `$${(val / 1e9).toFixed(2)}B`
+  if (val >= 1e6) return `$${(val / 1e6).toFixed(2)}M`
+  if (val >= 1e3) return `$${(val / 1e3).toFixed(1)}K`
+  return `$${val.toFixed(0)}`
+}
+
 function Overview() {
   const [botStatus, setBotStatus] = useState(null)
   const [bankroll, setBankroll] = useState(null)
@@ -22,6 +30,9 @@ function Overview() {
   const [paperTrades, setPaperTrades] = useState([])
   const [sportsBreakdown, setSportsBreakdown] = useState([])
   const [dailyPnl, setDailyPnl] = useState([])
+  const [topTraders, setTopTraders] = useState([])
+  const [traderCategory, setTraderCategory] = useState('OVERALL')
+  const [traderTimePeriod, setTraderTimePeriod] = useState('MONTH')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -32,14 +43,15 @@ function Overview() {
 
   const fetchData = async () => {
     try {
-      const [statusRes, bankrollRes, activeRes, allRes, paperRes, sportsRes, pnlRes] = await Promise.all([
+      const [statusRes, bankrollRes, activeRes, allRes, paperRes, sportsRes, pnlRes, tradersRes] = await Promise.all([
         axios.get('/api/bot/status'),
         axios.get('/api/bankroll'),
         axios.get('/api/trades/active'),
         axios.get('/api/trades'),
         axios.get('/api/paper-trades').catch(() => ({ data: { data: [] } })),
         axios.get('/api/performance/sports-breakdown').catch(() => ({ data: { sports: [] } })),
-        axios.get('/api/pnl/daily?days=7')
+        axios.get('/api/pnl/daily?days=7'),
+        axios.get(`/api/leaderboard?category=${traderCategory}&timePeriod=${traderTimePeriod}&orderBy=PNL&limit=10`).catch(() => ({ data: { traders: [] } }))
       ])
 
       setBotStatus(statusRes.data)
@@ -48,6 +60,7 @@ function Overview() {
       setAllTrades(allRes.data.data || [])
       setPaperTrades(paperRes.data.data || [])
       setSportsBreakdown(sportsRes.data.sports || [])
+      setTopTraders(tradersRes.data.traders || [])
       
       const pnlData = pnlRes.data.data
       setDailyPnl(pnlData)
@@ -359,6 +372,106 @@ function Overview() {
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Top 10 Polymarket Traders */}
+      {topTraders.length > 0 && (
+        <div style={{ marginTop: '32px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+            <h2 style={{ fontSize: '20px', fontWeight: 700, margin: 0 }}>🏆 Top Polymarket Traders</h2>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {['OVERALL', 'SPORTS', 'CRYPTO', 'POLITICS'].map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => { setTraderCategory(cat); fetchData(); }}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    background: traderCategory === cat ? '#7c3aed' : '#1a1a2e',
+                    color: traderCategory === cat ? '#fff' : '#94a3b8',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+            {['DAY', 'WEEK', 'MONTH', 'ALL'].map(period => (
+              <button
+                key={period}
+                onClick={() => { setTraderTimePeriod(period); fetchData(); }}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 8,
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: traderTimePeriod === period ? '#10B981' : '#1a1a2e',
+                  color: traderTimePeriod === period ? '#fff' : '#94a3b8',
+                  transition: 'all 0.2s'
+                }}
+              >
+                {period.charAt(0) + period.slice(1).toLowerCase()}
+              </button>
+            ))}
+          </div>
+
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: '60px' }}>#</th>
+                  <th>Name</th>
+                  <th>P&L</th>
+                  <th>Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(Array.isArray(topTraders) ? topTraders : []).map((trader) => (
+                  <tr key={trader.rank}>
+                    <td style={{ fontWeight: 700, fontSize: '16px', color: '#7c3aed' }}>
+                      {trader.rank}
+                    </td>
+                    <td>
+                      <a
+                        href={`https://polymarket.com/profile/${trader.wallet}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          color: '#fff',
+                          textDecoration: 'none',
+                          fontWeight: 600,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px'
+                        }}
+                        onMouseEnter={e => e.target.style.color = '#7c3aed'}
+                        onMouseLeave={e => e.target.style.color = '#fff'}
+                      >
+                        {trader.name.length > 25 ? trader.name.substring(0, 25) + '...' : trader.name}
+                        {trader.verified && <span style={{ color: '#10B981', fontSize: '14px' }}>✓</span>}
+                      </a>
+                    </td>
+                    <td style={{ color: trader.pnl >= 0 ? '#10B981' : '#EF4444', fontWeight: 700, fontSize: '15px' }}>
+                      {formatLargeNumber(trader.pnl)}
+                    </td>
+                    <td style={{ color: '#94a3b8', fontSize: '14px' }}>
+                      {trader.volume > 0 ? formatLargeNumber(trader.volume) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
