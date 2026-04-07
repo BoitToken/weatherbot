@@ -431,6 +431,136 @@ async def get_polymarket_leaderboard(
 
 
 # =============================================================================
+# Polymarket Gamma API Proxies
+# =============================================================================
+
+@app.get("/api/polymarket/events")
+async def proxy_polymarket_events(
+    limit: int = 20,
+    active: bool = True,
+    closed: bool = False,
+    tag: str = None,
+    order: str = "volume",
+    ascending: bool = False
+):
+    """Proxy Polymarket Gamma events API."""
+    import httpx
+    try:
+        params = {
+            "limit": min(limit, 50),
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if tag and tag != 'all':
+            params["tag"] = tag
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/events", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            events = []
+            for e in (data if isinstance(data, list) else []):
+                markets = e.get("markets", [])
+                parsed_markets = []
+                for m in markets:
+                    prices_str = m.get("outcomePrices", "[]")
+                    try:
+                        prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                    except:
+                        prices = []
+                    parsed_markets.append({
+                        "id": m.get("id"),
+                        "question": m.get("question"),
+                        "yes_price": float(prices[0]) if len(prices) > 0 else 0.5,
+                        "no_price": float(prices[1]) if len(prices) > 1 else 0.5,
+                        "volume": float(m.get("volume", 0) or 0),
+                        "image": m.get("image"),
+                        "active": m.get("active", True),
+                        "closed": m.get("closed", False),
+                        "endDate": m.get("endDate"),
+                        "outcomes": m.get("outcomes"),
+                        "slug": m.get("slug"),
+                    })
+                
+                events.append({
+                    "id": e.get("id"),
+                    "title": e.get("title"),
+                    "description": (e.get("description") or "")[:300],
+                    "image": e.get("image"),
+                    "icon": e.get("icon"),
+                    "volume": float(e.get("volume", 0) or 0),
+                    "active": e.get("active", True),
+                    "closed": e.get("closed", False),
+                    "markets": parsed_markets,
+                    "market_count": len(parsed_markets),
+                })
+            
+            return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.error(f"Polymarket events proxy error: {e}")
+        return {"events": [], "error": str(e)}
+
+
+@app.get("/api/polymarket/markets")
+async def proxy_polymarket_markets(
+    limit: int = 50,
+    active: bool = True,
+    closed: bool = False,
+    tag: str = None,
+    order: str = "volume",
+    ascending: bool = False
+):
+    """Proxy Polymarket Gamma markets API."""
+    import httpx
+    try:
+        params = {
+            "limit": min(limit, 100),
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if tag and tag != 'all':
+            params["tag"] = tag
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/markets", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            markets = []
+            for m in (data if isinstance(data, list) else []):
+                prices_str = m.get("outcomePrices", "[]")
+                try:
+                    prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                except:
+                    prices = []
+                markets.append({
+                    "id": m.get("id"),
+                    "question": m.get("question"),
+                    "yes_price": float(prices[0]) if len(prices) > 0 else 0.5,
+                    "no_price": float(prices[1]) if len(prices) > 1 else 0.5,
+                    "volume": float(m.get("volume", 0) or 0),
+                    "image": m.get("image"),
+                    "icon": m.get("icon"),
+                    "active": m.get("active", True),
+                    "closed": m.get("closed", False),
+                    "endDate": m.get("endDate"),
+                    "outcomes": m.get("outcomes"),
+                    "slug": m.get("slug"),
+                    "description": (m.get("description") or "")[:200],
+                })
+            
+            return {"markets": markets, "count": len(markets)}
+    except Exception as e:
+        logger.error(f"Polymarket markets proxy error: {e}")
+        return {"markets": [], "error": str(e)}
+
+
+# =============================================================================
 # Health & Status
 # =============================================================================
 
