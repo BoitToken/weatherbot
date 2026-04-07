@@ -44,9 +44,11 @@ function SportsIntelligence() {
   const allSports = Object.keys(sportCounts).sort((a, b) => sportCounts[b].count - sportCounts[a].count)
   const arbCount = arbitrage?.total || 0
   const liveCount = live?.live || 0
-  const overpricedGroups = (groups?.groups || []).filter(g => g.overpriced)
+  const groupsArray = Array.isArray(groups?.groups) ? groups.groups : []
+  const overpricedGroups = groupsArray.filter(g => g.overpriced)
 
-  const filteredMarkets = (markets?.markets || []).filter(m => sportFilter === 'all' || m.sport === sportFilter)
+  const marketsArray = Array.isArray(markets?.markets) ? markets.markets : []
+  const filteredMarkets = marketsArray.filter(m => sportFilter === 'all' || m.sport === sportFilter)
 
   const sportEmoji = { nhl: '🏒', nba: '🏀', soccer: '⚽', mlb: '⚾', nfl: '🏈', tennis: '🎾', cricket: '🏏', ipl: '🏏', f1: '🏎️', combat: '🥊', other: '🎯' }
   const sportColors = { ipl: '#FF6B00', nba: '#1D428A', nhl: '#A2AAAD', soccer: '#00B140', mlb: '#002D72' }
@@ -141,7 +143,7 @@ function SportsIntelligence() {
           </div>
 
           {/* Market Groups with Sum Analysis */}
-          {(groups?.groups || []).length > 0 && (
+          {groupsArray.length > 0 && (
             <div className="card" style={{ padding: 20, marginBottom: 24 }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>📊 Market Groups — Sum Analysis</h3>
               <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 16 }}>
@@ -160,7 +162,7 @@ function SportsIntelligence() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(groups?.groups || []).filter(g => sportFilter === 'all' || g.sport === sportFilter).slice(0, 30).map(g => (
+                    {groupsArray.filter(g => sportFilter === 'all' || g.sport === sportFilter).slice(0, 30).map(g => (
                       <tr key={g.group_id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)',
                         background: g.overpriced ? 'rgba(239,68,68,0.06)' : 'transparent' }}>
                         <td style={{ padding: '8px', fontWeight: 600, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.group_id}</td>
@@ -209,7 +211,7 @@ function SportsIntelligence() {
       {activeTab === 'arbitrage' && (
         <div className="card" style={{ padding: 20 }}>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>🔒 Logical Arbitrage Opportunities</h3>
-          {(arbitrage?.opportunities || []).length === 0 ? (
+          {(Array.isArray(arbitrage?.opportunities) ? arbitrage.opportunities : []).length === 0 ? (
             <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-secondary)' }}>
               <div style={{ fontSize: 40, marginBottom: 12 }}>🔍</div>
               <p>Scanning for arbitrage... Correlation engine checks group sums, subset violations, and binary mispricing every 3 minutes.</p>
@@ -219,7 +221,7 @@ function SportsIntelligence() {
             </div>
           ) : (
             <div style={{ display: 'grid', gap: 12 }}>
-              {(arbitrage.opportunities).map((opp, i) => (
+              {(Array.isArray(arbitrage?.opportunities) ? arbitrage.opportunities : []).map((opp, i) => (
                 <div key={i} style={{ padding: 16, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)', borderRadius: 10 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{opp.type || 'Arbitrage'}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{opp.reasoning || opp.description}</div>
@@ -238,14 +240,14 @@ function SportsIntelligence() {
       {activeTab === 'live' && (
         <div className="card" style={{ padding: 20 }}>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>⚡ Live & Upcoming Games</h3>
-          {(live?.events || []).length === 0 ? (
+          {(Array.isArray(live?.events) ? live.events : []).length === 0 ? (
             <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-secondary)' }}>
               <div style={{ fontSize: 40, marginBottom: 12 }}>📺</div>
               <p>No live games right now. ESPN feeds update automatically when games start.</p>
             </div>
           ) : (
             <div style={{ display: 'grid', gap: 10 }}>
-              {(live.events).map(e => (
+              {(Array.isArray(live?.events) ? live.events : []).map(e => (
                 <div key={e.event_id || e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 14,
                   background: e.status === 'live' ? 'rgba(239,68,68,0.06)' : 'var(--bg-tertiary)', borderRadius: 10,
                   border: e.status === 'live' ? '1px solid rgba(239,68,68,0.2)' : '1px solid var(--border)' }}>
@@ -273,7 +275,7 @@ function SportsIntelligence() {
       {activeTab === 'signals' && (
         <div className="card" style={{ padding: 20 }}>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>📊 Sports Trading Signals</h3>
-          {signals.length === 0 ? (
+          {(Array.isArray(signals) ? signals : []).length === 0 ? (
             <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-secondary)' }}>
               <div style={{ fontSize: 40, marginBottom: 12 }}>🔄</div>
               <p>Scanning markets for edges... Signals will appear when the correlation engine or cross-odds engine detect mispricing.</p>
@@ -294,7 +296,7 @@ function SportsIntelligence() {
                   </tr>
                 </thead>
                 <tbody>
-                  {signals.map(s => (
+                  {(Array.isArray(signals) ? signals : []).map(s => (
                     <tr key={s.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
                       <td style={{ padding: 8 }}>{new Date(s.created_at).toLocaleTimeString()}</td>
                       <td style={{ padding: 8 }}><span style={{ padding: '2px 6px', borderRadius: 4, fontSize: 10, background: 'rgba(139,92,246,0.12)', color: '#8B5CF6' }}>{s.edge_type}</span></td>
