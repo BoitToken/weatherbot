@@ -5,6 +5,9 @@ All endpoints query REAL database — no stubs, no mocks.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -2183,6 +2186,36 @@ async def manual_broadcast(data: dict):
     except Exception as e:
         logger.error(f"Manual broadcast error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Static Files — Serve React Dashboard
+# =============================================================================
+
+# Path to the built React dashboard
+BUILD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard", "dist")
+
+if os.path.exists(BUILD_PATH):
+    # Mount static assets
+    app.mount("/assets", StaticFiles(directory=os.path.join(BUILD_PATH, "assets")), name="assets")
+    
+    # Serve index.html for all non-API routes (SPA fallback)
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # If path starts with /api, it's already handled by API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
+        
+        # For root or any non-API path, serve index.html (React Router will handle)
+        file_path = os.path.join(BUILD_PATH, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+        else:
+            return FileResponse(os.path.join(BUILD_PATH, "index.html"))
+    
+    logger.info(f"✅ Serving React dashboard from {BUILD_PATH}")
+else:
+    logger.warning(f"⚠️ Dashboard build not found at {BUILD_PATH}. Run 'npm run build' in dashboard/")
 
 
 if __name__ == "__main__":

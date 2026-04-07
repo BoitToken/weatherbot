@@ -1,20 +1,33 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceDot, Cell } from 'recharts'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceDot } from 'recharts'
 
 function Trades() {
+  const [activeTab, setActiveTab] = useState('scanner') // scanner | trades
+  
+  // Performance summary (used in Trades tab)
   const [performanceSummary, setPerformanceSummary] = useState({
     totalPnl: 0, roiPct: 0, winRate: 0, totalTrades: 0,
     activePositions: 0, bestTrade: 0, worstTrade: 0, wins: 0, losses: 0
   })
+  
+  // Trades tab data
   const [pnlData, setPnlData] = useState([])
   const [strategyComparison, setStrategyComparison] = useState([])
   const [recentTrades, setRecentTrades] = useState([])
   const [activePositions, setActivePositions] = useState([])
+  const [signalsData, setSignalsData] = useState([])
+  
+  // Scanner tab data
+  const [scannerOpportunities, setScannerOpportunities] = useState([])
+  const [groupOverpricing, setGroupOverpricing] = useState([])
+  
+  // UI state
   const [loading, setLoading] = useState(true)
   const [timeRange, setTimeRange] = useState('7d') // 7d | 30d | all
   const [tradeFilter, setTradeFilter] = useState('all') // all | open | won | lost | by-strategy
   const [selectedStrategy, setSelectedStrategy] = useState(null)
+  const [sportFilter, setSportFilter] = useState('all') // all | ipl | nba | nhl | soccer
 
   useEffect(() => {
     fetchAllData()
@@ -32,14 +45,22 @@ function Trades() {
         winRateRes,
         pnlRes,
         bankrollRes,
-        strategyRes
+        strategyRes,
+        oddsComparisonRes,
+        arbitrageRes,
+        groupsRes,
+        signalsRes
       ] = await Promise.all([
         axios.get('/api/trades?limit=100').catch(() => ({ data: { data: [] } })),
         axios.get('/api/trades/active').catch(() => ({ data: { data: [] } })),
         axios.get(`/api/analytics/win-rate?days=${days}`).catch(() => ({ data: { win_rate: 0, total_trades: 0, wins: 0, losses: 0 } })),
         axios.get(`/api/pnl/daily?days=${days}`).catch(() => ({ data: { data: [] } })),
         axios.get('/api/bankroll').catch(() => ({ data: { total: 0 } })),
-        axios.get('/api/strategy/comparison').catch(() => ({ data: { strategies: [] } }))
+        axios.get('/api/strategy/comparison').catch(() => ({ data: { strategies: [] } })),
+        axios.get('/api/performance/odds-comparison').catch(() => ({ data: { data: [] } })),
+        axios.get('/api/sports/arbitrage').catch(() => ({ data: { data: [] } })),
+        axios.get('/api/sports/groups').catch(() => ({ data: { data: [] } })),
+        axios.get('/api/performance/signals/latest').catch(() => ({ data: { data: [] } }))
       ])
 
       const trades = tradesRes.data.data || []
@@ -47,15 +68,32 @@ function Trades() {
       const winRateData = winRateRes.data
       const pnl = pnlRes.data.data || []
       const bankroll = bankrollRes.data
-      // strategies can be dict or array — normalize to array
+      
+      // Normalize strategies (can be dict or array)
       const rawStrategies = strategyRes.data.strategies || []
       const strategies = Array.isArray(rawStrategies) 
         ? rawStrategies 
-        : Object.entries(rawStrategies).map(([key, val]) => ({ id: key, ...val }))
+        : Object.entries(rawStrategies).map(([key, val]) => ({ id: key, name: key, ...val }))
+
+      // Scanner data
+      const oddsComparison = oddsComparisonRes.data.data || []
+      const arbitrage = arbitrageRes.data.data || []
+      const groups = groupsRes.data.data || []
+      const signals = signalsRes.data.data || []
 
       setRecentTrades(trades)
       setActivePositions(active)
       setStrategyComparison(strategies)
+      setSignalsData(signals)
+
+      // Combine scanner opportunities
+      const opportunities = [
+        ...oddsComparison.map(o => ({ ...o, source: 'odds_comparison' })),
+        ...arbitrage.map(a => ({ ...a, source: 'arbitrage' })),
+        ...groups.filter(g => (g.sum_probability || 0) > 1.0).map(g => ({ ...g, source: 'group_overpricing' }))
+      ]
+      setScannerOpportunities(opportunities)
+      setGroupOverpricing(groups.filter(g => (g.sum_probability || 0) > 1.0))
 
       // Calculate cumulative P&L
       const cumulativePnl = []
@@ -96,7 +134,7 @@ function Trades() {
 
       setLoading(false)
     } catch (error) {
-      console.error('Failed to fetch performance data:', error)
+      console.error('Failed to fetch data:', error)
       setLoading(false)
     }
   }
@@ -128,420 +166,609 @@ function Trades() {
     return filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
   }
 
+  const getFilteredOpportunities = () => {
+    let filtered = scannerOpportunities
+
+    if (sportFilter !== 'all') {
+      filtered = filtered.filter(o => {
+        const sport = (o.sport || o.market_title || '').toLowerCase()
+        return sport.includes(sportFilter.toLowerCase())
+      })
+    }
+
+    // Sort by edge (highest first)
+    return filtered.sort((a, b) => {
+      const edgeA = a.edge || a.edge_pct || a.sum_probability || 0
+      const edgeB = b.edge || b.edge_pct || b.sum_probability || 0
+      return edgeB - edgeA
+    })
+  }
+
+  const getSportEmoji = (sport) => {
+    const s = (sport || '').toLowerCase()
+    if (s.includes('ipl') || s.includes('cricket')) return '🏏'
+    if (s.includes('nba') || s.includes('basketball')) return '🏀'
+    if (s.includes('nhl') || s.includes('hockey')) return '🏒'
+    if (s.includes('soccer') || s.includes('football')) return '⚽'
+    if (s.includes('nfl')) return '🏈'
+    if (s.includes('baseball') || s.includes('mlb')) return '⚾'
+    return '🎯'
+  }
+
   if (loading) {
-    return <div className="loading">Loading performance dashboard...</div>
+    return (
+      <div className="loading" style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        minHeight: '60vh',
+        color: 'var(--text-secondary)'
+      }}>
+        Loading dashboard...
+      </div>
+    )
   }
 
   const filteredTrades = getFilteredTrades()
+  const filteredOpportunities = getFilteredOpportunities()
 
   return (
-    <div className="trades-page">
-      <div className="page-header">
-        <h1 className="page-title">💰 Performance Dashboard</h1>
-        <p className="page-subtitle">Track paper trades, analyze strategy performance, and optimize settings</p>
+    <div className="trades-page" style={{ paddingBottom: 40 }}>
+      {/* Page Header */}
+      <div className="page-header" style={{ marginBottom: 24 }}>
+        <h1 className="page-title" style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>
+          💰 Trading Dashboard
+        </h1>
+        <p className="page-subtitle" style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
+          Market scanner, trade history, and strategy analytics
+        </p>
       </div>
 
-      {/* Section 1: Performance Summary Cards */}
-      <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        <div className="card">
-          <div className="card-title">Total P&L</div>
-          <div className={`card-value ${performanceSummary.totalPnl >= 0 ? 'positive' : 'negative'}`}>
-            {performanceSummary.totalPnl >= 0 ? '+' : ''}${performanceSummary.totalPnl.toFixed(2)}
-          </div>
-          <div className="card-label">
-            {performanceSummary.roiPct >= 0 ? '+' : ''}{performanceSummary.roiPct.toFixed(2)}% ROI
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Win Rate</div>
-          <div className="card-value">
-            {performanceSummary.winRate.toFixed(1)}%
-          </div>
-          <div className="card-label">
-            {performanceSummary.wins}W / {performanceSummary.losses}L
-          </div>
-          {/* Circular progress indicator */}
-          <div style={{ marginTop: 12 }}>
-            <svg width="80" height="80" style={{ transform: 'rotate(-90deg)' }}>
-              <circle cx="40" cy="40" r="32" fill="none" stroke="var(--bg-tertiary)" strokeWidth="6" />
-              <circle 
-                cx="40" cy="40" r="32" fill="none" 
-                stroke={performanceSummary.winRate >= 50 ? '#10B981' : '#F59E0B'}
-                strokeWidth="6"
-                strokeDasharray={`${(performanceSummary.winRate / 100) * 201} 201`}
-                strokeLinecap="round"
-              />
-            </svg>
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Active Positions</div>
-          <div className="card-value">{performanceSummary.activePositions}</div>
-          <div className="card-label">
-            {activePositions.reduce((sum, p) => sum + parseFloat(p.unrealized_pnl_usd || 0), 0) >= 0 ? '📈' : '📉'} Open Trades
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Total Trades</div>
-          <div className="card-value">{performanceSummary.totalTrades}</div>
-          <div className="card-label">All Time</div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Best Trade</div>
-          <div className="card-value positive">
-            +${performanceSummary.bestTrade.toFixed(2)}
-          </div>
-          <div className="card-label">Single Win</div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Worst Trade</div>
-          <div className="card-value negative">
-            ${performanceSummary.worstTrade.toFixed(2)}
-          </div>
-          <div className="card-label">Single Loss</div>
-        </div>
+      {/* Tab Bar */}
+      <div style={{ 
+        display: 'flex', 
+        gap: 0, 
+        borderBottom: '2px solid var(--border)',
+        marginBottom: 32,
+        overflowX: 'auto',
+        WebkitOverflowScrolling: 'touch'
+      }}>
+        <button
+          onClick={() => setActiveTab('scanner')}
+          style={{
+            padding: '14px 24px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'scanner' ? '3px solid #7c3aed' : '3px solid transparent',
+            color: activeTab === 'scanner' ? '#7c3aed' : 'var(--text-secondary)',
+            fontWeight: 700,
+            fontSize: 15,
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+            whiteSpace: 'nowrap',
+            minHeight: 44
+          }}
+        >
+          🔍 Scanner
+        </button>
+        <button
+          onClick={() => setActiveTab('trades')}
+          style={{
+            padding: '14px 24px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'trades' ? '3px solid #7c3aed' : '3px solid transparent',
+            color: activeTab === 'trades' ? '#7c3aed' : 'var(--text-secondary)',
+            fontWeight: 700,
+            fontSize: 15,
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+            whiteSpace: 'nowrap',
+            minHeight: 44
+          }}
+        >
+          💰 Trades
+        </button>
       </div>
 
-      {/* Section 2: P&L Chart */}
-      <div className="card" style={{ marginTop: 24, padding: 24 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h3 style={{ fontSize: 18, fontWeight: 700 }}>📈 Cumulative P&L</h3>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {['7d', '30d', 'all'].map(range => (
+      {/* SCANNER TAB */}
+      {activeTab === 'scanner' && (
+        <div className="scanner-tab">
+          {/* Sport Filter */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
+            {['all', 'IPL', 'NBA', 'NHL', 'Soccer'].map(sport => (
               <button
-                key={range}
-                onClick={() => setTimeRange(range)}
-                className={`btn ${timeRange === range ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ padding: '6px 12px', fontSize: 12 }}
-              >
-                {range.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {pnlData.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">📊</div>
-            <p>No P&L data yet</p>
-            <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>
-              Bot is scanning markets. Paper trades will appear here once signals trigger.
-            </p>
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={pnlData}>
-              <XAxis 
-                dataKey="date" 
-                stroke="var(--text-tertiary)"
-                style={{ fontSize: 12 }}
-              />
-              <YAxis 
-                stroke="var(--text-tertiary)"
-                style={{ fontSize: 12 }}
-                tickFormatter={(value) => `$${value}`}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: 'var(--bg-secondary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  color: 'var(--text-primary)'
+                key={sport}
+                onClick={() => setSportFilter(sport)}
+                className={`btn ${sportFilter === sport ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ 
+                  padding: '8px 16px', 
+                  fontSize: 13,
+                  minHeight: 44,
+                  background: sportFilter === sport ? '#7c3aed' : 'var(--bg-secondary)',
+                  color: sportFilter === sport ? '#fff' : 'var(--text-primary)',
+                  border: sportFilter === sport ? 'none' : '1px solid var(--border)'
                 }}
-                formatter={(value) => [`$${value.toFixed(2)}`, 'P&L']}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="pnl" 
-                stroke="#7c3aed" 
-                strokeWidth={3}
-                dot={false}
-              />
-              {/* Trade markers - green for wins, red for losses */}
-              {recentTrades
-                .filter(t => t.status === 'closed')
-                .map((trade, idx) => {
-                  const tradeDate = new Date(trade.closed_at || trade.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                  const dataPoint = pnlData.find(d => d.date === tradeDate)
-                  if (!dataPoint) return null
-                  
-                  return (
-                    <ReferenceDot
-                      key={idx}
-                      x={dataPoint.date}
-                      y={dataPoint.pnl}
-                      r={5}
-                      fill={parseFloat(trade.pnl_usd || 0) > 0 ? '#10B981' : '#EF4444'}
-                      stroke="none"
-                    />
-                  )
-                })}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </div>
-
-      {/* Section 3: Strategy Comparison Table */}
-      <div className="card" style={{ marginTop: 24, padding: 24 }}>
-        <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>⚙️ Strategy Comparison</h3>
-        
-        {strategyComparison.length === 0 ? (
-          <div className="empty-state">
-            <p>No strategy data available</p>
-          </div>
-        ) : (
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Strategy Name</th>
-                  <th style={{ textAlign: 'right' }}>Trades</th>
-                  <th style={{ textAlign: 'right' }}>Win Rate</th>
-                  <th style={{ textAlign: 'right' }}>Avg Edge</th>
-                  <th style={{ textAlign: 'right' }}>Total P&L</th>
-                  <th style={{ textAlign: 'right' }}>Sharpe</th>
-                  <th style={{ textAlign: 'center' }}>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(Array.isArray(strategyComparison) ? strategyComparison : []).map(strategy => (
-                  <tr key={strategy.name}>
-                    <td style={{ fontWeight: 600 }}>{strategy.name}</td>
-                    <td style={{ textAlign: 'right' }}>{strategy.total_trades || 0}</td>
-                    <td style={{ textAlign: 'right' }}>
-                      <span style={{ 
-                        color: (strategy.win_rate || 0) >= 0.5 ? '#10B981' : '#F59E0B',
-                        fontWeight: 600 
-                      }}>
-                        {((strategy.win_rate || 0) * 100).toFixed(1)}%
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      {strategy.avg_edge ? `${(strategy.avg_edge * 100).toFixed(1)}%` : '—'}
-                    </td>
-                    <td style={{ 
-                      textAlign: 'right',
-                      color: (strategy.total_pnl || 0) >= 0 ? '#10B981' : '#EF4444',
-                      fontWeight: 700
-                    }}>
-                      {(strategy.total_pnl || 0) >= 0 ? '+' : ''}${(strategy.total_pnl || 0).toFixed(2)}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      {strategy.sharpe ? strategy.sharpe.toFixed(2) : '—'}
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <button
-                        onClick={() => toggleStrategy(strategy.name, strategy.enabled)}
-                        className={`badge ${strategy.enabled ? 'high' : 'low'}`}
-                        style={{ cursor: 'pointer', border: 'none' }}
-                      >
-                        {strategy.enabled ? '✓ Active' : '✕ Disabled'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Section 4: Recent Trades Feed */}
-      <div className="card" style={{ marginTop: 24, padding: 24 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
-          <h3 style={{ fontSize: 18, fontWeight: 700 }}>📋 Recent Trades</h3>
-          
-          {/* Filter Chips */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {['all', 'open', 'won', 'lost'].map(filter => (
-              <button
-                key={filter}
-                onClick={() => { setTradeFilter(filter); setSelectedStrategy(null) }}
-                className={`btn ${tradeFilter === filter && !selectedStrategy ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ padding: '6px 12px', fontSize: 12, textTransform: 'capitalize' }}
               >
-                {filter}
-              </button>
-            ))}
-            {(Array.isArray(strategyComparison) ? strategyComparison : []).map(s => (
-              <button
-                key={s.name}
-                onClick={() => { setTradeFilter('all'); setSelectedStrategy(s.name) }}
-                className={`btn ${selectedStrategy === s.name ? 'btn-primary' : 'btn-secondary'}`}
-                style={{ padding: '6px 12px', fontSize: 11 }}
-              >
-                {s.name}
+                {sport === 'all' ? 'All Sports' : sport}
               </button>
             ))}
           </div>
-        </div>
 
-        {filteredTrades.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">💤</div>
-            <p>No trades yet</p>
-            <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>
-              Bot is scanning markets. Paper trades will appear here once signals trigger.
-            </p>
-          </div>
-        ) : (
-          <>
-            {/* Desktop: Table */}
-            <div className="table-container" style={{ display: 'none' }}>
-              <table className="trades-table-desktop">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Market</th>
-                    <th style={{ textAlign: 'center' }}>Direction</th>
-                    <th style={{ textAlign: 'right' }}>Entry</th>
-                    <th style={{ textAlign: 'right' }}>Current/Exit</th>
-                    <th style={{ textAlign: 'right' }}>Edge</th>
-                    <th style={{ textAlign: 'right' }}>P&L</th>
-                    <th>Strategy</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(Array.isArray(filteredTrades) ? filteredTrades : []).map(trade => {
-                    const pnl = parseFloat(trade.pnl_usd || trade.unrealized_pnl_usd || 0)
-                    const isWin = pnl > 0
-                    const isOpen = trade.status === 'open'
-                    
-                    return (
-                      <tr 
-                        key={trade.id}
-                        style={{
-                          background: isOpen ? 'transparent' : isWin ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.05)'
-                        }}
-                      >
-                        <td style={{ fontSize: 12 }}>
-                          {new Date(trade.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </td>
-                        <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {trade.market_title || trade.market_id}
-                        </td>
-                        <td style={{ textAlign: 'center' }}>
-                          <span className={`badge ${trade.side === 'YES' ? 'high' : 'medium'}`}>
-                            {trade.side}
-                          </span>
-                        </td>
-                        <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                          {(parseFloat(trade.entry_price || 0) * 100).toFixed(0)}¢
-                        </td>
-                        <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                          {(parseFloat(trade.exit_price || trade.current_price || 0) * 100).toFixed(0)}¢
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          {trade.edge ? `${(trade.edge * 100).toFixed(1)}%` : '—'}
-                        </td>
-                        <td style={{ 
-                          textAlign: 'right', 
-                          fontWeight: 700,
-                          color: isOpen ? 'var(--text-secondary)' : isWin ? '#10B981' : '#EF4444'
-                        }}>
-                          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-                        </td>
-                        <td>
-                          <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                            {trade.strategy || 'Manual'}
-                          </span>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+          {/* Opportunities Grid */}
+          {filteredOpportunities.length === 0 ? (
+            <div className="empty-state" style={{ 
+              textAlign: 'center', 
+              padding: 60,
+              background: 'var(--bg-secondary)',
+              borderRadius: 16,
+              border: '1px solid var(--border)'
+            }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
+              <p style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>No opportunities found</p>
+              <p style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
+                Scanner is actively monitoring markets. Arbitrage opportunities will appear here.
+              </p>
             </div>
+          ) : (
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+              gap: 16
+            }}>
+              {(Array.isArray(filteredOpportunities) ? filteredOpportunities : []).map((opp, idx) => {
+                const edge = (opp.edge || opp.edge_pct || (opp.sum_probability ? (opp.sum_probability - 1) * 100 : 0)) * (opp.edge < 1 ? 100 : 1)
+                const matchName = opp.market_title || opp.match_name || opp.group_name || 'Unknown Market'
+                const sport = opp.sport || matchName
+                const polymarketPrice = opp.polymarket_price || opp.pm_price || null
+                const sportsbookPrice = opp.sportsbook_price || opp.sb_price || null
+                const numBooks = opp.num_books || opp.agreeing_books || 1
+                const signal = edge > 0 ? 'BUY' : 'SELL'
 
-            {/* Mobile: Cards */}
-            <div className="trades-cards-mobile">
-              {(Array.isArray(filteredTrades) ? filteredTrades : []).map(trade => {
-                const pnl = parseFloat(trade.pnl_usd || trade.unrealized_pnl_usd || 0)
-                const isWin = pnl > 0
-                const isOpen = trade.status === 'open'
-                
                 return (
                   <div
-                    key={trade.id}
-                    className="trade-card"
+                    key={idx}
                     style={{
-                      padding: 16,
-                      borderRadius: 12,
+                      background: '#1a1a2e',
                       border: '1px solid var(--border)',
-                      background: isOpen ? 'var(--bg-secondary)' : isWin ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
-                      marginBottom: 12
+                      borderRadius: 12,
+                      padding: 16,
+                      position: 'relative',
+                      transition: 'transform 0.2s, box-shadow 0.2s',
+                      cursor: 'pointer'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'translateY(-2px)'
+                      e.currentTarget.style.boxShadow = '0 8px 16px rgba(124,58,237,0.2)'
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'translateY(0)'
+                      e.currentTarget.style.boxShadow = 'none'
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                      <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                        {new Date(trade.created_at).toLocaleString([], { 
-                          month: 'short', 
-                          day: 'numeric',
-                          hour: '2-digit', 
-                          minute: '2-digit' 
-                        })}
-                      </span>
-                      <span className={`badge ${isOpen ? 'open' : isWin ? 'won' : 'lost'}`}>
-                        {isOpen ? 'Open' : isWin ? 'Won' : 'Lost'}
+                    {/* Sport emoji + match name */}
+                    <div style={{ marginBottom: 12 }}>
+                      <span style={{ fontSize: 20, marginRight: 8 }}>{getSportEmoji(sport)}</span>
+                      <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {matchName.length > 50 ? matchName.substring(0, 50) + '...' : matchName}
                       </span>
                     </div>
-                    
-                    <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>
-                      {trade.market_title || trade.market_id}
-                    </div>
-                    
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
-                      <div>
-                        <span style={{ color: 'var(--text-tertiary)' }}>Direction: </span>
-                        <span className={`badge ${trade.side === 'YES' ? 'high' : 'medium'}`} style={{ fontSize: 11 }}>
-                          {trade.side}
-                        </span>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-tertiary)' }}>Entry: </span>
-                        <strong>{(parseFloat(trade.entry_price || 0) * 100).toFixed(0)}¢</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-tertiary)' }}>Current: </span>
-                        <strong>{(parseFloat(trade.exit_price || trade.current_price || 0) * 100).toFixed(0)}¢</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-tertiary)' }}>Edge: </span>
-                        <strong>{trade.edge ? `${(trade.edge * 100).toFixed(1)}%` : '—'}</strong>
-                      </div>
-                    </div>
-                    
+
+                    {/* Edge badge */}
                     <div style={{ 
-                      marginTop: 12, 
-                      paddingTop: 12, 
-                      borderTop: '1px solid var(--border)',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
+                      position: 'absolute',
+                      top: 16,
+                      right: 16,
+                      background: edge > 10 ? '#10B981' : edge > 5 ? '#F59E0B' : '#EF4444',
+                      color: '#fff',
+                      padding: '6px 12px',
+                      borderRadius: 8,
+                      fontSize: 16,
+                      fontWeight: 800
                     }}>
-                      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                        {trade.strategy || 'Manual'}
-                      </span>
-                      <span style={{ 
-                        fontSize: 18, 
-                        fontWeight: 800,
-                        color: isOpen ? 'var(--text-secondary)' : isWin ? '#10B981' : '#EF4444'
+                      {edge.toFixed(1)}%
+                    </div>
+
+                    {/* Prices comparison */}
+                    {polymarketPrice !== null && sportsbookPrice !== null && (
+                      <div style={{ 
+                        display: 'grid', 
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 12,
+                        marginTop: 16,
+                        marginBottom: 16
                       }}>
-                        {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                        <div style={{ 
+                          background: 'var(--bg-primary)',
+                          padding: 12,
+                          borderRadius: 8,
+                          border: '1px solid var(--border)'
+                        }}>
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                            Polymarket
+                          </div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: '#7c3aed' }}>
+                            {(polymarketPrice * 100).toFixed(0)}¢
+                          </div>
+                        </div>
+                        <div style={{ 
+                          background: 'var(--bg-primary)',
+                          padding: 12,
+                          borderRadius: 8,
+                          border: '1px solid var(--border)'
+                        }}>
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                            Sportsbooks
+                          </div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: '#10B981' }}>
+                            {(sportsbookPrice * 100).toFixed(0)}¢
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Footer: Signal + Books */}
+                    <div style={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      paddingTop: 12,
+                      borderTop: '1px solid var(--border)'
+                    }}>
+                      <span style={{
+                        background: signal === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                        color: signal === 'BUY' ? '#10B981' : '#EF4444',
+                        padding: '4px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 700
+                      }}>
+                        {signal}
+                      </span>
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        {numBooks} book{numBooks > 1 ? 's' : ''} agree
                       </span>
                     </div>
+
+                    {/* Paper Trade button (future) */}
+                    <button
+                      style={{
+                        width: '100%',
+                        marginTop: 12,
+                        padding: '10px',
+                        background: 'transparent',
+                        border: '1px solid #7c3aed',
+                        borderRadius: 8,
+                        color: '#7c3aed',
+                        fontSize: 13,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                        minHeight: 44
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = '#7c3aed'
+                        e.currentTarget.style.color = '#fff'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent'
+                        e.currentTarget.style.color = '#7c3aed'
+                      }}
+                    >
+                      Paper Trade
+                    </button>
                   </div>
                 )
               })}
             </div>
-          </>
-        )}
-      </div>
+          )}
+
+          {/* IPL Paper Trades from signals */}
+          {Array.isArray(signalsData) && signalsData.length > 0 && (
+            <div style={{ marginTop: 32 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>
+                🏏 IPL Paper Trades
+              </h3>
+              <div style={{ display: 'grid', gap: 12 }}>
+                {signalsData.map((signal, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      background: '#1a1a2e',
+                      border: '1px solid var(--border)',
+                      borderRadius: 12,
+                      padding: 16,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: 12
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                        {signal.market_title || signal.match_name}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        Edge: {((signal.edge || 0) * 100).toFixed(1)}% • 
+                        Side: <span style={{ color: signal.side === 'YES' ? '#10B981' : '#EF4444' }}>
+                          {signal.side}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                      {new Date(signal.timestamp).toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TRADES TAB */}
+      {activeTab === 'trades' && (
+        <div className="trades-tab">
+          {/* Performance Summary Cards */}
+          <div style={{ 
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+            gap: 16,
+            marginBottom: 24
+          }}>
+            <div className="card" style={{ 
+              background: '#1a1a2e',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              padding: 16
+            }}>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                Total P&L
+              </div>
+              <div style={{ 
+                fontSize: 24, 
+                fontWeight: 800,
+                color: performanceSummary.totalPnl >= 0 ? '#10B981' : '#EF4444'
+              }}>
+                {performanceSummary.totalPnl >= 0 ? '+' : ''}${performanceSummary.totalPnl.toFixed(2)}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                {performanceSummary.roiPct >= 0 ? '+' : ''}{performanceSummary.roiPct.toFixed(2)}% ROI
+              </div>
+            </div>
+
+            <div className="card" style={{ 
+              background: '#1a1a2e',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              padding: 16
+            }}>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                Win Rate
+              </div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>
+                {performanceSummary.winRate.toFixed(1)}%
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                {performanceSummary.wins}W / {performanceSummary.losses}L
+              </div>
+            </div>
+
+            <div className="card" style={{ 
+              background: '#1a1a2e',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              padding: 16
+            }}>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                Active Positions
+              </div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>
+                {performanceSummary.activePositions}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                Open Trades
+              </div>
+            </div>
+
+            <div className="card" style={{ 
+              background: '#1a1a2e',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              padding: 16
+            }}>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                Total Trades
+              </div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>
+                {performanceSummary.totalTrades}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                All Time
+              </div>
+            </div>
+          </div>
+
+          {/* Trade History */}
+          <div style={{ 
+            background: '#1a1a2e',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            padding: 24
+          }}>
+            <div style={{ 
+              display: 'flex', 
+              justifyContent: 'space-between', 
+              alignItems: 'center',
+              marginBottom: 20,
+              flexWrap: 'wrap',
+              gap: 12
+            }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700 }}>📋 Trade History</h3>
+              
+              {/* Filters */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {['all', 'open', 'won', 'lost'].map(filter => (
+                  <button
+                    key={filter}
+                    onClick={() => { setTradeFilter(filter); setSelectedStrategy(null) }}
+                    style={{
+                      padding: '6px 14px',
+                      fontSize: 12,
+                      textTransform: 'capitalize',
+                      background: tradeFilter === filter && !selectedStrategy ? '#7c3aed' : 'var(--bg-primary)',
+                      color: tradeFilter === filter && !selectedStrategy ? '#fff' : 'var(--text-primary)',
+                      border: tradeFilter === filter && !selectedStrategy ? 'none' : '1px solid var(--border)',
+                      borderRadius: 8,
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      minHeight: 44
+                    }}
+                  >
+                    {filter}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {filteredTrades.length === 0 ? (
+              <div className="empty-state" style={{ 
+                textAlign: 'center', 
+                padding: 60
+              }}>
+                <div style={{ fontSize: 48, marginBottom: 16 }}>💤</div>
+                <p style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>No trades yet</p>
+                <p style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
+                  Bot is scanning markets. Trades will appear here once signals trigger.
+                </p>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gap: 12 }}>
+                {(Array.isArray(filteredTrades) ? filteredTrades : []).map(trade => {
+                  const pnl = parseFloat(trade.pnl_usd || trade.unrealized_pnl_usd || 0)
+                  const isWin = pnl > 0
+                  const isOpen = trade.status === 'open'
+                  const statusEmoji = isOpen ? '⏳' : isWin ? '✅' : '❌'
+                  const statusLabel = isOpen ? 'Open' : isWin ? 'Won' : 'Lost'
+                  const accentColor = isOpen ? '#F59E0B' : isWin ? '#10B981' : '#EF4444'
+                  
+                  return (
+                    <div
+                      key={trade.id}
+                      style={{
+                        background: 'var(--bg-primary)',
+                        borderRadius: 12,
+                        padding: 16,
+                        borderLeft: `4px solid ${accentColor}`,
+                        border: `1px solid var(--border)`,
+                        borderLeftWidth: '4px',
+                        position: 'relative'
+                      }}
+                    >
+                      {/* Header: Status + Time */}
+                      <div style={{ 
+                        display: 'flex', 
+                        justifyContent: 'space-between',
+                        marginBottom: 12,
+                        alignItems: 'center'
+                      }}>
+                        <span style={{
+                          background: isOpen ? 'rgba(245,158,11,0.15)' : isWin ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                          color: accentColor,
+                          padding: '4px 10px',
+                          borderRadius: 6,
+                          fontSize: 12,
+                          fontWeight: 700
+                        }}>
+                          {statusEmoji} {statusLabel}
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                          {new Date(trade.created_at).toLocaleString([], {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </span>
+                      </div>
+
+                      {/* Market name */}
+                      <div style={{ 
+                        fontWeight: 600, 
+                        marginBottom: 12,
+                        fontSize: 15,
+                        color: 'var(--text-primary)'
+                      }}>
+                        {trade.market_title || trade.market_id || 'Unknown Market'}
+                      </div>
+
+                      {/* Trade details grid */}
+                      <div style={{ 
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(2, 1fr)',
+                        gap: 12,
+                        fontSize: 13,
+                        marginBottom: 12
+                      }}>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Side: </span>
+                          <span style={{ 
+                            fontWeight: 700,
+                            color: trade.side === 'YES' ? '#10B981' : '#EF4444'
+                          }}>
+                            {trade.side || 'BUY'}
+                          </span>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Entry: </span>
+                          <strong>{(parseFloat(trade.entry_price || 0) * 100).toFixed(0)}¢</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Current: </span>
+                          <strong>{(parseFloat(trade.exit_price || trade.current_price || 0) * 100).toFixed(0)}¢</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Edge: </span>
+                          <strong>{trade.edge ? `${(trade.edge * 100).toFixed(1)}%` : '—'}</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Size: </span>
+                          <strong>${(trade.position_size || 100).toFixed(0)}</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-tertiary)' }}>Strategy: </span>
+                          <strong>{trade.strategy || 'Manual'}</strong>
+                        </div>
+                      </div>
+
+                      {/* P&L footer */}
+                      <div style={{
+                        paddingTop: 12,
+                        borderTop: '1px solid var(--border)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                          P&L:
+                        </span>
+                        <span style={{
+                          fontSize: 20,
+                          fontWeight: 800,
+                          color: isOpen ? 'var(--text-secondary)' : accentColor
+                        }}>
+                          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
