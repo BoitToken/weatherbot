@@ -340,6 +340,53 @@ except Exception as e:
     logger.warning(f"\u26a0\ufe0f Ghost API not loaded: {e}")
 
 # =============================================================================
+# Polymarket Leaderboard
+# =============================================================================
+
+@app.get("/api/leaderboard")
+async def get_polymarket_leaderboard(
+    category: str = "OVERALL",
+    timePeriod: str = "MONTH",
+    orderBy: str = "PNL",
+    limit: int = 10
+):
+    """Proxy Polymarket leaderboard API — top traders by PnL or volume."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://data-api.polymarket.com/v1/leaderboard",
+                params={
+                    "category": category.upper(),
+                    "timePeriod": timePeriod.upper(),
+                    "orderBy": orderBy.upper(),
+                    "limit": min(limit, 50),
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            traders = []
+            for t in (data if isinstance(data, list) else []):
+                name = t.get("userName") or t.get("xUsername") or (t.get("proxyWallet", "")[:10] + "...")
+                traders.append({
+                    "rank": t.get("rank"),
+                    "name": name,
+                    "wallet": t.get("proxyWallet", ""),
+                    "pnl": float(t.get("pnl", 0)),
+                    "volume": float(t.get("vol", 0)),
+                    "profileImage": t.get("profileImage"),
+                    "verified": bool(t.get("verifiedBadge")),
+                    "xUsername": t.get("xUsername"),
+                })
+            
+            return {"traders": traders, "category": category, "timePeriod": timePeriod, "orderBy": orderBy}
+    except Exception as e:
+        logger.error(f"Leaderboard error: {e}")
+        return {"traders": [], "error": str(e)}
+
+
+# =============================================================================
 # Paper Trades
 # =============================================================================
 
@@ -381,6 +428,53 @@ async def get_paper_trades():
     except Exception as e:
         logger.error(f"Paper trades error: {e}")
         return {"trades": [], "count": 0}
+
+
+# =============================================================================
+# Polymarket Leaderboard API
+# =============================================================================
+
+@app.get("/api/leaderboard")
+async def get_polymarket_leaderboard(
+    category: str = "OVERALL",
+    timePeriod: str = "MONTH", 
+    orderBy: str = "PNL",
+    limit: int = 10
+):
+    """Proxy Polymarket leaderboard API — top traders by PnL or volume."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://data-api.polymarket.com/v1/leaderboard",
+                params={
+                    "category": category.upper(),
+                    "timePeriod": timePeriod.upper(),
+                    "orderBy": orderBy.upper(),
+                    "limit": min(limit, 50),
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            traders = []
+            for t in (data if isinstance(data, list) else []):
+                name = t.get("userName") or t.get("xUsername") or (t.get("proxyWallet", "")[:10] + "...")
+                traders.append({
+                    "rank": t.get("rank"),
+                    "name": name,
+                    "wallet": t.get("proxyWallet", ""),
+                    "pnl": float(t.get("pnl", 0)),
+                    "volume": float(t.get("vol", 0)),
+                    "profileImage": t.get("profileImage"),
+                    "verified": bool(t.get("verifiedBadge")),
+                    "xUsername": t.get("xUsername"),
+                })
+            
+            return {"traders": traders, "category": category, "timePeriod": timePeriod, "orderBy": orderBy}
+    except Exception as e:
+        logger.error(f"Leaderboard error: {e}")
+        return {"traders": [], "error": str(e)}
 
 
 # =============================================================================
