@@ -12,6 +12,8 @@ module.exports = {
       PYTHONPATH: '/data/.openclaw/workspace/projects/weatherbot',
       DB_URL: 'postgresql://node@localhost:5432/polyedge',
       MODE: 'paper',
+      TELEGRAM_BOT_TOKEN: '${TELEGRAM_BOT_TOKEN}',
+      TELEGRAM_ADMIN_CHAT_ID: '1656605843',
     },
     error_file: './logs/error.log',
     out_file: './logs/out.log',

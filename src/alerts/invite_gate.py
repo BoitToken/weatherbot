@@ -113,7 +113,7 @@ class InviteGate:
             await update.message.reply_text("\u26d4 Admin only.")
             return
         if not context.args:
-            await update.message.reply_text("Usage: /approve <chat_id>")
+            await update.message.reply_text("Usage: /approve &lt;chat_id&gt;")
             return
         target = int(context.args[0])
         try:
@@ -131,7 +131,7 @@ class InviteGate:
             await update.message.reply_text("\u26d4 Admin only.")
             return
         if not context.args:
-            await update.message.reply_text("Usage: /revoke <chat_id>")
+            await update.message.reply_text("Usage: /revoke &lt;chat_id&gt;")
             return
         target = int(context.args[0])
         try:
