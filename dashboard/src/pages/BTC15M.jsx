@@ -123,8 +123,15 @@ export default function BTCPolymarketEngine() {
   });
   const [stats, setStats] = useState({ wins: 0, losses: 0, pnl: 0, trades: 0 });
   const [tab, setTab] = useState("dashboard");
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const trendRef = useRef("neutral");
   const intervalRef = useRef(null);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const computePrediction = useCallback((sigs) => {
     const totalScore = sigs.reduce((s, sig) => s + sig.score, 0);
@@ -257,8 +264,8 @@ export default function BTCPolymarketEngine() {
 
       {/* Header */}
       <div style={{
-        borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "14px 24px",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        borderBottom: "1px solid rgba(255,255,255,0.06)", padding: isMobile ? "10px 12px" : "14px 24px",
+        display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: isMobile ? 8 : 0,
         background: "rgba(10,12,16,0.9)", backdropFilter: "blur(20px)", position: "sticky", top: 0, zIndex: 100,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -300,12 +307,20 @@ export default function BTCPolymarketEngine() {
         input[type=range] { -webkit-appearance: none; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; outline: none; }
         input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: #00ff87; border-radius: 50%; cursor: pointer; }
         ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+        @media (max-width: 768px) {
+          .main-grid { grid-template-columns: 1fr !important; }
+          .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .header-bar { flex-wrap: wrap; gap: 8px !important; padding: 10px 12px !important; }
+          .header-bar > div:last-child { order: -1; width: 100%; }
+          .trade-table { overflow-x: auto; }
+          .trade-row { grid-template-columns: 65px 40px 55px 55px 50px 55px 50px 65px !important; font-size: 10px !important; }
+        }
       `}</style>
 
       {tab === "dashboard" && (
-        <div style={{ padding: "20px 24px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+        <div style={{ padding: isMobile ? "12px" : "20px 24px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr", gap: isMobile ? 10 : 16, className: "main-grid" }}>
           {/* Top stats row */}
-          <div style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+          <div style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: isMobile ? 8 : 12 }}>
             {[
               { label: "WIN RATE", value: `${winRate}%`, color: parseFloat(winRate) > 55 ? "#00ff87" : "#ffaa00" },
               { label: "P&L", value: `$${stats.pnl.toLocaleString()}`, color: stats.pnl >= 0 ? "#00ff87" : "#ff3366" },
@@ -326,7 +341,7 @@ export default function BTCPolymarketEngine() {
           {/* Signal Panel */}
           <div style={{
             background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)",
-            borderRadius: 12, padding: 18, gridRow: "span 2",
+            borderRadius: 12, padding: isMobile ? 12 : 18, gridRow: isMobile ? "auto" : "span 2",
           }}>
             <div style={{ fontSize: 10, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 14 }}>
               SIGNAL CONFLUENCE — {signals.filter((s) => (prediction?.direction === "UP" ? s.value > 0 : s.value < 0)).length}/{signals.length} AGREEING
@@ -420,7 +435,7 @@ export default function BTCPolymarketEngine() {
           {/* Chart */}
           <div style={{
             background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)",
-            borderRadius: 12, padding: 18, display: "flex", flexDirection: "column", gridRow: "span 2",
+            borderRadius: 12, padding: isMobile ? 12 : 18, display: "flex", flexDirection: "column", gridRow: isMobile ? "auto" : "span 2",
           }}>
             <div style={{ fontSize: 9, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 10 }}>BTC/USD LIVE</div>
             <div style={{ fontSize: 22, fontFamily: font, fontWeight: 700, color: "#F7931A", marginBottom: 4 }}>
@@ -450,7 +465,7 @@ export default function BTCPolymarketEngine() {
       )}
 
       {tab === "strategy" && (
-        <div style={{ padding: "24px", maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ padding: isMobile ? "12px" : "24px", maxWidth: 720, margin: "0 auto" }}>
           <div style={{ fontSize: 10, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 20 }}>STRATEGY CONFIGURATION</div>
 
           <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, padding: 20, marginBottom: 16 }}>
@@ -503,8 +518,8 @@ export default function BTCPolymarketEngine() {
       )}
 
       {tab === "trades" && (
-        <div style={{ padding: "24px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ padding: isMobile ? "12px" : "24px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
             <div style={{ fontSize: 10, color: "#4a5068", fontFamily: font, letterSpacing: 1.5 }}>TRADE LOG — {stats.trades} EXECUTIONS</div>
             <div style={{ display: "flex", gap: 16 }}>
               <span style={{ fontSize: 11, fontFamily: font, color: "#00ff87" }}>W: {stats.wins}</span>
@@ -514,14 +529,14 @@ export default function BTCPolymarketEngine() {
           </div>
 
           <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "80px 50px 70px 70px 60px 70px 60px 80px", padding: "10px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 9, color: "#4a5068", fontFamily: font, letterSpacing: 1 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "60px 40px 50px 50px 45px 50px 45px 60px" : "80px 50px 70px 70px 60px 70px 60px 80px", padding: isMobile ? "8px 10px" : "10px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: isMobile ? 8 : 9, color: "#4a5068", fontFamily: font, letterSpacing: 1 }}>
               <span>TIME</span><span>SIDE</span><span>CONF</span><span>EDGE</span><span>BET</span><span>PRICE</span><span>RESULT</span><span>P&L</span>
             </div>
             <div style={{ maxHeight: 500, overflowY: "auto" }}>
               {trades.map((t) => (
                 <div key={t.id} style={{
-                  display: "grid", gridTemplateColumns: "80px 50px 70px 70px 60px 70px 60px 80px",
-                  padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.03)",
+                  display: "grid", gridTemplateColumns: isMobile ? "60px 40px 50px 50px 45px 50px 45px 60px" : "80px 50px 70px 70px 60px 70px 60px 80px",
+                  padding: isMobile ? "6px 10px" : "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.03)",
                   fontSize: 11, fontFamily: font,
                   background: t.result === "WIN" ? "rgba(0,255,135,0.02)" : "rgba(255,51,102,0.02)",
                 }}>
