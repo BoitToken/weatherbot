@@ -62,23 +62,32 @@ class AsyncConnection:
         self._conn = conn
 
     async def fetchrow(self, query, *args):
-        """Fetch single row (asyncpg-style)."""
+        """Fetch single row (asyncpg-style). Auto-commits for INSERT/UPDATE/DELETE."""
         q, p = _convert_params(query, args)
         loop = asyncio.get_event_loop()
         def _exec():
             with self._conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(q, p)
-                return cur.fetchone()
+                row = cur.fetchone()
+            # Auto-commit if it's a write query
+            q_upper = q.strip().upper()
+            if q_upper.startswith(('INSERT', 'UPDATE', 'DELETE')):
+                self._conn.commit()
+            return row
         return await loop.run_in_executor(None, _exec)
 
     async def fetch(self, query, *args):
-        """Fetch multiple rows (asyncpg-style)."""
+        """Fetch multiple rows (asyncpg-style). Auto-commits for writes."""
         q, p = _convert_params(query, args)
         loop = asyncio.get_event_loop()
         def _exec():
             with self._conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(q, p)
-                return cur.fetchall()
+                rows = cur.fetchall()
+            q_upper = q.strip().upper()
+            if q_upper.startswith(('INSERT', 'UPDATE', 'DELETE')):
+                self._conn.commit()
+            return rows
         return await loop.run_in_executor(None, _exec)
 
     async def execute(self, query, *args):

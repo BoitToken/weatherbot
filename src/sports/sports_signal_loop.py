@@ -180,10 +180,14 @@ class SportsSignalLoop:
                 trader.skipped_reasons.append({"market_id": market_id, "reason": f"signal_type_{trade_signal}"})
                 continue
 
-            # 2. Edge >= 7%
+            # 2. Edge >= 7% and <= 50% (>50% is futures overpricing artifact)
             if edge_pct is None or abs(edge_pct) < 7:
                 logger.debug(f"  ⏭ Skip {market_id}: edge={edge_pct} < 7%")
                 trader.skipped_reasons.append({"market_id": market_id, "reason": f"low_edge_{edge_pct}"})
+                continue
+            if abs(edge_pct) > 50:
+                logger.debug(f"  ⏭ Skip {market_id}: edge={edge_pct} > 50% (futures artifact)")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": f"edge_artifact_{edge_pct}"})
                 continue
 
             # 3. Confidence gate
