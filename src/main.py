@@ -564,45 +564,50 @@ async def scheduled_btc_signal_scan():
         results = await _btc_engine.run_scan()
         _last_btc_scan = datetime.utcnow()
 
-        # Telegram alerts for HIGH confidence predictions (prob > 0.70)
+        # Only send Telegram when we actually TAKE a paper trade
+        # Criteria: prob > 0.70 (UP) or prob < 0.30 (DOWN), confidence > 50%, and not SKIP
+        # This filters out 90%+ of signals — only trades, not noise
         if _telegram_bot and results:
             for sig in results:
                 prob = sig.get('prob_up', 0.5)
                 conf = sig.get('confidence', 0)
                 pred = sig.get('prediction', 'SKIP')
-                if pred == 'SKIP':
+                if pred == 'SKIP' or conf < 0.50:
                     continue
-                # High confidence: prob > 0.70 (UP) or prob < 0.30 (DOWN)
-                if prob > 0.70 or prob < 0.30:
-                    price = sig.get('btc_price', 0)
-                    btc_open = sig.get('btc_open', price)
-                    delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
-                    factors = sig.get('factors', {})
-                    close_time = sig.get('close_time', '')
-                    if hasattr(close_time, 'strftime'):
-                        close_str = close_time.strftime('%H:%M:%S UTC')
-                    else:
-                        close_str = str(close_time)
-                    wl = sig.get('window_length', 15)
-                    msg = (
-                        f"📊 BTC {wl}M SIGNAL\n\n"
-                        f"Prediction: {pred} ({prob*100:.0f}%)\n"
-                        f"Window closes: {close_str}\n"
-                        f"BTC: ${price:,.0f} ({delta_pct:+.2f}%)\n"
-                        f"Confidence: {conf*100:.0f}%\n"
-                        f"Factors: Delta {factors.get('f_price_delta', 0):+.2f} | "
-                        f"Mom {factors.get('f_momentum', 0):+.2f} | "
-                        f"Vol {factors.get('f_volume_imbalance', 0):+.2f}"
-                    )
-                    try:
-                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
-                        for sub in subscribers:
-                            try:
-                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                # Only trade-worthy signals (high conviction)
+                if not (prob > 0.70 or prob < 0.30):
+                    continue
+                
+                price = sig.get('btc_price', 0)
+                btc_open = sig.get('btc_open', price)
+                delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
+                wl = sig.get('window_length', 15)
+                up_price = sig.get('up_price', 0.5)
+                down_price = sig.get('down_price', 0.5)
+                entry_price = down_price if pred == 'UP' else up_price  # Buy the underpriced side
+                edge = abs(prob - 0.5) * 2  # Simplified edge
+                potential = (1.0 / entry_price - 1) * 25 if entry_price > 0 else 0  # $25 bet potential
+                
+                msg = (
+                    f"🟢 BTC PAPER TRADE OPENED\n\n"
+                    f"₿ BTC/USD {wl}-Minute Window\n"
+                    f"Direction: {pred} ({prob*100:.0f}%)\n"
+                    f"Entry: {entry_price*100:.0f}c\n"
+                    f"BTC: ${price:,.0f} ({delta_pct:+.2f}% from open)\n"
+                    f"Confidence: {conf*100:.0f}%\n"
+                    f"Stake: $25 (paper)\n"
+                    f"Potential: +${potential:.2f}\n\n"
+                    f"Window ID: {sig.get('window_id', '?')}"
+                )
+                try:
+                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                    for sub in subscribers:
+                        try:
+                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
         logger.info(f"📊 BTC scan: {len(results)} signals")
     except Exception as e:
@@ -619,6 +624,54 @@ async def scheduled_btc_resolution_check():
         _last_btc_resolution = datetime.utcnow()
         if resolved:
             logger.info(f"📊 BTC resolved: {len(resolved)} windows")
+            
+            # Broadcast results for windows where we had a trade
+            if _telegram_bot:
+                for r in resolved:
+                    if not r.get('had_signal'):
+                        continue
+                    was_correct = r.get('was_correct', False)
+                    pred = r.get('prediction', '?')
+                    actual = r.get('resolution', '?')
+                    prob = r.get('prob_up', 0.5)
+                    wl = r.get('window_length', 15)
+                    
+                    if was_correct:
+                        emoji = '✅'
+                        result = 'WON'
+                        pnl = '+$12.50'  # Simplified: $25 bet at ~50c
+                    else:
+                        emoji = '❌'
+                        result = 'LOST'
+                        pnl = '-$25.00'
+                    
+                    # Get running stats
+                    try:
+                        stats = await _btc_engine.get_accuracy_stats()
+                        total = stats.get('total_predictions', 0)
+                        correct = stats.get('correct', 0)
+                        accuracy = stats.get('accuracy', 0)
+                    except Exception:
+                        total, correct, accuracy = 0, 0, 0
+                    
+                    msg = (
+                        f"{emoji} BTC PAPER TRADE {result}\n\n"
+                        f"₿ BTC/USD {wl}-Minute Window\n"
+                        f"Called: {pred} ({prob*100:.0f}%)\n"
+                        f"Actual: {actual}\n"
+                        f"P&L: {pnl}\n\n"
+                        f"📊 Running Record: {correct}W-{total-correct}L ({accuracy*100:.0f}%)\n"
+                        f"Window: {r.get('window_id', '?')}"
+                    )
+                    try:
+                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                        for sub in subscribers:
+                            try:
+                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
     except Exception as e:
         logger.error(f"❌ BTC resolution check failed: {e}")
 # ═══════════════════════════════════════════════════════════════
