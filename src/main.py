@@ -337,6 +337,101 @@ async def daily_summary_task():
 _last_internal_arb_scan: Optional[datetime] = None
 
 
+# ═══════════════════════════════════════════════════════════════
+# PENNY HUNTER — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_last_penny_scan: Optional[datetime] = None
+
+
+async def scheduled_penny_scan():
+    """Penny Hunter: scan for 1-3¢ contracts with asymmetric upside."""
+    global _last_penny_scan
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        await hunter.ensure_tables()
+
+        # Scan markets
+        pennies = await hunter.scan_penny_contracts()
+
+        # Score and filter
+        scored = []
+        for p in pennies:
+            score, reason = hunter.score_catalyst(p)
+            p['catalyst_score'] = score
+            p['catalyst_reason'] = reason
+            if score >= 3:
+                scored.append(p)
+
+        # Sort by score, take top 5 per scan
+        scored.sort(key=lambda x: -x['catalyst_score'])
+
+        executed = 0
+        executed_contracts = []
+        for contract in scored[:5]:
+            pos_id = await hunter.execute_penny_bet(contract)
+            if pos_id:
+                executed += 1
+                executed_contracts.append(contract)
+
+        # Check resolutions
+        resolved = await hunter.check_resolutions()
+        _last_penny_scan = datetime.utcnow()
+
+        # Broadcast new bets to Telegram
+        if _telegram_bot and executed > 0:
+            for contract in executed_contracts:
+                bp = contract['buy_price']
+                msg = (
+                    f"🎰 PENNY BET PLACED\n\n"
+                    f"{contract['question'][:60]}\n"
+                    f"Price: {bp*100:.0f}¢\n"
+                    f"Potential: {(1/bp):.0f}x return\n"
+                    f"Catalyst: {contract.get('catalyst_reason', 'Asymmetric value')}\n"
+                    f"Score: {contract['catalyst_score']:.0f}/10"
+                )
+                try:
+                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                    for sub in subscribers:
+                        try:
+                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # Broadcast resolutions
+        if _telegram_bot and resolved:
+            for r in resolved:
+                won = r.get('pnl_usd', 0) > 0
+                emoji = "💰" if won else "💀"
+                bp = r.get('buy_price', 0.01)
+                msg = (
+                    f"{emoji} PENNY {'HIT!' if won else 'DEAD'}\n\n"
+                    f"{r['question'][:60]}\n"
+                    f"Bought at: {bp*100:.0f}¢\n"
+                    f"P&L: ${r['pnl_usd']:+.2f}\n"
+                    f"{'🎯 ' + str(int(1/bp)) + 'x RETURN!' if won else ''}"
+                )
+                try:
+                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                    for sub in subscribers:
+                        try:
+                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        logger.info(
+            f"🎰 Penny scan complete: {len(pennies)} found, {len(scored)} scored, "
+            f"{executed} executed, {len(resolved)} resolved"
+        )
+    except Exception as e:
+        logger.error(f"❌ Penny scan failed: {e}\n{traceback.format_exc()}")
+# ═══════════════════════════════════════════════════════════════
+
+
 async def scheduled_internal_arb_scan():
     """Protocol 1: Internal Arbitrage (RISK-FREE).
     Scan all Polymarket markets for YES+NO < $1.00.
@@ -567,6 +662,12 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_internal_arb_scan, 'interval', seconds=30, id='internal_arb', replace_existing=True)
     logger.info("✅ Internal arb scanner scheduled (every 2 min)")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # PENNY HUNTER — Scan every 30 minutes for 1-3¢ contracts
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_penny_scan, 'interval', minutes=30, id='penny_hunter', replace_existing=True)
+    logger.info("✅ Penny Hunter scheduled (every 30 min)")
     
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
@@ -2587,6 +2688,126 @@ from src.sports.cross_odds_engine import CrossOddsEngine
 # =============================================================================
 # Internal Arbitrage API
 # =============================================================================
+
+# =============================================================================
+# Penny Hunter API
+# =============================================================================
+
+@app.get("/api/penny/positions")
+async def get_penny_positions(status: str = None, limit: int = 100):
+    """Get penny positions, optionally filtered by status."""
+    try:
+        if status:
+            rows = await fetch_all("""
+                SELECT id, market_id, condition_id, question, category, outcome,
+                       buy_price, quantity, size_usd, potential_payout,
+                       catalyst_score, catalyst_reason, days_to_resolution,
+                       volume_usd, status, resolution, pnl_usd,
+                       opened_at, resolved_at, metadata
+                FROM penny_positions
+                WHERE status = %s
+                ORDER BY opened_at DESC
+                LIMIT %s
+            """, (status, min(limit, 500)))
+        else:
+            rows = await fetch_all("""
+                SELECT id, market_id, condition_id, question, category, outcome,
+                       buy_price, quantity, size_usd, potential_payout,
+                       catalyst_score, catalyst_reason, days_to_resolution,
+                       volume_usd, status, resolution, pnl_usd,
+                       opened_at, resolved_at, metadata
+                FROM penny_positions
+                ORDER BY opened_at DESC
+                LIMIT %s
+            """, (min(limit, 500),))
+        
+        positions = []
+        for r in (rows or []):
+            positions.append({
+                'id': r['id'],
+                'market_id': r['market_id'],
+                'condition_id': r.get('condition_id', ''),
+                'question': r['question'],
+                'category': r.get('category', ''),
+                'outcome': r.get('outcome', ''),
+                'buy_price': float(r['buy_price']) if r['buy_price'] else 0,
+                'quantity': float(r['quantity']) if r['quantity'] else 0,
+                'size_usd': float(r['size_usd']) if r['size_usd'] else 0,
+                'potential_payout': float(r['potential_payout']) if r['potential_payout'] else 0,
+                'catalyst_score': float(r['catalyst_score']) if r['catalyst_score'] else 0,
+                'catalyst_reason': r.get('catalyst_reason', ''),
+                'days_to_resolution': r.get('days_to_resolution'),
+                'volume_usd': float(r['volume_usd']) if r['volume_usd'] else 0,
+                'status': r['status'],
+                'resolution': r.get('resolution', ''),
+                'pnl_usd': float(r['pnl_usd']) if r['pnl_usd'] else 0,
+                'opened_at': str(r['opened_at']) if r['opened_at'] else None,
+                'resolved_at': str(r['resolved_at']) if r['resolved_at'] else None,
+            })
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        logger.error(f"Penny positions error: {e}")
+        return {"positions": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/penny/stats")
+async def get_penny_stats():
+    """Get penny portfolio stats."""
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        stats = await hunter.get_portfolio_stats()
+        stats['last_scan'] = _last_penny_scan.isoformat() if _last_penny_scan else None
+        return stats
+    except Exception as e:
+        logger.error(f"Penny stats error: {e}")
+        return {"error": str(e), "total_positions": 0, "open_positions": 0, "total_pnl": 0}
+
+
+@app.get("/api/penny/scan")
+async def get_penny_scan():
+    """Run a live scan and return current penny contracts available (no trades executed)."""
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        pennies = await hunter.scan_penny_contracts()
+        
+        # Score all
+        for p in pennies:
+            score, reason = hunter.score_catalyst(p)
+            p['catalyst_score'] = score
+            p['catalyst_reason'] = reason
+        
+        # Sort by score
+        pennies.sort(key=lambda x: -x['catalyst_score'])
+        
+        # Return top 50
+        results = []
+        for p in pennies[:50]:
+            results.append({
+                'market_id': p['market_id'],
+                'question': p['question'],
+                'category': p.get('category', ''),
+                'outcome': p.get('outcome', ''),
+                'buy_price': p['buy_price'],
+                'days_to_resolution': p.get('days_to_resolution'),
+                'volume_usd': p.get('volume_usd', 0),
+                'catalyst_score': p['catalyst_score'],
+                'catalyst_reason': p['catalyst_reason'],
+                'would_buy': p['catalyst_score'] >= 3,
+                'potential_return': f"{(1/p['buy_price']):.0f}x" if p['buy_price'] > 0 else '0x',
+            })
+        
+        return {
+            "contracts": results,
+            "total_found": len(pennies),
+            "would_buy": sum(1 for p in pennies if p['catalyst_score'] >= 3),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Penny scan API error: {e}")
+        return {"contracts": [], "total_found": 0, "error": str(e)}
+
 
 @app.get("/api/arb/internal")
 async def get_internal_arb_opportunities():
