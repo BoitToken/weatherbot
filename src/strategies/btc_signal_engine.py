@@ -689,12 +689,30 @@ class BTCSignalEngine:
                     logger.error(f"❌ Failed to resolve {window_id}: {e}")
                     continue
 
+                # Get the best signal for this window (highest confidence non-SKIP)
+                best_signal = None
+                try:
+                    async with self.db_pool.acquire() as conn:
+                        best_signal = await conn.fetchrow("""
+                            SELECT prediction, prob_up, confidence
+                            FROM btc_signals
+                            WHERE window_id = $1 AND prediction != 'SKIP'
+                            ORDER BY confidence DESC LIMIT 1
+                        """, window_id)
+                except Exception:
+                    pass
+
                 resolved.append({
                     'window_id': window_id,
+                    'window_length': w['window_length'],
                     'btc_open': btc_open,
                     'btc_close': btc_close,
                     'resolution': resolution,
                     'delta_pct': ((btc_close - btc_open) / btc_open) * 100,
+                    'had_signal': best_signal is not None,
+                    'prediction': best_signal['prediction'] if best_signal else None,
+                    'prob_up': float(best_signal['prob_up']) if best_signal else 0.5,
+                    'was_correct': (best_signal['prediction'] == resolution) if best_signal else None,
                 })
 
             if resolved:
