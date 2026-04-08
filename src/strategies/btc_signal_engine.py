@@ -849,6 +849,7 @@ class BTCSignalEngine:
     async def get_current_state(self) -> Dict:
         """Get live engine state for dashboard."""
         btc_data = await self.get_btc_price()
+        oracle_price = await self.get_oracle_price()
         accuracy = await self.get_accuracy_stats()
 
         # Active windows with latest signals
@@ -906,6 +907,8 @@ class BTCSignalEngine:
             'btc_high': btc_data.get('high', 0),
             'btc_low': btc_data.get('low', 0),
             'btc_volume_24h': btc_data.get('quote_volume_24h', 0),
+            'chainlink_price': oracle_price,
+            'binance_chainlink_lag': round(btc_data.get('price', 0) - oracle_price, 2) if oracle_price else None,
             'active_windows': active_windows,
             'accuracy': accuracy,
             'weights': self.DEFAULT_WEIGHTS,

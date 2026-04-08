@@ -111,7 +111,11 @@ export default function BTCPolymarketEngine() {
   const [trades, setTrades] = useState([]);
   const [running, setRunning] = useState(true);  // Auto-start
   const [btcPrice, setBtcPrice] = useState(null);
+  const [chainlinkPrice, setChainlinkPrice] = useState(null);
   const [liveWindows, setLiveWindows] = useState([]);
+  const [activeWindow, setActiveWindow] = useState(null);
+  const [priceFlash, setPriceFlash] = useState(null);
+  const prevPriceRef = useRef(null);
   const [countdown, setCountdown] = useState(300);
   const [config, setConfig] = useState({
     minConfidence: 0.65,
@@ -218,22 +222,36 @@ export default function BTCPolymarketEngine() {
     setCandles(c);
     tick();
 
-    // Fetch real BTC data from our API
+    // Fetch real BTC data from our API — fast 1s refresh
     const fetchLive = async () => {
       try {
         const res = await fetch('/api/btc/state');
         const data = await res.json();
-        if (data.btc_price) setBtcPrice(data.btc_price);
-        if (data.active_windows) setLiveWindows(data.active_windows);
-        // Update polymarket odds from live windows
-        const activeW = (data.active_windows || []).find(w => w.seconds_remaining > 0);
-        if (activeW) {
-          setPolymarketOdds({ up: activeW.up_price || 0.5, down: activeW.down_price || 0.5 });
+        if (data.btc_price) {
+          const newPrice = Number(data.btc_price);
+          if (prevPriceRef.current && newPrice !== prevPriceRef.current) {
+            setPriceFlash(newPrice > prevPriceRef.current ? 'up' : 'down');
+            setTimeout(() => setPriceFlash(null), 500);
+          }
+          prevPriceRef.current = newPrice;
+          setBtcPrice(newPrice);
+        }
+        if (data.chainlink_price) setChainlinkPrice(Number(data.chainlink_price));
+        if (data.active_windows) {
+          setLiveWindows(data.active_windows);
+          // Find the nearest active window
+          const activeW = data.active_windows
+            .filter(w => w.seconds_remaining > 0)
+            .sort((a, b) => a.seconds_remaining - b.seconds_remaining)[0];
+          if (activeW) {
+            setActiveWindow(activeW);
+            setPolymarketOdds({ up: activeW.up_price || 0.5, down: activeW.down_price || 0.5 });
+          }
         }
       } catch(e) { /* silent */ }
     };
     fetchLive();
-    const liveInterval = setInterval(fetchLive, 3000);
+    const liveInterval = setInterval(fetchLive, 1000);
     return () => clearInterval(liveInterval);
   }, []);
 
@@ -316,6 +334,82 @@ export default function BTCPolymarketEngine() {
           .trade-row { grid-template-columns: 65px 40px 55px 55px 50px 55px 50px 65px !important; font-size: 10px !important; }
         }
       `}</style>
+
+      {/* Triple Price Ticker Bar */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: isMobile ? 6 : 12,
+        padding: isMobile ? '8px 12px' : '12px 24px',
+        borderBottom: '1px solid rgba(255,255,255,0.04)',
+        background: 'rgba(0,0,0,0.3)',
+      }}>
+        {/* Binance */}
+        <div style={{ background: 'rgba(247,147,26,0.06)', border: '1px solid rgba(247,147,26,0.12)', borderRadius: 10, padding: isMobile ? '10px 12px' : '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#F7931A', fontFamily: font, letterSpacing: 1.5, marginBottom: 4 }}>BINANCE BTC/USD</div>
+            <div style={{
+              fontSize: isMobile ? 20 : 26, fontFamily: font, fontWeight: 700, letterSpacing: -0.5,
+              color: priceFlash === 'up' ? '#00ff87' : priceFlash === 'down' ? '#ff3366' : '#F7931A',
+              transition: 'color 0.3s',
+            }}>
+              ${btcPrice ? btcPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '---'}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 9, color: '#4a5068', fontFamily: font }}>24H</div>
+            <div style={{ fontSize: 12, fontFamily: font, fontWeight: 600, color: '#00ff87' }}>LIVE</div>
+          </div>
+        </div>
+
+        {/* Chainlink */}
+        <div style={{ background: 'rgba(55,91,210,0.06)', border: '1px solid rgba(55,91,210,0.12)', borderRadius: 10, padding: isMobile ? '10px 12px' : '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#375BD2', fontFamily: font, letterSpacing: 1.5, marginBottom: 4 }}>CHAINLINK ORACLE</div>
+            <div style={{ fontSize: isMobile ? 20 : 26, fontFamily: font, fontWeight: 700, color: '#7B93DB' }}>
+              ${chainlinkPrice ? chainlinkPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '---'}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 9, color: '#4a5068', fontFamily: font }}>LAG</div>
+            <div style={{ fontSize: 12, fontFamily: font, fontWeight: 600, color: btcPrice && chainlinkPrice ? (Math.abs(btcPrice - chainlinkPrice) < 50 ? '#00ff87' : '#ffaa00') : '#4a5068' }}>
+              {btcPrice && chainlinkPrice ? `${(btcPrice - chainlinkPrice).toFixed(0)}` : '---'}
+            </div>
+          </div>
+        </div>
+
+        {/* Polymarket */}
+        <div style={{ background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.12)', borderRadius: 10, padding: isMobile ? '10px 12px' : '14px 18px' }}>
+          <div style={{ fontSize: 9, color: '#6366f1', fontFamily: font, letterSpacing: 1.5, marginBottom: 4 }}>
+            POLYMARKET {activeWindow ? `${activeWindow.window_length}M` : ''}
+          </div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
+            <div>
+              <span style={{ fontSize: 9, color: '#00ff87aa', fontFamily: font }}>UP </span>
+              <span style={{ fontSize: isMobile ? 18 : 22, fontFamily: font, fontWeight: 700, color: '#00ff87' }}>
+                {(polymarketOdds.up * 100).toFixed(0)}c
+              </span>
+            </div>
+            <div>
+              <span style={{ fontSize: 9, color: '#ff3366aa', fontFamily: font }}>DN </span>
+              <span style={{ fontSize: isMobile ? 18 : 22, fontFamily: font, fontWeight: 700, color: '#ff3366' }}>
+                {(polymarketOdds.down * 100).toFixed(0)}c
+              </span>
+            </div>
+            {activeWindow && (
+              <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+                <div style={{ fontSize: 9, color: '#4a5068', fontFamily: font }}>CLOSES</div>
+                <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: activeWindow.seconds_remaining < 30 ? '#ff3366' : activeWindow.seconds_remaining < 120 ? '#ffaa00' : '#00ff87' }}>
+                  {Math.floor(activeWindow.seconds_remaining / 60)}:{(activeWindow.seconds_remaining % 60).toString().padStart(2, '0')}
+                </div>
+              </div>
+            )}
+          </div>
+          {liveWindows.length > 0 && (
+            <div style={{ fontSize: 9, color: '#4a5068', fontFamily: font, marginTop: 4 }}>
+              {liveWindows.filter(w => w.seconds_remaining > 0).length} windows | Vol: ${liveWindows.reduce((s, w) => s + (w.volume_usd || 0), 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
+            </div>
+          )}
+        </div>
+      </div>
 
       {tab === "dashboard" && (
         <div style={{ padding: isMobile ? "12px" : "20px 24px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr", gap: isMobile ? 10 : 16, className: "main-grid" }}>
