@@ -64,7 +64,7 @@ function Markets() {
   useEffect(() => {
     if (activeIndustry === 'crypto') {
       fetchBtcPrice()
-      const interval = setInterval(fetchBtcPrice, 30000)
+      const interval = setInterval(fetchBtcPrice, 10000)
       return () => clearInterval(interval)
     }
   }, [activeIndustry])

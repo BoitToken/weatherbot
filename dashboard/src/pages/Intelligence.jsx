@@ -20,7 +20,7 @@ function Intelligence() {
 
   useEffect(() => {
     fetchSignals()
-    const interval = setInterval(fetchSignals, 30000) // Auto-refresh every 30s
+    const interval = setInterval(fetchSignals, 10000) // Auto-refresh every 30s
     return () => clearInterval(interval)
   }, [])
 

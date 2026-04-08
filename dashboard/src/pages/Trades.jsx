@@ -31,7 +31,7 @@ function Trades() {
 
   useEffect(() => {
     fetchAllData()
-    const interval = setInterval(fetchAllData, 30000) // Refresh every 30s
+    const interval = setInterval(fetchAllData, 10000) // Refresh every 30s
     return () => clearInterval(interval)
   }, [timeRange])
 

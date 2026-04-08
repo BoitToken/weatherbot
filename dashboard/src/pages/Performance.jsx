@@ -23,7 +23,7 @@ function Performance() {
       fetchSignals()
       setScanning(true)
       setTimeout(() => setScanning(false), 1000)
-    }, 15000)
+    }, 10000)
     return () => clearInterval(interval)
   }, [])
 

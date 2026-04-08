@@ -425,7 +425,7 @@ export default function PolymarketEmbed() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 30000) // Auto-refresh every 30s
+    const interval = setInterval(fetchData, 10000) // Auto-refresh every 30s
     return () => clearInterval(interval)
   }, [category, viewMode])
 

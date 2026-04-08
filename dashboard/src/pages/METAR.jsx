@@ -10,7 +10,7 @@ function METAR() {
 
   useEffect(() => {
     fetchStations()
-    const interval = setInterval(fetchStations, 60000) // Refresh every minute
+    const interval = setInterval(fetchStations, 15000) // Refresh every minute
     return () => clearInterval(interval)
   }, [])
 

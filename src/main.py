@@ -533,19 +533,19 @@ async def lifespan(app: FastAPI):
         logger.error(f"⚠️ Leader Poller init failed: {e}")
     
     # Start scheduler
-    scheduler.add_job(scheduled_data_scan, 'interval', minutes=30, id='data_loop', replace_existing=True)
-    scheduler.add_job(scheduled_signal_scan, 'interval', minutes=5, id='signal_loop', replace_existing=True)
+    scheduler.add_job(scheduled_data_scan, 'interval', minutes=15, id='data_loop', replace_existing=True)
+    scheduler.add_job(scheduled_signal_scan, 'interval', minutes=2, id='signal_loop', replace_existing=True)
     
     # ═══════════════════════════════════════════════════════════════
     # SPORTS INTELLIGENCE — Scheduled Jobs
     # ═══════════════════════════════════════════════════════════════
-    scheduler.add_job(scheduled_sports_scan, 'interval', minutes=3, id='sports_loop', replace_existing=True)
+    scheduler.add_job(scheduled_sports_scan, 'interval', seconds=45, id='sports_loop', replace_existing=True)
     
     # ═══════════════════════════════════════════════════════════════
     # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
     # ═══════════════════════════════════════════════════════════════
     if _telegram_bot:
-        scheduler.add_job(check_and_broadcast_signals, 'interval', minutes=3, id='telegram_signals', replace_existing=True)
+        scheduler.add_job(check_and_broadcast_signals, 'interval', seconds=45, id='telegram_signals', replace_existing=True)
         scheduler.add_job(daily_summary_task, 'cron', hour=3, minute=30, id='telegram_daily', replace_existing=True)  # 9 AM IST
         scheduler.add_job(pre_match_alerts, 'interval', minutes=15, id='telegram_prematch', replace_existing=True)
         logger.info("✅ Telegram broadcast jobs scheduled")
@@ -553,19 +553,19 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     # TRADE SETTLEMENT — Auto-resolve completed matches every 5 min
     # ═══════════════════════════════════════════════════════════════
-    scheduler.add_job(scheduled_settlement, 'interval', minutes=5, id='settlement_loop', replace_existing=True)
+    scheduler.add_job(scheduled_settlement, 'interval', minutes=1, id='settlement_loop', replace_existing=True)
     logger.info("✅ Settlement loop scheduled (every 5 min)")
     
     # ═══════════════════════════════════════════════════════════════
     # EDGE MONITOR — Check open positions for edge decay every 5 min
     # ═══════════════════════════════════════════════════════════════
-    scheduler.add_job(scheduled_edge_monitor, 'interval', minutes=5, id='edge_monitor', replace_existing=True)
+    scheduler.add_job(scheduled_edge_monitor, 'interval', minutes=1, id='edge_monitor', replace_existing=True)
     logger.info("✅ Edge monitor scheduled (every 5 min)")
     
     # ═══════════════════════════════════════════════════════════════
     # INTERNAL ARBITRAGE — Primary strategy, scan every 2 minutes
     # ═══════════════════════════════════════════════════════════════
-    scheduler.add_job(scheduled_internal_arb_scan, 'interval', minutes=2, id='internal_arb', replace_existing=True)
+    scheduler.add_job(scheduled_internal_arb_scan, 'interval', seconds=30, id='internal_arb', replace_existing=True)
     logger.info("✅ Internal arb scanner scheduled (every 2 min)")
     
     # ═══════════════════════════════════════════════════════════════
