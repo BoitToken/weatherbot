@@ -109,7 +109,9 @@ export default function BTCPolymarketEngine() {
   const [prediction, setPrediction] = useState(null);
   const [polymarketOdds, setPolymarketOdds] = useState({ up: 0.50, down: 0.50 });
   const [trades, setTrades] = useState([]);
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState(true);  // Auto-start
+  const [btcPrice, setBtcPrice] = useState(null);
+  const [liveWindows, setLiveWindows] = useState([]);
   const [countdown, setCountdown] = useState(300);
   const [config, setConfig] = useState({
     minConfidence: 0.65,
@@ -208,6 +210,24 @@ export default function BTCPolymarketEngine() {
     for (let i = 0; i < 30; i++) c.push(generateCandle(c[c.length - 1], "neutral"));
     setCandles(c);
     tick();
+
+    // Fetch real BTC data from our API
+    const fetchLive = async () => {
+      try {
+        const res = await fetch('/api/btc/state');
+        const data = await res.json();
+        if (data.btc_price) setBtcPrice(data.btc_price);
+        if (data.active_windows) setLiveWindows(data.active_windows);
+        // Update polymarket odds from live windows
+        const activeW = (data.active_windows || []).find(w => w.seconds_remaining > 0);
+        if (activeW) {
+          setPolymarketOdds({ up: activeW.up_price || 0.5, down: activeW.down_price || 0.5 });
+        }
+      } catch(e) { /* silent */ }
+    };
+    fetchLive();
+    const liveInterval = setInterval(fetchLive, 3000);
+    return () => clearInterval(liveInterval);
   }, []);
 
   useEffect(() => {
@@ -402,9 +422,9 @@ export default function BTCPolymarketEngine() {
             background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)",
             borderRadius: 12, padding: 18, display: "flex", flexDirection: "column", gridRow: "span 2",
           }}>
-            <div style={{ fontSize: 9, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 10 }}>BTC/USD 5M</div>
-            <div style={{ fontSize: 22, fontFamily: font, fontWeight: 700, color: "#fff", marginBottom: 4 }}>
-              ${candles.length > 0 ? candles[candles.length - 1].close.toFixed(2) : "—"}
+            <div style={{ fontSize: 9, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 10 }}>BTC/USD LIVE</div>
+            <div style={{ fontSize: 22, fontFamily: font, fontWeight: 700, color: "#F7931A", marginBottom: 4 }}>
+              ${btcPrice ? Number(btcPrice).toLocaleString() : (candles.length > 0 ? candles[candles.length - 1].close.toFixed(2) : "—")}
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <MiniChart candles={candles} />
