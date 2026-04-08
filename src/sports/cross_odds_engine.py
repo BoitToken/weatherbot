@@ -65,8 +65,13 @@ class CrossOddsEngine:
                         edge = fair_value - yes_price
                         edge_pct = (edge / yes_price) * 100 if yes_price > 0 else 0
                         
-                        # Only signal if >10% edge
-                        if abs(edge_pct) > 10:
+                        # Fee-adjusted edge (Polymarket ~2% fee on winnings)
+                        raw_edge_pct = edge_pct
+                        fee_adjusted_edge_pct = raw_edge_pct - 2.0
+                        
+                        # Only signal if fee-adjusted edge > 5%
+                        if abs(fee_adjusted_edge_pct) > 5:
+                            logger.info(f"  📊 {market['question'][:50]}: Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%")
                             signals.append({
                                 'edge_type': 'cross_odds',
                                 'sport': sport,
@@ -75,10 +80,12 @@ class CrossOddsEngine:
                                 'group_id': group_id,
                                 'polymarket_price': yes_price,
                                 'fair_value': fair_value,
-                                'edge_pct': edge_pct,
-                                'signal': 'BUY' if edge_pct > 0 else 'SELL',
+                                'raw_edge_pct': raw_edge_pct,
+                                'edge_pct': fee_adjusted_edge_pct,
+                                'fee_adjusted_edge_pct': fee_adjusted_edge_pct,
+                                'signal': 'BUY' if fee_adjusted_edge_pct > 0 else 'SELL',
                                 'confidence': 'MEDIUM',
-                                'reasoning': f"Group-normalized fair value is {fair_value:.2%}, current price is {yes_price:.2%}. Edge: {edge_pct:.1f}%.",
+                                'reasoning': f"Group-normalized fair value is {fair_value:.2%}, current price is {yes_price:.2%}. Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%.",
                                 'data_sources': {'polymarket_group': True},
                             })
         except Exception as e:
@@ -143,8 +150,13 @@ class CrossOddsEngine:
                     edge = sportsbook_prob - polymarket_price
                     edge_pct = (edge / polymarket_price) * 100 if polymarket_price > 0 else 0
                     
-                    # Signal if edge > 5%
-                    if abs(edge_pct) > 5:
+                    # Fee-adjusted edge (Polymarket ~2% fee on winnings)
+                    raw_edge_pct = edge_pct
+                    fee_adjusted_edge_pct = raw_edge_pct - 2.0
+                    
+                    # Signal if fee-adjusted edge > 5%
+                    if abs(fee_adjusted_edge_pct) > 5:
+                        logger.info(f"  📊 {market['question'][:50]}: Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%")
                         signals.append({
                             'edge_type': 'cross_odds',
                             'sport': market['sport'],
@@ -153,10 +165,12 @@ class CrossOddsEngine:
                             'group_id': None,
                             'polymarket_price': polymarket_price,
                             'fair_value': sportsbook_prob,
-                            'edge_pct': edge_pct,
-                            'signal': 'BUY' if edge_pct > 0 else 'SELL',
-                            'confidence': 'HIGH' if abs(edge_pct) > 10 else 'MEDIUM',
-                            'reasoning': f"Sportsbook consensus: {sportsbook_prob:.2%}, Polymarket: {polymarket_price:.2%}. Edge: {edge_pct:.1f}%.",
+                            'raw_edge_pct': raw_edge_pct,
+                            'edge_pct': fee_adjusted_edge_pct,
+                            'fee_adjusted_edge_pct': fee_adjusted_edge_pct,
+                            'signal': 'BUY' if fee_adjusted_edge_pct > 0 else 'SELL',
+                            'confidence': 'HIGH' if abs(fee_adjusted_edge_pct) > 10 else 'MEDIUM',
+                            'reasoning': f"Sportsbook consensus: {sportsbook_prob:.2%}, Polymarket: {polymarket_price:.2%}. Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%.",
                             'data_sources': {'polymarket_clob': True, 'sportsbook_odds': True},
                         })
             
@@ -235,7 +249,12 @@ class CrossOddsEngine:
                     edge = current_prob - pm_price
                     edge_pct = (edge / pm_price) * 100 if pm_price > 0 else 0
                     
-                    if abs(edge_pct) > 5:
+                    # Fee-adjusted edge
+                    raw_edge_pct = edge_pct
+                    fee_adjusted_edge_pct = raw_edge_pct - 2.0
+                    
+                    if abs(fee_adjusted_edge_pct) > 5:
+                        logger.info(f"  📊 Line movement {pm_row['question'][:50]}: Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%")
                         signals.append({
                             'edge_type': 'line_movement',
                             'sport': row['sport'],
@@ -244,10 +263,12 @@ class CrossOddsEngine:
                             'group_id': None,
                             'polymarket_price': pm_price,
                             'fair_value': current_prob,
-                            'edge_pct': edge_pct,
-                            'signal': 'BUY' if edge_pct > 0 else 'SELL',
+                            'raw_edge_pct': raw_edge_pct,
+                            'edge_pct': fee_adjusted_edge_pct,
+                            'fee_adjusted_edge_pct': fee_adjusted_edge_pct,
+                            'signal': 'BUY' if fee_adjusted_edge_pct > 0 else 'SELL',
                             'confidence': 'HIGH',
-                            'reasoning': f"Sportsbook odds moved from {old_prob:.2%} → {current_prob:.2%} ({prob_change:+.1%}) but Polymarket still at {pm_price:.2%}. Lagging adjustment.",
+                            'reasoning': f"Sportsbook odds moved from {old_prob:.2%} → {current_prob:.2%} ({prob_change:+.1%}) but Polymarket still at {pm_price:.2%}. Raw edge: {raw_edge_pct:.1f}%, Fee-adjusted: {fee_adjusted_edge_pct:.1f}%.",
                             'data_sources': {'sportsbook_line_movement': True},
                         })
             
