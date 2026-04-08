@@ -1,5 +1,4 @@
 """Execution module for WeatherBot."""
-from src.execution.paper_trader import paper_trade
-from src.execution.risk_manager import check_limits
+from src.execution.paper_trader import PaperTrader
 
-__all__ = ['paper_trade', 'check_limits']
+__all__ = ['PaperTrader']

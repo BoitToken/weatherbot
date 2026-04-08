@@ -92,6 +92,37 @@ async def scheduled_sports_scan():
         logger.error(f"❌ Sports scan failed: {e}\n{traceback.format_exc()}")
 # ═══════════════════════════════════════════════════════════════
 
+
+async def scheduled_settlement():
+    """Auto-settle completed trades every 5 minutes."""
+    try:
+        from src.execution.settlement import settle_trades
+        odds_key = os.environ.get('ODDS_API_KEY', '')
+        if not odds_key:
+            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.startswith('ODDS_API_KEY'):
+                            odds_key = line.split('=', 1)[1].strip().strip('"').strip("'")
+                            break
+        result = await settle_trades(fetch_all, execute, fetch_one, odds_key)
+        if result.get('settled', 0) > 0:
+            logger.info(f"\u2705 Settlement: {result['settled']} trades settled, P&L: ${result.get('total_pnl', 0):+.2f}")
+            # Broadcast results via Telegram
+            if _telegram_bot:
+                for t in result.get('trades', []):
+                    await _telegram_bot.broadcast_trade_result({
+                        'market_title': t.get('market_title', ''),
+                        'entry_price': 50,
+                        'exit_price': 100 if t['outcome'] == 'won' else 0,
+                        'pnl_usd': t['pnl'],
+                        'pnl_pct': 0,
+                    })
+    except Exception as e:
+        logger.error(f"\u274c Settlement error: {e}")
+
+
 # ═══════════════════════════════════════════════════════════════
 # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
 # ═══════════════════════════════════════════════════════════════
@@ -144,16 +175,130 @@ async def check_and_broadcast_signals():
 
 
 async def daily_summary_task():
-    """Send daily summary at 9 AM IST."""
+    """Send daily summary at 9 AM IST — Sprint 2 enhanced version."""
     global _telegram_bot
     if not _telegram_bot:
         return
     
     try:
-        await _telegram_bot.broadcast_daily_summary()
-        logger.info("📊 Daily summary sent")
+        import pytz
+        IST = pytz.timezone('Asia/Calcutta')
+        now_ist = datetime.now(IST)
+        yesterday = (now_ist - timedelta(days=1)).date()
+        
+        # Yesterday's trades from trades table
+        yesterday_stats = await fetch_one("""
+            SELECT 
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl
+            FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+        """, (yesterday,))
+        
+        y_trades = int(yesterday_stats.get('trades', 0) or 0) if yesterday_stats else 0
+        y_wins = int(yesterday_stats.get('wins', 0) or 0) if yesterday_stats else 0
+        y_pnl = float(yesterday_stats.get('total_pnl', 0) or 0) if yesterday_stats else 0
+        y_win_rate = (y_wins / y_trades * 100) if y_trades > 0 else 0
+        
+        # Per-strategy breakdown
+        strat_rows = await fetch_all("""
+            SELECT strategy,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(pnl_usd), 0) as pnl
+            FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            GROUP BY strategy
+            ORDER BY pnl DESC
+        """, (yesterday,))
+        
+        # Best / worst trade
+        best = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            ORDER BY pnl_usd DESC LIMIT 1
+        """, (yesterday,))
+        worst = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            ORDER BY pnl_usd ASC LIMIT 1
+        """, (yesterday,))
+        
+        # Bankroll
+        bankroll = await fetch_one(
+            "SELECT total_usd, available_usd, in_positions_usd FROM bankroll ORDER BY timestamp DESC LIMIT 1"
+        )
+        bankroll_total = float(bankroll.get('total_usd', 0) or 0) if bankroll else 0
+        bankroll_available = float(bankroll.get('available_usd', 0) or 0) if bankroll else 0
+        bankroll_deployed = float(bankroll.get('in_positions_usd', 0) or 0) if bankroll else 0
+        
+        # Disabled strategies
+        disabled = await fetch_all("""
+            SELECT strategy, win_rate, total_trades FROM strategy_performance
+            WHERE is_active = false
+        """)
+        
+        # Build the message
+        pnl_emoji = '\U0001f4b0' if y_pnl >= 0 else '\U0001f534'
+        pnl_sign = '+' if y_pnl >= 0 else ''
+        
+        msg = (
+            f"\U0001f4ca <b>Daily Digest \u2014 {now_ist.strftime('%b %d, %Y')}</b>\n\n"
+            f"<b>Yesterday's Results:</b>\n"
+            f"Trades: {y_trades} | Win Rate: {y_win_rate:.0f}%\n"
+            f"{pnl_emoji} P&amp;L: {pnl_sign}${y_pnl:.2f}\n\n"
+        )
+        
+        # Strategy breakdown
+        if strat_rows:
+            msg += "<b>Per-Strategy:</b>\n"
+            for s in strat_rows:
+                s_pnl = float(s.get('pnl', 0) or 0)
+                s_emoji = '\u2705' if s_pnl >= 0 else '\u274c'
+                s_sign = '+' if s_pnl >= 0 else ''
+                s_wins = int(s.get('wins', 0) or 0)
+                s_trades = int(s.get('trades', 0) or 0)
+                msg += f"{s_emoji} {s['strategy']}: {s_sign}${s_pnl:.2f} ({s_wins}/{s_trades})\n"
+            msg += "\n"
+        
+        # Best/worst trades
+        if best and float(best.get('pnl_usd', 0) or 0) != 0:
+            msg += f"\U0001f3c6 <b>Best:</b> {(best.get('market_title',''))[:40]} (+${float(best.get('pnl_usd',0) or 0):.2f})\n"
+        if worst and float(worst.get('pnl_usd', 0) or 0) < 0:
+            msg += f"\U0001f4a5 <b>Worst:</b> {(worst.get('market_title',''))[:40]} (${float(worst.get('pnl_usd',0) or 0):.2f})\n"
+        if best or worst:
+            msg += "\n"
+        
+        # Bankroll
+        msg += (
+            f"\U0001f4b3 <b>Bankroll:</b>\n"
+            f"Total: ${bankroll_total:.2f} | Available: ${bankroll_available:.2f}\n"
+            f"Deployed: ${bankroll_deployed:.2f}\n"
+        )
+        
+        # Disabled strategies
+        if disabled:
+            msg += "\n\U0001f6a8 <b>Auto-Disabled:</b>\n"
+            for d in disabled:
+                d_wr = float(d.get('win_rate', 0) or 0) * 100
+                msg += f"\u26d4 {d['strategy']} ({d_wr:.1f}% over {d['total_trades']} trades)\n"
+        
+        # Send to all subscribers
+        subscribers = await _telegram_bot.get_all_subscribers()
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(
+                    chat_id=sub['chat_id'],
+                    text=msg,
+                    parse_mode='HTML'
+                )
+            except Exception as send_err:
+                logger.error(f"Failed to send daily digest to {sub['chat_id']}: {send_err}")
+        
+        logger.info(f"\U0001f4ca Daily digest sent to {len(subscribers)} subscribers")
     except Exception as e:
-        logger.error(f"❌ Daily summary failed: {e}")
+        logger.error(f"\u274c Daily summary failed: {e}")
 
 
 async def pre_match_alerts():
@@ -309,8 +454,77 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(pre_match_alerts, 'interval', minutes=15, id='telegram_prematch', replace_existing=True)
         logger.info("✅ Telegram broadcast jobs scheduled")
     
+    # ═══════════════════════════════════════════════════════════════
+    # TRADE SETTLEMENT — Auto-resolve completed matches every 5 min
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_settlement, 'interval', minutes=5, id='settlement_loop', replace_existing=True)
+    logger.info("✅ Settlement loop scheduled (every 5 min)")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # LEARNING ENGINE — Sprint 3 Scheduled Jobs
+    # ═══════════════════════════════════════════════════════════════
+    async def _learning_optimize_thresholds():
+        try:
+            from src.learning.improvement import LearningEngine
+            engine = LearningEngine(get_async_pool())
+            result = await engine.optimize_thresholds()
+            logger.info(f"🎯 Threshold optimization complete: rec={result.get('recommendation')}")
+        except Exception as e:
+            logger.error(f"❌ Threshold optimization failed: {e}")
+
+    async def _learning_auto_disable():
+        try:
+            from src.learning.improvement import LearningEngine
+            engine = LearningEngine(get_async_pool())
+            result = await engine.auto_disable_check()
+            disabled = len(result.get('disabled_strategies', []))
+            flagged = len(result.get('flagged_sports', []))
+            if disabled or flagged:
+                logger.info(f"🚨 Auto-disable: {disabled} strategies disabled, {flagged} sports flagged")
+        except Exception as e:
+            logger.error(f"❌ Auto-disable check failed: {e}")
+
+    async def _learning_weekly_report():
+        try:
+            from src.learning.improvement import LearningEngine
+            engine = LearningEngine(get_async_pool())
+            report = await engine.weekly_report()
+            logger.info(f"📊 Weekly learning report generated: {len(report.get('recommendations', []))} recommendations")
+            # Send via Telegram if available
+            if _telegram_bot:
+                recs = report.get('recommendations', [])
+                perf = report.get('strategy_performance', [])
+                msg_parts = ["📊 <b>Weekly Learning Report</b>\n"]
+                for sp in perf:
+                    msg_parts.append(
+                        f"  • <b>{sp['strategy']}</b>: {sp['win_rate']:.0%} WR, "
+                        f"{sp['total_trades']} trades, ${sp['total_pnl']:+.2f}"
+                    )
+                if recs:
+                    msg_parts.append("\n<b>Recommendations:</b>")
+                    for r in recs:
+                        msg_parts.append(f"  {r}")
+                try:
+                    await _telegram_bot.app.bot.send_message(
+                        chat_id=_telegram_bot.admin_chat_id,
+                        text="\n".join(msg_parts),
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"❌ Weekly learning report failed: {e}")
+
+    # Daily at 4 AM IST = 22:30 UTC
+    scheduler.add_job(_learning_optimize_thresholds, 'cron', hour=22, minute=30, id='learning_optimize', replace_existing=True)
+    # Every 6 hours
+    scheduler.add_job(_learning_auto_disable, 'interval', hours=6, id='learning_auto_disable', replace_existing=True)
+    # Sunday 9 AM IST = Sunday 3:30 UTC
+    scheduler.add_job(_learning_weekly_report, 'cron', day_of_week='sun', hour=3, minute=30, id='learning_weekly', replace_existing=True)
+    logger.info("✅ Learning engine jobs scheduled (optimize: daily 4AM IST, auto-disable: 6h, weekly: Sun 9AM IST)")
+    
     scheduler.start()
-    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min, telegram: enabled)")
+    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min, settlement: 5min, learning: enabled, telegram: enabled)")
     logger.info("✅ WeatherBot ready")
 
     yield
@@ -598,6 +812,29 @@ async def health_check():
 @app.get("/api/bot/status")
 async def bot_status():
     uptime = (datetime.utcnow() - _startup_time).total_seconds() if _startup_time else 0
+
+    # Auto-trade stats from signal loop
+    auto_trade_stats = {}
+    if _signal_loop is not None:
+        raw = getattr(_signal_loop, '_last_auto_trade_stats', None) or {}
+        auto_trade_stats = {
+            "trades_auto_placed_today": raw.get("trades_placed", 0),
+            "signals_evaluated_today": raw.get("signals_evaluated", 0),
+            "trades_skipped_today": len(raw.get("skipped", [])),
+            "skip_reasons": raw.get("skipped", [])[:20],  # cap at 20 for readability
+        }
+        # Also pull DB-level stats
+        try:
+            from src.execution.paper_trader import PaperTrader
+            from src.db_async import get_async_pool
+            trader = PaperTrader(get_async_pool())
+            db_stats = await trader.get_today_stats()
+            auto_trade_stats["db_trades_placed_today"] = db_stats.get("trades_placed_today", 0)
+            auto_trade_stats["open_positions"] = db_stats.get("open_positions", 0)
+            auto_trade_stats["daily_pnl_usd"] = db_stats.get("daily_pnl_usd", 0.0)
+        except Exception:
+            pass
+
     return {
         "running": scheduler.running,
         "mode": getattr(config, 'MODE', 'paper'),
@@ -605,6 +842,7 @@ async def bot_status():
         "last_signal_scan": _last_signal_scan.isoformat() if _last_signal_scan else None,
         "uptime_seconds": int(uptime),
         "signal_loop_ready": _signal_loop is not None,
+        "auto_trade": auto_trade_stats,
     }
 
 
@@ -1420,6 +1658,54 @@ async def execute_trade(data: dict):
         logger.error(f"Execute trade error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# =============================================================================
+# Trade Settlement
+# =============================================================================
+
+@app.post("/api/trades/settle")
+async def settle_trades_endpoint():
+    """Auto-settle completed trades using Odds API + ESPN scores."""
+    from src.execution.settlement import settle_trades
+    try:
+        odds_key = os.environ.get('ODDS_API_KEY', '')
+        if not odds_key:
+            # Try loading from .env
+            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.startswith('ODDS_API_KEY'):
+                            odds_key = line.split('=', 1)[1].strip().strip('"').strip("'")
+                            break
+        result = await settle_trades(fetch_all, execute, fetch_one, odds_key)
+        return result
+    except Exception as e:
+        logger.error(f"Settlement error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/trades/settle-manual")
+async def settle_trade_manual(data: dict):
+    """Manually settle a trade by ID."""
+    from src.execution.settlement import manual_settle
+    trade_id = data.get('trade_id')
+    outcome = data.get('outcome')  # 'won' or 'lost'
+    winner = data.get('winner', '')
+    
+    if not trade_id or outcome not in ('won', 'lost'):
+        raise HTTPException(status_code=400, detail="trade_id and outcome ('won'/'lost') required")
+    
+    try:
+        result = await manual_settle(execute, int(trade_id), outcome, winner)
+        if 'error' in result:
+            raise HTTPException(status_code=404, detail=result['error'])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/intelligence/forecast/{icao}")
 async def get_forecast(icao: str):
     """Get Open-Meteo forecast for a station."""
@@ -1869,6 +2155,68 @@ async def get_odds_comparison(limit: int = 50):
     except Exception as e:
         logger.error(f"Odds comparison error: {e}")
         return {"comparisons": [], "count": 0}
+
+
+# =============================================================================
+# Learning Engine — Sprint 3 Endpoints
+# =============================================================================
+
+@app.get("/api/learning/scorecard")
+async def learning_scorecard(strategy: str = "arbitrage", lookback_days: int = 30):
+    """Strategy scorecard from the learning engine."""
+    try:
+        from src.learning.improvement import LearningEngine
+        from src.db_async import get_async_pool
+        engine = LearningEngine(get_async_pool())
+        result = await engine.strategy_scorecard(strategy, lookback_days)
+        return result
+    except Exception as e:
+        logger.error(f"Learning scorecard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/thresholds")
+async def learning_thresholds():
+    """Current edge threshold analysis."""
+    try:
+        from src.learning.improvement import LearningEngine
+        from src.db_async import get_async_pool
+        engine = LearningEngine(get_async_pool())
+        result = await engine.get_current_thresholds()
+        return result
+    except Exception as e:
+        logger.error(f"Learning thresholds error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/report/latest")
+async def learning_report_latest():
+    """Latest weekly learning report."""
+    try:
+        from src.learning.improvement import LearningEngine
+        from src.db_async import get_async_pool
+        engine = LearningEngine(get_async_pool())
+        result = await engine.get_latest_report()
+        if not result:
+            return {"message": "No weekly report generated yet"}
+        return result
+    except Exception as e:
+        logger.error(f"Learning report error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/learning/optimize")
+async def learning_optimize():
+    """Trigger threshold optimization manually."""
+    try:
+        from src.learning.improvement import LearningEngine
+        from src.db_async import get_async_pool
+        engine = LearningEngine(get_async_pool())
+        result = await engine.optimize_thresholds()
+        return result
+    except Exception as e:
+        logger.error(f"Learning optimize error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -2594,6 +2942,186 @@ async def get_leader_config():
             "copy_delay_seconds": 5,
         }
     }
+
+
+# =============================================================================
+# SPRINT 2: Analytics Endpoints
+# =============================================================================
+
+@app.get("/api/analytics/strategies")
+async def get_analytics_strategies():
+    """Returns all strategy performance data from strategy_performance table."""
+    try:
+        results = await fetch_all("""
+            SELECT strategy, sport, period_start, period_end,
+                   total_trades, wins, losses, win_rate,
+                   total_pnl, avg_edge, avg_pnl_per_trade,
+                   max_drawdown, sharpe_ratio, is_active, updated_at
+            FROM strategy_performance
+            ORDER BY updated_at DESC
+        """)
+        strategies = []
+        for r in results:
+            strategies.append({
+                'strategy': r['strategy'],
+                'sport': r['sport'],
+                'period_start': str(r['period_start']) if r['period_start'] else None,
+                'period_end': str(r['period_end']) if r['period_end'] else None,
+                'total_trades': r['total_trades'],
+                'wins': r['wins'],
+                'losses': r['losses'],
+                'win_rate': float(r['win_rate']) if r['win_rate'] else 0,
+                'total_pnl': float(r['total_pnl']) if r['total_pnl'] else 0,
+                'avg_edge': float(r['avg_edge']) if r['avg_edge'] else 0,
+                'avg_pnl_per_trade': float(r['avg_pnl_per_trade']) if r['avg_pnl_per_trade'] else 0,
+                'max_drawdown': float(r['max_drawdown']) if r['max_drawdown'] else 0,
+                'sharpe_ratio': float(r['sharpe_ratio']) if r['sharpe_ratio'] else None,
+                'is_active': r['is_active'],
+                'updated_at': str(r['updated_at']) if r['updated_at'] else None,
+            })
+        return {"strategies": strategies, "count": len(strategies)}
+    except Exception as e:
+        logger.error(f"Analytics strategies error: {e}")
+        return {"strategies": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/analytics/daily-digest")
+async def get_analytics_daily_digest():
+    """Returns today's summary: trades, P&L, best/worst strategy, bankroll."""
+    try:
+        # Today's settled trades
+        today_stats = await fetch_one("""
+            SELECT 
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                MAX(pnl_usd) as best_pnl,
+                MIN(pnl_usd) as worst_pnl
+            FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+        """)
+        
+        # Per-strategy today
+        strat_breakdown = await fetch_all("""
+            SELECT strategy,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(pnl_usd), 0) as pnl
+            FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            GROUP BY strategy
+            ORDER BY pnl DESC
+        """)
+        
+        # Best and worst trade details
+        best_trade = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            ORDER BY pnl_usd DESC LIMIT 1
+        """)
+        worst_trade = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            ORDER BY pnl_usd ASC LIMIT 1
+        """)
+        
+        # Bankroll
+        bankroll = await fetch_one(
+            "SELECT total_usd, available_usd, in_positions_usd FROM bankroll ORDER BY timestamp DESC LIMIT 1"
+        )
+        
+        # Disabled strategies
+        disabled = await fetch_all("""
+            SELECT strategy, win_rate, total_trades FROM strategy_performance
+            WHERE is_active = false
+        """)
+        
+        total_trades = int(today_stats.get('trades', 0) or 0) if today_stats else 0
+        wins = int(today_stats.get('wins', 0) or 0) if today_stats else 0
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        
+        return {
+            "date": datetime.utcnow().strftime('%Y-%m-%d'),
+            "trades": total_trades,
+            "wins": wins,
+            "losses": int(today_stats.get('losses', 0) or 0) if today_stats else 0,
+            "win_rate": round(win_rate, 1),
+            "total_pnl": float(today_stats.get('total_pnl', 0) or 0) if today_stats else 0,
+            "best_trade": {
+                "market": best_trade.get('market_title', '') if best_trade else '',
+                "pnl": float(best_trade.get('pnl_usd', 0) or 0) if best_trade else 0,
+                "strategy": best_trade.get('strategy', '') if best_trade else '',
+            } if best_trade else None,
+            "worst_trade": {
+                "market": worst_trade.get('market_title', '') if worst_trade else '',
+                "pnl": float(worst_trade.get('pnl_usd', 0) or 0) if worst_trade else 0,
+                "strategy": worst_trade.get('strategy', '') if worst_trade else '',
+            } if worst_trade else None,
+            "strategy_breakdown": [{
+                "strategy": s['strategy'],
+                "trades": s['trades'],
+                "wins": int(s['wins'] or 0),
+                "pnl": float(s['pnl'] or 0),
+            } for s in (strat_breakdown or [])],
+            "bankroll": {
+                "total": float(bankroll.get('total_usd', 0) or 0) if bankroll else 0,
+                "available": float(bankroll.get('available_usd', 0) or 0) if bankroll else 0,
+                "in_positions": float(bankroll.get('in_positions_usd', 0) or 0) if bankroll else 0,
+            },
+            "disabled_strategies": [{
+                "strategy": d['strategy'],
+                "win_rate": float(d['win_rate'] or 0),
+                "total_trades": d['total_trades'],
+            } for d in (disabled or [])],
+        }
+    except Exception as e:
+        logger.error(f"Analytics daily digest error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/analytics/sport-breakdown")
+async def get_analytics_sport_breakdown():
+    """P&L breakdown by sport."""
+    try:
+        # From trades table - extract sport from market_title heuristics
+        results = await fetch_all("""
+            SELECT 
+                CASE 
+                    WHEN LOWER(market_title) LIKE '%%ipl%%' OR LOWER(market_title) LIKE '%%cricket%%' THEN 'Cricket/IPL'
+                    WHEN LOWER(market_title) LIKE '%%nba%%' OR LOWER(market_title) LIKE '%%basketball%%' THEN 'NBA'
+                    WHEN LOWER(market_title) LIKE '%%nhl%%' OR LOWER(market_title) LIKE '%%hockey%%' THEN 'NHL'
+                    WHEN LOWER(market_title) LIKE '%%soccer%%' OR LOWER(market_title) LIKE '%%epl%%' THEN 'Soccer'
+                    WHEN LOWER(market_title) LIKE '%%mlb%%' OR LOWER(market_title) LIKE '%%baseball%%' THEN 'MLB'
+                    ELSE 'Other'
+                END as sport,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                COALESCE(AVG(pnl_usd), 0) as avg_pnl,
+                COALESCE(AVG(edge_at_entry), 0) as avg_edge
+            FROM trades
+            WHERE status IN ('won', 'lost')
+            GROUP BY sport
+            ORDER BY total_pnl DESC
+        """)
+        
+        sports = [{
+            'sport': r['sport'],
+            'total_trades': r['total_trades'],
+            'wins': int(r['wins'] or 0),
+            'losses': int(r['losses'] or 0),
+            'win_rate': round(int(r['wins'] or 0) / r['total_trades'] * 100, 1) if r['total_trades'] > 0 else 0,
+            'total_pnl': round(float(r['total_pnl'] or 0), 2),
+            'avg_pnl': round(float(r['avg_pnl'] or 0), 2),
+            'avg_edge': round(float(r['avg_edge'] or 0), 4),
+        } for r in (results or [])]
+        
+        return {"sports": sports, "count": len(sports)}
+    except Exception as e:
+        logger.error(f"Sport breakdown error: {e}")
+        return {"sports": [], "count": 0, "error": str(e)}
 
 
 # =============================================================================

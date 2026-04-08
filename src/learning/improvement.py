@@ -1,263 +1,593 @@
 """
-Improvement Loop — learns from trade outcomes and proposes strategy changes.
-Changes are proposed only. CEO must approve before they're applied.
+Learning Engine — Post-trade analysis, strategy scorecards, threshold optimization,
+auto-disable, and weekly reports.
+
+The ONLY priority: make the qualifying criteria more accurate.
 """
 import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
 import json
 import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-class ImprovementEngine:
-    def __init__(self, db_pool, config):
-        self.db_pool = db_pool
-        self.config = config
-    
-    async def daily_analysis(self) -> Dict:
-        """Run daily performance analysis."""
-        if not self.db_pool:
-            return {"error": "No DB pool"}
-        
-        async with self.db_pool.acquire() as conn:
-            # Today's trades
-            today = datetime.utcnow().date()
-            trades = await conn.fetch("""
-                SELECT * FROM trades 
-                WHERE DATE(entry_at) = $1
-                ORDER BY entry_at DESC
-            """, str(today))
-            
-            # Resolved trades (last 7 days)
-            week_ago = datetime.utcnow() - timedelta(days=7)
-            resolved = await conn.fetch("""
-                SELECT * FROM trades 
-                WHERE resolved_at IS NOT NULL AND resolved_at >= $1
-            """, week_ago)
-            
-            # Station accuracy
-            try:
-                accuracy = await conn.fetch("""
-                    SELECT station_icao, city, total_signals, correct_signals, accuracy
-                    FROM station_accuracy
-                    ORDER BY total_signals DESC
-                """)
-            except Exception as e:
-                logger.warning(f"Station accuracy table not found: {e}")
-                accuracy = []
-        
-        total = len(resolved)
-        wins = sum(1 for t in resolved if float(t.get("pnl_usd", 0) or 0) > 0)
-        losses = total - wins
-        total_pnl = sum(float(t.get("pnl_usd", 0) or 0) for t in resolved)
-        
-        report = {
-            "date": str(today),
-            "period": "7_days",
-            "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": wins / total if total > 0 else 0,
-            "total_pnl": total_pnl,
-            "avg_pnl": total_pnl / total if total > 0 else 0,
-            "today_trades": len(trades),
-            "station_accuracy": [dict(a) for a in accuracy],
-            "needs_attention": total > 20 and wins / total < 0.55,
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        
-        return report
-    
-    async def weekly_review(self) -> Dict:
-        """Generate weekly strategy review with findings for CEO."""
-        daily = await self.daily_analysis()
-        
-        findings = []
-        proposals = []
-        
-        # Check if win rate is below target
-        if daily["win_rate"] < 0.55 and daily["total_trades"] > 10:
-            findings.append(
-                f"Win rate {daily['win_rate']:.1%} is below 55% target over {daily['total_trades']} trades"
-            )
-            proposals.append(
-                "PROPOSAL: Increase min_edge_auto_trade from 0.25 to 0.30 to filter weaker signals"
-            )
-        
-        # Check station accuracy
-        bad_stations = [
-            s for s in daily["station_accuracy"] 
-            if s.get("accuracy") and float(s["accuracy"]) < 0.5 
-            and int(s.get("total_signals", 0)) > 5
-        ]
-        if bad_stations:
-            for s in bad_stations:
-                findings.append(
-                    f"Station {s['station_icao']} ({s['city']}) accuracy only "
-                    f"{float(s['accuracy']):.1%} over {s['total_signals']} signals"
-                )
-            proposals.append(
-                f"PROPOSAL: Exclude stations with <50% accuracy: "
-                f"{[s['station_icao'] for s in bad_stations]}"
-            )
-        
-        # Check if PnL is negative
-        if daily["total_pnl"] < 0:
-            findings.append(f"Net P&L is negative: ${daily['total_pnl']:.2f}")
-            proposals.append(
-                "PROPOSAL: Reduce max_position_usd from $50 to $25 until win rate improves"
-            )
-        
-        # Check if we're winning but position sizes are too small
-        if daily["win_rate"] > 0.60 and daily["total_trades"] > 20:
-            if daily["avg_pnl"] < 5:  # Average win < $5
-                findings.append(
-                    f"Win rate is strong ({daily['win_rate']:.1%}) but avg P&L is only ${daily['avg_pnl']:.2f}"
-                )
-                proposals.append(
-                    "PROPOSAL: Increase max_position_usd from $50 to $75 to capture more value"
-                )
-        
-        review = {
-            "type": "weekly_review",
-            "date": str(datetime.utcnow().date()),
-            "summary": daily,
-            "findings": findings,
-            "proposals": proposals,
-            "status": "PENDING_CEO_APPROVAL",
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        
-        return review
-    
-    async def update_station_accuracy(self, station_icao: str, was_correct: bool):
-        """Update accuracy tracking for a station after trade resolves."""
-        if not self.db_pool:
-            logger.warning("No DB pool, skipping station accuracy update")
-            return
-        
-        try:
-            async with self.db_pool.acquire() as conn:
-                existing = await conn.fetchrow(
-                    "SELECT * FROM station_accuracy WHERE station_icao = $1", 
-                    station_icao
-                )
-                
-                if existing:
-                    total = int(existing.get("total_signals", 0)) + 1
-                    correct = int(existing.get("correct_signals", 0)) + (1 if was_correct else 0)
-                    await conn.execute("""
-                        UPDATE station_accuracy 
-                        SET total_signals = $1, correct_signals = $2, 
-                            accuracy = $3, last_updated = NOW()
-                        WHERE station_icao = $4
-                    """, total, correct, correct / total, station_icao)
-                    logger.info(f"Updated {station_icao} accuracy: {correct}/{total} = {correct/total:.1%}")
-                else:
-                    await conn.execute("""
-                        INSERT INTO station_accuracy (
-                            station_icao, city, total_signals, correct_signals, accuracy
-                        )
-                        VALUES ($1, $2, 1, $3, $4)
-                    """, 
-                        station_icao, 
-                        "", 
-                        1 if was_correct else 0, 
-                        1.0 if was_correct else 0.0
-                    )
-                    logger.info(f"Created {station_icao} accuracy: {1 if was_correct else 0}/1")
-        except Exception as e:
-            logger.error(f"Failed to update station accuracy: {e}")
-    
-    async def calibrate_probability_model(self) -> Dict:
-        """Analyze if our probability estimates are calibrated.
-        
-        Returns calibration metrics:
-        - For trades we predicted 70% win rate, did we actually win 70%?
-        - Brier score (lower is better, 0 = perfect)
-        - Suggested adjustments to Gaussian model
+
+def _edge_bucket(edge: float) -> str:
+    """Classify an edge percentage into a bucket."""
+    if edge < 5:
+        return '<5%'
+    elif edge < 7:
+        return '5-7%'
+    elif edge < 10:
+        return '7-10%'
+    elif edge < 15:
+        return '10-15%'
+    else:
+        return '15%+'
+
+
+class LearningEngine:
+    """Sports-focused post-trade learning engine."""
+
+    def __init__(self, db_pool):
         """
-        if not self.db_pool:
-            return {"error": "No DB pool"}
-        
+        Args:
+            db_pool: AsyncPoolWrapper (from db_async.get_async_pool())
+        """
+        self.db_pool = db_pool
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    async def _execute(self, query: str, *args):
+        async with self.db_pool.acquire() as conn:
+            await conn.execute(query, *args)
+
+    async def _fetch(self, query: str, *args) -> List[Dict]:
+        async with self.db_pool.acquire() as conn:
+            rows = await conn.fetch(query, *args)
+            return [dict(r) for r in rows] if rows else []
+
+    async def _fetchrow(self, query: str, *args) -> Optional[Dict]:
+        async with self.db_pool.acquire() as conn:
+            row = await conn.fetchrow(query, *args)
+            return dict(row) if row else None
+
+    # ── 1. Post-Trade Analysis ───────────────────────────────────
+
+    async def post_trade_analysis(
+        self,
+        trade_id: int,
+        strategy: str,
+        sport: str,
+        predicted_edge: float,
+        actual_outcome: str,   # 'won' or 'lost'
+        pnl: float,
+    ) -> Dict:
+        """
+        Called after every trade settlement.
+        Logs to trade_learnings, computes whether signal was correct.
+        """
+        edge_pct = abs(predicted_edge) if predicted_edge else 0.0
+        bucket = _edge_bucket(edge_pct)
+        signal_correct = actual_outcome == 'won'
+
+        notes_parts = []
+        if signal_correct:
+            notes_parts.append(f"Signal correct - edge {edge_pct:.1f}% delivered +${pnl:.2f}")
+        else:
+            notes_parts.append(f"Signal wrong - edge {edge_pct:.1f}% but lost ${abs(pnl):.2f}")
+
+        analysis_notes = "; ".join(notes_parts)
+
         try:
-            async with self.db_pool.acquire() as conn:
-                # Get all resolved signals with our probability estimate
-                signals = await conn.fetch("""
-                    SELECT 
-                        our_probability,
-                        market_price,
-                        side,
-                        was_traded,
-                        (SELECT outcome FROM trades WHERE trades.signal_id = signals.id LIMIT 1) as outcome
-                    FROM signals
-                    WHERE created_at >= NOW() - INTERVAL '30 days'
-                    AND was_traded = true
-                """)
+            await self._execute(
+                """
+                INSERT INTO trade_learnings
+                    (trade_id, strategy, sport, predicted_edge, actual_outcome,
+                     pnl_usd, edge_bucket, signal_was_correct, analysis_notes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                trade_id, strategy or 'unknown', sport or 'unknown',
+                edge_pct, actual_outcome, round(pnl, 2),
+                bucket, signal_correct, analysis_notes,
+            )
+            logger.info(
+                f"📘 Learning logged: trade #{trade_id} strategy={strategy} "
+                f"sport={sport} edge={edge_pct:.1f}% outcome={actual_outcome} pnl=${pnl:+.2f}"
+            )
         except Exception as e:
-            logger.warning(f"Failed to fetch signals for calibration: {e}")
-            return {"error": str(e)}
-        
-        if not signals:
-            return {"error": "No signals to calibrate"}
-        
-        # Bucket probabilities into deciles
-        buckets = {i: {"predicted": i/10, "correct": 0, "total": 0} for i in range(1, 11)}
-        
-        total_brier = 0
-        count = 0
-        
-        for sig in signals:
-            prob = float(sig.get("our_probability", 0.5) or 0.5)
-            outcome = sig.get("outcome")
-            
-            if outcome is None:
-                continue
-            
-            # Which bucket?
-            bucket = min(10, max(1, int(prob * 10) + 1))
-            buckets[bucket]["total"] += 1
-            
-            # Did we win?
-            won = (outcome == "win")
-            if won:
-                buckets[bucket]["correct"] += 1
-            
-            # Brier score component
-            predicted_prob = prob
-            actual = 1.0 if won else 0.0
-            total_brier += (predicted_prob - actual) ** 2
-            count += 1
-        
-        brier_score = total_brier / count if count > 0 else None
-        
-        # Calculate actual win rate per bucket
-        calibration = {}
-        for bucket, data in buckets.items():
-            if data["total"] > 0:
-                actual_rate = data["correct"] / data["total"]
-                calibration[f"{int(data['predicted']*100)}%"] = {
-                    "predicted": data["predicted"],
-                    "actual": actual_rate,
-                    "n": data["total"],
-                    "delta": actual_rate - data["predicted"]
-                }
-        
+            logger.error(f"Failed to log trade learning for #{trade_id}: {e}")
+
         return {
-            "brier_score": brier_score,
-            "calibration_buckets": calibration,
-            "total_signals": count,
-            "recommendation": (
-                "WELL_CALIBRATED" if brier_score and brier_score < 0.15 
-                else "OVERCONFIDENT" if brier_score and brier_score > 0.25 
-                else "NEEDS_MORE_DATA"
-            ),
-            "generated_at": datetime.utcnow().isoformat()
+            "trade_id": trade_id,
+            "signal_correct": signal_correct,
+            "edge_bucket": bucket,
+            "notes": analysis_notes,
         }
+
+    # ── 2. Strategy Scorecard ────────────────────────────────────
+
+    async def strategy_scorecard(self, strategy: str, lookback_days: int = 30) -> Dict:
+        """
+        Rolling scorecard for a given strategy.
+        Returns win_rate, avg_edge for winners/losers, best/worst sport, sample_size.
+        """
+        since = datetime.utcnow() - timedelta(days=lookback_days)
+
+        rows = await self._fetch(
+            """
+            SELECT sport, predicted_edge, actual_outcome, pnl_usd, signal_was_correct
+            FROM trade_learnings
+            WHERE strategy = $1 AND created_at >= $2
+            ORDER BY created_at DESC
+            """,
+            strategy, since,
+        )
+
+        if not rows:
+            return {
+                "strategy": strategy,
+                "sample_size": 0,
+                "win_rate": 0.0,
+                "avg_edge_winners": 0.0,
+                "avg_edge_losers": 0.0,
+                "best_sport": None,
+                "worst_sport": None,
+                "total_pnl": 0.0,
+            }
+
+        total = len(rows)
+        wins = [r for r in rows if r.get('signal_was_correct')]
+        losses = [r for r in rows if not r.get('signal_was_correct')]
+        win_rate = len(wins) / total if total else 0.0
+
+        avg_edge_w = (
+            sum(float(r.get('predicted_edge', 0) or 0) for r in wins) / len(wins)
+            if wins else 0.0
+        )
+        avg_edge_l = (
+            sum(float(r.get('predicted_edge', 0) or 0) for r in losses) / len(losses)
+            if losses else 0.0
+        )
+
+        # Per-sport win rates
+        sport_stats: Dict[str, Dict] = {}
+        for r in rows:
+            s = r.get('sport', 'unknown')
+            if s not in sport_stats:
+                sport_stats[s] = {'wins': 0, 'total': 0}
+            sport_stats[s]['total'] += 1
+            if r.get('signal_was_correct'):
+                sport_stats[s]['wins'] += 1
+
+        sport_wr = {
+            s: d['wins'] / d['total'] for s, d in sport_stats.items() if d['total'] > 0
+        }
+        best_sport = max(sport_wr, key=sport_wr.get) if sport_wr else None
+        worst_sport = min(sport_wr, key=sport_wr.get) if sport_wr else None
+
+        total_pnl = sum(float(r.get('pnl_usd', 0) or 0) for r in rows)
+
+        return {
+            "strategy": strategy,
+            "sample_size": total,
+            "win_rate": round(win_rate, 4),
+            "avg_edge_winners": round(avg_edge_w, 2),
+            "avg_edge_losers": round(avg_edge_l, 2),
+            "best_sport": best_sport,
+            "worst_sport": worst_sport,
+            "total_pnl": round(total_pnl, 2),
+            "sport_breakdown": {
+                s: {"wins": d["wins"], "total": d["total"],
+                    "win_rate": round(d["wins"] / d["total"], 4)}
+                for s, d in sport_stats.items() if d["total"] > 0
+            },
+        }
+
+    # ── 3. Threshold Optimization ────────────────────────────────
+
+    async def optimize_thresholds(self) -> Dict:
+        """
+        Analyze resolved trades by edge bucket.
+        Find the minimum edge where win rate > 55%.
+        Store recommendation in bot_settings.
+        """
+        rows = await self._fetch(
+            """
+            SELECT edge_bucket, signal_was_correct, predicted_edge, pnl_usd
+            FROM trade_learnings
+            ORDER BY created_at DESC
+            """
+        )
+
+        if not rows:
+            return {"status": "no_data", "recommendation": None}
+
+        # Group by bucket
+        buckets_order = ['<5%', '5-7%', '7-10%', '10-15%', '15%+']
+        bucket_stats: Dict[str, Dict] = {b: {'wins': 0, 'total': 0, 'pnl': 0.0} for b in buckets_order}
+
+        for r in rows:
+            b = r.get('edge_bucket', '<5%')
+            if b not in bucket_stats:
+                bucket_stats[b] = {'wins': 0, 'total': 0, 'pnl': 0.0}
+            bucket_stats[b]['total'] += 1
+            if r.get('signal_was_correct'):
+                bucket_stats[b]['wins'] += 1
+            bucket_stats[b]['pnl'] += float(r.get('pnl_usd', 0) or 0)
+
+        analysis = {}
+        for b in buckets_order:
+            d = bucket_stats[b]
+            wr = d['wins'] / d['total'] if d['total'] > 0 else 0.0
+            analysis[b] = {
+                'total': d['total'],
+                'wins': d['wins'],
+                'win_rate': round(wr, 4),
+                'total_pnl': round(d['pnl'], 2),
+            }
+
+        # Edge thresholds mapped to bucket lower bounds
+        edge_map = {'<5%': 0, '5-7%': 5, '7-10%': 7, '10-15%': 10, '15%+': 15}
+        recommended_min_edge = 7  # default
+
+        for b in buckets_order:
+            d = bucket_stats[b]
+            if d['total'] >= 5:
+                wr = d['wins'] / d['total']
+                if wr > 0.55:
+                    recommended_min_edge = edge_map.get(b, 7)
+                    break
+
+        # Store recommendation
+        try:
+            value_json = json.dumps(recommended_min_edge)
+            async with self.db_pool.acquire() as conn:
+                # Use two separate params for INSERT and UPDATE
+                await conn.execute(
+                    """
+                    INSERT INTO bot_settings (key, value, updated_at)
+                    VALUES ($1, $2::jsonb, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = $3::jsonb, updated_at = NOW()
+                    """,
+                    'recommended_min_edge', value_json, value_json,
+                )
+            logger.info(f"🎯 Threshold optimization: recommended_min_edge = {recommended_min_edge}%")
+        except Exception as e:
+            logger.error(f"Failed to store recommended_min_edge: {e}")
+
+        # Store report
+        report_data = {
+            "bucket_analysis": analysis,
+            "recommended_min_edge": recommended_min_edge,
+            "total_trades_analyzed": len(rows),
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+
+        try:
+            await self._execute(
+                """
+                INSERT INTO learning_reports (report_type, report_data, recommendations, status)
+                VALUES ('threshold_optimization', $1::jsonb, $2::jsonb, 'pending')
+                """,
+                json.dumps(report_data),
+                json.dumps({"recommended_min_edge": recommended_min_edge}),
+            )
+        except Exception as e:
+            logger.error(f"Failed to store threshold report: {e}")
+
+        return {
+            "status": "completed",
+            "bucket_analysis": analysis,
+            "recommendation": recommended_min_edge,
+            "total_trades_analyzed": len(rows),
+        }
+
+    # ── 4. Auto-Disable Check ────────────────────────────────────
+
+    async def auto_disable_check(self) -> Dict:
+        """
+        Disable underperforming strategies and flag bad sports.
+        Strategy: win_rate < 48% over 30+ trades → disable.
+        Sport: win_rate < 45% over 20+ trades → flag.
+        """
+        disabled_strategies = []
+        flagged_sports = []
+
+        # ── Strategy check ──
+        strat_rows = await self._fetch(
+            """
+            SELECT strategy, 
+                   COUNT(*) as total,
+                   SUM(CASE WHEN signal_was_correct THEN 1 ELSE 0 END) as wins
+            FROM trade_learnings
+            GROUP BY strategy
+            """
+        )
+
+        for row in strat_rows:
+            total = row['total']
+            wins = row['wins']
+            strategy = row['strategy']
+            if total >= 30:
+                wr = wins / total
+                if wr < 0.48:
+                    # Disable in strategy_performance
+                    try:
+                        await self._execute(
+                            """
+                            UPDATE strategy_performance SET is_active = false, updated_at = NOW()
+                            WHERE strategy = $1
+                            """,
+                            strategy,
+                        )
+                        disabled_strategies.append({
+                            "strategy": strategy,
+                            "win_rate": round(wr, 4),
+                            "sample_size": total,
+                            "action": "disabled",
+                        })
+                        logger.warning(
+                            f"🚫 Auto-disabled strategy '{strategy}': "
+                            f"win_rate={wr:.1%} over {total} trades"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to disable strategy {strategy}: {e}")
+
+        # ── Sport check ──
+        sport_rows = await self._fetch(
+            """
+            SELECT sport,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN signal_was_correct THEN 1 ELSE 0 END) as wins
+            FROM trade_learnings
+            GROUP BY sport
+            """
+        )
+
+        for row in sport_rows:
+            total = row['total']
+            wins = row['wins']
+            sport = row['sport']
+            if total >= 20:
+                wr = wins / total
+                if wr < 0.45:
+                    flagged_sports.append({
+                        "sport": sport,
+                        "win_rate": round(wr, 4),
+                        "sample_size": total,
+                        "action": "flagged_for_review",
+                    })
+                    logger.warning(
+                        f"⚠️ Sport '{sport}' flagged: win_rate={wr:.1%} over {total} trades"
+                    )
+
+        # Log all actions to learning_reports
+        if disabled_strategies or flagged_sports:
+            try:
+                await self._execute(
+                    """
+                    INSERT INTO learning_reports (report_type, report_data, recommendations, status)
+                    VALUES ('strategy_review', $1::jsonb, $2::jsonb, 'applied')
+                    """,
+                    json.dumps({
+                        "disabled_strategies": disabled_strategies,
+                        "flagged_sports": flagged_sports,
+                        "generated_at": datetime.utcnow().isoformat(),
+                    }),
+                    json.dumps({
+                        "disable": [s["strategy"] for s in disabled_strategies],
+                        "review": [s["sport"] for s in flagged_sports],
+                    }),
+                )
+            except Exception as e:
+                logger.error(f"Failed to log auto-disable report: {e}")
+
+        return {
+            "disabled_strategies": disabled_strategies,
+            "flagged_sports": flagged_sports,
+            "checked_at": datetime.utcnow().isoformat(),
+        }
+
+    # ── 5. Weekly Report ─────────────────────────────────────────
+
+    async def weekly_report(self) -> Dict:
+        """
+        Comprehensive weekly report:
+        - Per-strategy performance
+        - Edge threshold analysis
+        - Recommendations
+        - Calibration check
+        """
+        seven_days = datetime.utcnow() - timedelta(days=7)
+
+        # ── per-strategy ──
+        strat_rows = await self._fetch(
+            """
+            SELECT strategy,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN signal_was_correct THEN 1 ELSE 0 END) as wins,
+                   SUM(pnl_usd) as total_pnl,
+                   AVG(predicted_edge) as avg_edge
+            FROM trade_learnings
+            WHERE created_at >= $1
+            GROUP BY strategy
+            """,
+            seven_days,
+        )
+
+        strategy_performance = []
+        for r in strat_rows:
+            total = r['total']
+            wins = r['wins']
+            strategy_performance.append({
+                "strategy": r['strategy'],
+                "total_trades": total,
+                "wins": wins,
+                "losses": total - wins,
+                "win_rate": round(wins / total, 4) if total > 0 else 0,
+                "total_pnl": round(float(r.get('total_pnl', 0) or 0), 2),
+                "avg_edge": round(float(r.get('avg_edge', 0) or 0), 2),
+            })
+
+        # ── edge threshold analysis ──
+        threshold_data = await self.optimize_thresholds()
+
+        # ── calibration ──
+        calibration = await self._calibration_check()
+
+        # ── recommendations ──
+        recommendations = []
+
+        for sp in strategy_performance:
+            if sp['total_trades'] >= 10 and sp['win_rate'] < 0.50:
+                recommendations.append(
+                    f"⚠️ Strategy '{sp['strategy']}' has {sp['win_rate']:.0%} win rate "
+                    f"over {sp['total_trades']} trades — consider raising edge threshold or disabling."
+                )
+            if sp['total_trades'] >= 20 and sp['win_rate'] > 0.60:
+                recommendations.append(
+                    f"✅ Strategy '{sp['strategy']}' performing well at {sp['win_rate']:.0%} — "
+                    f"consider increasing position size."
+                )
+
+        rec_edge = threshold_data.get('recommendation')
+        if rec_edge and rec_edge != 7:
+            recommendations.append(
+                f"🎯 Threshold analysis suggests min edge = {rec_edge}%"
+            )
+
+        if calibration.get('overconfident'):
+            recommendations.append(
+                "📊 Calibration check: we may be overconfident — "
+                "predicted edges are higher than actual win rates suggest."
+            )
+
+        # ── build report ──
+        report = {
+            "period": "7_days",
+            "period_start": seven_days.isoformat(),
+            "period_end": datetime.utcnow().isoformat(),
+            "strategy_performance": strategy_performance,
+            "threshold_analysis": threshold_data.get('bucket_analysis', {}),
+            "recommended_min_edge": rec_edge,
+            "calibration": calibration,
+            "recommendations": recommendations,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+
+        # Store report
+        try:
+            await self._execute(
+                """
+                INSERT INTO learning_reports (report_type, report_data, recommendations, status)
+                VALUES ('weekly', $1::jsonb, $2::jsonb, 'pending')
+                """,
+                json.dumps(report),
+                json.dumps(recommendations),
+            )
+            logger.info("📊 Weekly learning report generated and stored")
+        except Exception as e:
+            logger.error(f"Failed to store weekly report: {e}")
+
+        return report
+
+    # ── internal: calibration ────────────────────────────────────
+
+    async def _calibration_check(self) -> Dict:
+        """Check if predicted edges are calibrated to actual outcomes."""
+        rows = await self._fetch(
+            """
+            SELECT predicted_edge, signal_was_correct
+            FROM trade_learnings
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            """
+        )
+
+        if len(rows) < 10:
+            return {"status": "insufficient_data", "sample_size": len(rows)}
+
+        # Bucket by predicted edge and check actual win rates
+        buckets_order = ['<5%', '5-7%', '7-10%', '10-15%', '15%+']
+        bucket_data: Dict[str, Dict] = {b: {'wins': 0, 'total': 0} for b in buckets_order}
+
+        for r in rows:
+            edge = float(r.get('predicted_edge', 0) or 0)
+            b = _edge_bucket(edge)
+            if b not in bucket_data:
+                bucket_data[b] = {'wins': 0, 'total': 0}
+            bucket_data[b]['total'] += 1
+            if r.get('signal_was_correct'):
+                bucket_data[b]['wins'] += 1
+
+        calibration_buckets = {}
+        overconfident = False
+        for b in buckets_order:
+            d = bucket_data[b]
+            if d['total'] > 0:
+                wr = d['wins'] / d['total']
+                calibration_buckets[b] = {
+                    'total': d['total'],
+                    'wins': d['wins'],
+                    'actual_win_rate': round(wr, 4),
+                }
+                # High-edge trades winning less than 55% = overconfident
+                if b in ('10-15%', '15%+') and d['total'] >= 5 and wr < 0.55:
+                    overconfident = True
+
+        total_wins = sum(1 for r in rows if r.get('signal_was_correct'))
+        overall_wr = total_wins / len(rows)
+
+        return {
+            "status": "completed",
+            "sample_size": len(rows),
+            "overall_win_rate": round(overall_wr, 4),
+            "overconfident": overconfident,
+            "calibration_buckets": calibration_buckets,
+        }
+
+    # ── Public: get current thresholds ───────────────────────────
+
+    async def get_current_thresholds(self) -> Dict:
+        """Return the latest threshold analysis without re-optimizing."""
+        row = await self._fetchrow(
+            """
+            SELECT report_data FROM learning_reports
+            WHERE report_type = 'threshold_optimization'
+            ORDER BY created_at DESC LIMIT 1
+            """
+        )
+        if row:
+            data = row.get('report_data')
+            if isinstance(data, str):
+                data = json.loads(data)
+            return data or {}
+
+        # Fallback: run optimization
+        return await self.optimize_thresholds()
+
+    # ── Public: get latest report ────────────────────────────────
+
+    async def get_latest_report(self) -> Optional[Dict]:
+        """Return the latest weekly report."""
+        row = await self._fetchrow(
+            """
+            SELECT id, report_type, report_data, recommendations, status, created_at
+            FROM learning_reports
+            WHERE report_type = 'weekly'
+            ORDER BY created_at DESC LIMIT 1
+            """
+        )
+        if not row:
+            return None
+        result = dict(row)
+        for key in ('report_data', 'recommendations'):
+            if isinstance(result.get(key), str):
+                result[key] = json.loads(result[key])
+        return result
 
 
 if __name__ == "__main__":
-    # Test the module
-    print("Improvement Engine module loaded successfully")
-    print(f"  ImprovementEngine: {ImprovementEngine.__name__}")
+    print("Learning Engine module loaded successfully")
+    print(f"  LearningEngine: {LearningEngine.__name__}")

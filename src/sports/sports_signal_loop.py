@@ -119,78 +119,119 @@ class SportsSignalLoop:
     
     async def create_paper_trades(self, signals: list) -> int:
         """
-        Create paper trades for high-confidence sports signals.
-        Uses shared src/execution/paper_trader.py.
+        Auto-execute paper trades for qualifying signals.
+        Criteria from INTELLIGENCE.md:
+          - Edge >= 7%
+          - Confidence HIGH, or MEDIUM with edge >= 10%
+          - No duplicate open trade for same market_id
+          - Circuit breaker: daily loss < -$200
+          - Max 50 concurrent positions
+        Position sizing: $25 base, $50 if edge > 15%
         """
+        from src.execution.paper_trader import PaperTrader
+
+        trader = PaperTrader(self.db_pool)
         trades_created = 0
-        
+
+        # --- Pre-flight risk checks (run once, not per-signal) ---
         try:
-            # Import paper trader
-            import sys
-            import os
-            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from execution.paper_trader import PaperTrader
-            
-            trader = PaperTrader(self.db_pool)
-            
-            for signal in signals:
-                # Only trade high-confidence signals
-                if signal.get('confidence') != 'HIGH':
-                    continue
-                
-                # Skip if no clear edge
-                edge_pct = signal.get('edge_pct')
-                if edge_pct is None or abs(edge_pct) < 5:
-                    continue
-                
-                # Determine position size based on edge and confidence
-                position_size = 100  # Base size in USD
-                if abs(edge_pct) > 10:
-                    position_size = 200  # Larger for bigger edges
-                
-                # Create paper trade
-                trade_signal = signal.get('signal', 'BUY')
-                
-                if trade_signal in ['BUY', 'SELL']:
-                    side = 'BUY' if trade_signal == 'BUY' else 'SELL'
-                    
-                    await trader.create_trade(
-                        market_id=signal.get('market_id'),
-                        side=side,
-                        amount_usd=position_size,
-                        price=signal.get('polymarket_price', 0.5),
-                        source='sports',
-                        strategy=signal.get('edge_type', 'unknown'),
-                        metadata={
-                            'signal': signal.get('signal'),
-                            'confidence': signal.get('confidence'),
-                            'edge_pct': edge_pct,
-                            'reasoning': signal.get('reasoning'),
-                        }
-                    )
-                    
-                    trades_created += 1
-                
-                elif trade_signal == 'BUY_BOTH':
-                    # Binary arbitrage: buy both YES and NO
-                    await trader.create_trade(
-                        market_id=signal.get('market_id'),
-                        side='BUY',
-                        amount_usd=position_size / 2,
-                        price=signal.get('polymarket_price', 0.5),
-                        source='sports',
-                        strategy='binary_arb',
-                        metadata={'reasoning': signal.get('reasoning')}
-                    )
-                    
-                    # Buy NO side too (would need NO price)
-                    # For now, just log
-                    logger.info(f"  Binary arb opportunity: {signal.get('market_title')}")
-                    trades_created += 1
-        
-        except ImportError:
-            logger.warning("⚠️ PaperTrader not found - skipping paper trade creation")
+            daily_pnl = await trader.get_daily_pnl()
+            if daily_pnl <= -200:
+                logger.warning(f"🛑 Circuit breaker tripped: daily P&L ${daily_pnl:.2f} <= -$200. No new trades.")
+                for s in signals:
+                    trader.skipped_reasons.append({"market_id": s.get("market_id"), "reason": "circuit_breaker"})
+                trader.signals_evaluated_today += len(signals)
+                return 0
+
+            open_count = await trader.get_open_count()
         except Exception as e:
-            logger.error(f"Failed to create paper trades: {e}")
-        
+            logger.error(f"❌ Risk pre-flight failed: {e}")
+            return 0
+
+        for signal in signals:
+            trader.signals_evaluated_today += 1
+            market_id = signal.get("market_id")
+            edge_pct = signal.get("edge_pct")
+            confidence = signal.get("confidence", "LOW")
+            trade_signal = signal.get("signal", "")
+
+            # --- Qualifying filters ---
+            # 1. Must have actionable signal direction
+            if trade_signal not in ("BUY", "SELL"):
+                logger.debug(f"  ⏭ Skip {market_id}: signal={trade_signal} (not BUY/SELL)")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": f"signal_type_{trade_signal}"})
+                continue
+
+            # 2. Edge >= 7%
+            if edge_pct is None or abs(edge_pct) < 7:
+                logger.debug(f"  ⏭ Skip {market_id}: edge={edge_pct} < 7%")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": f"low_edge_{edge_pct}"})
+                continue
+
+            # 3. Confidence gate
+            if confidence == "HIGH":
+                pass  # always ok
+            elif confidence == "MEDIUM" and abs(edge_pct) >= 10:
+                pass  # medium ok if bigger edge
+            else:
+                logger.debug(f"  ⏭ Skip {market_id}: confidence={confidence} edge={edge_pct}")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": f"confidence_{confidence}_edge_{edge_pct}"})
+                continue
+
+            # 4. Max concurrent positions
+            if open_count >= 50:
+                logger.warning(f"  ⏭ Skip {market_id}: max 50 positions ({open_count} open)")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": "max_positions"})
+                continue
+
+            # 5. Duplicate check
+            try:
+                is_dup = await trader.check_duplicate(market_id)
+                if is_dup:
+                    logger.debug(f"  ⏭ Skip {market_id}: duplicate open trade")
+                    trader.skipped_reasons.append({"market_id": market_id, "reason": "duplicate"})
+                    continue
+            except Exception as e:
+                logger.error(f"  Dup check error for {market_id}: {e}")
+
+            # --- Position sizing ---
+            size_usd = 50.0 if abs(edge_pct) > 15 else 25.0
+
+            # --- Execute ---
+            try:
+                trade_id = await trader.create_trade(
+                    market_id=market_id,
+                    market_title=signal.get("market_title", ""),
+                    side=trade_signal,
+                    entry_price=signal.get("polymarket_price", 0.5),
+                    size_usd=size_usd,
+                    edge_pct=abs(edge_pct),
+                    strategy=signal.get("edge_type", "unknown"),
+                    metadata={
+                        "signal": trade_signal,
+                        "confidence": confidence,
+                        "edge_pct": edge_pct,
+                        "reasoning": signal.get("reasoning"),
+                        "sport": signal.get("sport"),
+                        "fair_value": signal.get("fair_value"),
+                    },
+                )
+                if trade_id:
+                    trades_created += 1
+                    open_count += 1  # track locally so we don't re-query every iteration
+                    logger.info(
+                        f"  📈 Trade #{trade_id}: {trade_signal} {signal.get('market_title','')[:50]} "
+                        f"edge={edge_pct:.1f}% ${size_usd}"
+                    )
+            except Exception as e:
+                logger.error(f"  ❌ Trade creation failed for {market_id}: {e}")
+                trader.skipped_reasons.append({"market_id": market_id, "reason": f"error: {e}"})
+
+        # Store stats for status endpoint
+        self._last_auto_trade_stats = {
+            "trades_placed": trades_created,
+            "signals_evaluated": trader.signals_evaluated_today,
+            "skipped": trader.skipped_reasons,
+        }
+
         return trades_created

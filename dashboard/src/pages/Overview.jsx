@@ -2,6 +2,146 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 
+/* ── Position Drill-Down Modal ────────────────────────────── */
+function PositionDrillDown({ positions, onClose }) {
+  if (!positions || positions.length === 0) return null
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)',
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      overflowY: 'auto', padding: '24px 16px'
+    }} onClick={onClose}>
+      <div style={{ width: '100%', maxWidth: 520 }} onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          marginBottom: 20
+        }}>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#fff' }}>
+            📈 Active Positions ({positions.length})
+          </h2>
+          <button onClick={onClose} style={{
+            background: 'rgba(255,255,255,0.08)', border: 'none', borderRadius: 8,
+            color: '#fff', fontSize: 18, width: 36, height: 36, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center'
+          }}>✕</button>
+        </div>
+
+        {/* Position Cards */}
+        {positions.map((trade, idx) => {
+          const sport = getSportInfo(trade)
+          const entryPct = ((trade.entry_price || 0) * 100).toFixed(0)
+          const currentPct = ((trade.current_price || trade.entry_price || 0) * 100).toFixed(0)
+          const unrealizedPnl = ((trade.current_price || trade.entry_price || 0) - (trade.entry_price || 0)) * (trade.shares || trade.size_usd || 0)
+          const pnlColor = unrealizedPnl >= 0 ? '#10B981' : '#EF4444'
+
+          return (
+            <div key={trade.id || idx} style={{
+              background: 'linear-gradient(135deg, #1a1a2e 0%, #16162a 100%)',
+              border: '1px solid rgba(124,58,237,0.25)',
+              borderLeft: `4px solid ${sport.color}`,
+              borderRadius: 14,
+              padding: '20px',
+              marginBottom: 14,
+              transition: 'transform 0.15s',
+            }}>
+              {/* Top row: Sport badge + Side */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <span style={{
+                  padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                  background: `${sport.color}20`, color: sport.color
+                }}>
+                  {sport.emoji} {sport.name}
+                </span>
+                <span style={{
+                  padding: '5px 14px', borderRadius: 8, fontSize: 13, fontWeight: 800,
+                  background: trade.side === 'YES' || trade.side === 'BUY' ? 'rgba(16,185,129,0.18)' : 'rgba(239,68,68,0.18)',
+                  color: trade.side === 'YES' || trade.side === 'BUY' ? '#10B981' : '#EF4444'
+                }}>
+                  {trade.side || 'YES'}
+                </span>
+              </div>
+
+              {/* Market title */}
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 14, lineHeight: 1.4 }}>
+                {trade.market_title || trade.match_name || 'Unknown Market'}
+              </div>
+
+              {/* Stats grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 20px' }}>
+                <div>
+                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Entry Price</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: '#fff' }}>{entryPct}¢</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Current</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: '#fff' }}>{currentPct}¢</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Size</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: '#fff' }}>${(trade.size_usd || 0).toFixed(2)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Unrealized P&L</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: pnlColor }}>
+                    {unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Edge / confidence if available */}
+              {(trade.edge_pct || trade.confidence) && (
+                <div style={{
+                  marginTop: 14, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)',
+                  display: 'flex', gap: 16, fontSize: 13, color: '#94a3b8'
+                }}>
+                  {trade.edge_pct != null && (
+                    <span>Edge: <strong style={{ color: '#10B981' }}>{((trade.edge_pct || 0) * 100).toFixed(1)}%</strong></span>
+                  )}
+                  {trade.confidence != null && (
+                    <span>Confidence: <strong style={{ color: '#7c3aed' }}>{trade.confidence}</strong></span>
+                  )}
+                  {trade.strategy && (
+                    <span>Strategy: <strong style={{ color: '#F59E0B' }}>{trade.strategy}</strong></span>
+                  )}
+                </div>
+              )}
+
+              {/* Opened time */}
+              {trade.created_at && (
+                <div style={{ marginTop: 10, fontSize: 11, color: '#475569' }}>
+                  Opened {new Date(trade.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Summary footer */}
+        <div style={{
+          background: 'linear-gradient(135deg, #1a1a2e 0%, #0f0f1e 100%)',
+          border: '1px solid rgba(124,58,237,0.3)',
+          borderRadius: 14, padding: '16px 20px',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+        }}>
+          <div>
+            <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase' }}>Total Deployed</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: '#fff' }}>
+              ${positions.reduce((s, t) => s + (t.size_usd || 0), 0).toFixed(2)}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase' }}>Positions</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: '#7c3aed' }}>{positions.length}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function getSportInfo(trade) {
   const title = (trade.market_title || trade.match_name || '').toLowerCase()
   const strategy = (trade.strategy || '').toLowerCase()
@@ -34,6 +174,7 @@ function Overview() {
   const [traderCategory, setTraderCategory] = useState('OVERALL')
   const [traderTimePeriod, setTraderTimePeriod] = useState('MONTH')
   const [loading, setLoading] = useState(true)
+  const [showPositions, setShowPositions] = useState(false)
 
   useEffect(() => {
     fetchData()
@@ -132,8 +273,11 @@ function Overview() {
           </div>
         </div>
 
-        <div className="card">
-          <div className="card-title">Active Positions</div>
+        <div className="card" onClick={() => activeTrades.length > 0 && setShowPositions(true)} style={{ cursor: activeTrades.length > 0 ? 'pointer' : 'default', transition: 'border-color 0.2s', borderColor: activeTrades.length > 0 ? 'rgba(124,58,237,0.4)' : undefined }}>
+          <div className="card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            Active Positions
+            {activeTrades.length > 0 && <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600 }}>Tap to view →</span>}
+          </div>
           <div className="card-value">{activeTrades.length}</div>
           <div className="card-label">
             ${activeTrades.reduce((sum, t) => sum + (t.size_usd || 0), 0).toFixed(2)} deployed
@@ -477,6 +621,11 @@ function Overview() {
       )}
 
       {/* Market Overview by Sport */}
+      {/* Position Drill-Down Modal */}
+      {showPositions && (
+        <PositionDrillDown positions={activeTrades} onClose={() => setShowPositions(false)} />
+      )}
+
       {sportsBreakdown.length > 0 && (
         <div style={{ marginTop: '32px' }}>
           <h2 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '16px' }}>🌍 Market Overview</h2>
