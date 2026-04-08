@@ -566,24 +566,32 @@ class SubscriberBot:
     # ═════════════════════════════════════════════════════════════
     
     async def broadcast_signal_alert(self, signal: Dict):
-        """Broadcast a HIGH confidence signal to instant subscribers."""
+        """Broadcast when a trade is PLACED (not just detected)."""
         sport_emoji = {
             'IPL': '🏏',
             'NBA': '🏀',
             'NHL': '🏒',
             'Soccer': '⚽',
+            'MLB': '⚾',
+            'MLS': '⚽',
         }.get(signal.get('sport', ''), '🎯')
         
+        edge = signal.get('edge_pct', 0)
+        entry = signal.get('polymarket_price', 0)
+        fair = signal.get('fair_value', 0)
+        stake = signal.get('stake_usd', 25)
+        potential_profit = stake * (edge / 100)
+        
         message = (
-            f"🚨 <b>ARBITRAGE ALERT</b>\n\n"
-            f"{sport_emoji} <b>{signal.get('sport', '')}: {signal.get('market_title', '')[:50]}</b>\n"
-            f"📊 {signal.get('signal', 'BUY')}\n\n"
-            f"Entry: {signal.get('polymarket_price', 0):.2f}¢ (Polymarket)\n"
-            f"Fair Value: {signal.get('fair_value', 0):.2f}¢ ({signal.get('source_count', 0)} sportsbooks)\n"
-            f"Edge: {signal.get('edge_pct', 0):+.1f}%\n\n"
-            f"📚 Books: {signal.get('sportsbooks', 'DraftKings, Pinnacle, Betfair')}\n"
-            f"⏰ Match: {signal.get('start_time', 'TBD')}\n\n"
-            f"#{signal.get('sport', 'Sports')} #Arbitrage"
+            f"🟢 <b>TRADE PLACED</b>\n\n"
+            f"{sport_emoji} <b>{signal.get('market_title', '')[:60]}</b>\n\n"
+            f"<b>Action:</b> {signal.get('signal', 'BUY')} at {entry:.0f}¢\n"
+            f"<b>Fair Value:</b> {fair:.0f}¢ ({signal.get('source_count', 0)} sportsbooks agree)\n"
+            f"<b>Edge:</b> {edge:+.1f}% (after fees)\n"
+            f"<b>Stake:</b> ${stake:.0f}\n"
+            f"<b>Potential Upside:</b> ${potential_profit:.2f}\n\n"
+            f"<b>Rationale:</b> {signal.get('reasoning', 'Sportsbook consensus price higher than Polymarket')}\n\n"
+            f"⏰ {signal.get('start_time', 'TBD')}"
         )
         
         subscribers = await self.get_all_subscribers(instant_only=True)
@@ -706,17 +714,27 @@ class SubscriberBot:
                 logger.error(f"Failed to send daily summary to {sub['chat_id']}: {e}")
     
     async def broadcast_trade_result(self, trade: Dict):
-        """Broadcast trade result after match ends."""
-        won = trade.get('pnl_usd', 0) > 0
+        """Broadcast trade result after match resolves."""
+        pnl = trade.get('pnl_usd', 0)
+        won = pnl > 0
         emoji = "✅" if won else "❌"
-        status_text = "TRADE WON" if won else "TRADE LOST"
+        status_text = "WON" if won else "LOST"
+        pnl_emoji = "💰" if won else "📉"
+        
+        wins = trade.get('wins', 0)
+        losses = trade.get('losses', 0)
+        total_pnl = trade.get('total_pnl', 0)
+        win_rate = trade.get('win_rate', 0)
         
         message = (
-            f"{emoji} <b>{status_text}!</b>\n\n"
-            f"🏏 {trade.get('market_title', '')}\n"
-            f"Entry: {trade.get('entry_price', 0):.2f}¢ → Exit: {trade.get('exit_price', 0):.2f}¢\n"
-            f"P&amp;L: {trade.get('pnl_usd', 0):+.2f} ({trade.get('pnl_pct', 0):+.1f}%)\n\n"
-            f"Running Record: {trade.get('wins', 0)}W-{trade.get('losses', 0)}L ({trade.get('win_rate', 0):.0f}%)"
+            f"{emoji} <b>TRADE {status_text}</b>\n\n"
+            f"🏏 <b>{trade.get('market_title', '')[:60]}</b>\n\n"
+            f"<b>Entry:</b> {trade.get('entry_price', 0):.0f}¢\n"
+            f"<b>Result:</b> {'Correct — paid $1.00' if won else 'Incorrect — paid $0'}\n"
+            f"{pnl_emoji} <b>P&amp;L:</b> {pnl:+.2f}\n\n"
+            f"<b>📊 Running Record:</b>\n"
+            f"• {wins}W-{losses}L ({win_rate:.0f}% win rate)\n"
+            f"• Total P&amp;L: ${total_pnl:+.2f}"
         )
         
         subscribers = await self.get_all_subscribers(instant_only=True)

@@ -109,22 +109,8 @@ async def scheduled_edge_monitor():
         exit_needed = [a for a in alerts if a['recommendation'].startswith('EXIT')]
         if exit_needed:
             logger.warning(f"⚠️ {len(exit_needed)} positions need exit!")
-            # Send Telegram alert
-            if _telegram_bot:
-                for alert in exit_needed[:3]:
-                    msg = (
-                        f"⚠️ EDGE DECAY ALERT\n\n"
-                        f"{alert['market_title'][:50]}\n"
-                        f"Entry edge: {alert['entry_edge']:.1f}%\n"
-                        f"Current edge: {alert['current_edge']:.1f}%\n"
-                        f"Action: {alert['recommendation']}"
-                    )
-                    try:
-                        await _telegram_bot.app.bot.send_message(
-                            chat_id=_telegram_bot.admin_chat_id, text=msg
-                        )
-                    except Exception:
-                        pass
+            # Log internally only — DO NOT spam subscribers with edge decay
+            # Subscribers only get: trade placed + trade resolved
         else:
             total = len(alerts)
             if total > 0:
@@ -372,34 +358,42 @@ async def scheduled_internal_arb_scan():
                         opp['market_id'], opp['yes_price'], opp['no_price'],
                         opp.get('recommended_stake', 25)
                     )
-            # Broadcast to Telegram
-            if _telegram_bot and opps:
-                await broadcast_internal_arb(opps)
+            # Broadcast ONLY executed trades to subscribers (not raw opportunities)
+            executed = [o for o in opps if o.get('fee_adjusted_profit_pct', 0) > 0.5]
+            if _telegram_bot and executed:
+                await broadcast_internal_arb_trades(executed)
         else:
             logger.info("💰 Internal arb scan: no opportunities found")
     except Exception as e:
         logger.error(f"❌ Internal arb scan failed: {e}\n{traceback.format_exc()}")
 
 
-async def broadcast_internal_arb(opportunities):
-    """Send internal arb alerts to Telegram subscribers."""
+async def broadcast_internal_arb_trades(executed_opps):
+    """Broadcast EXECUTED internal arb trades to ALL subscribers."""
     if not _telegram_bot:
         return
-    for opp in opportunities[:5]:  # Max 5 per broadcast
+    
+    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+    
+    for opp in executed_opps[:3]:  # Max 3 per cycle
+        profit_usd = opp.get('recommended_stake', 25) * (opp['fee_adjusted_profit_pct'] / 100)
         msg = (
-            f"💰 INTERNAL ARB FOUND!\n\n"
-            f"{opp['question'][:60]}\n"
-            f"YES: {opp['yes_price']:.4f} | NO: {opp['no_price']:.4f}\n"
-            f"Combined: {opp['combined_cost']:.4f} (< $1.00)\n"
-            f"Guaranteed Profit: {opp['fee_adjusted_profit_pct']:.1f}%\n"
-            f"Stake: ${opp.get('recommended_stake', 25)}"
+            f"🟢 RISK-FREE TRADE PLACED\n\n"
+            f"{opp['question'][:60]}\n\n"
+            f"Action: Buy YES ({opp['yes_price']:.2f}\u00a2) + NO ({opp['no_price']:.2f}\u00a2)\n"
+            f"Combined Cost: {opp['combined_cost']:.2f}\u00a2 (< $1.00)\n"
+            f"Guaranteed Profit: {opp['fee_adjusted_profit_pct']:.1f}% (${profit_usd:.2f})\n"
+            f"Stake: ${opp.get('recommended_stake', 25)}\n\n"
+            f"Rationale: YES + NO < $1.00 = guaranteed payout.\n"
+            f"Risk: None (both sides covered, profit locked at entry)."
         )
-        try:
-            await _telegram_bot.app.bot.send_message(
-                chat_id=_telegram_bot.admin_chat_id, text=msg
-            )
-        except Exception as e:
-            logger.error(f"Failed to broadcast arb alert: {e}")
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(
+                    chat_id=sub['chat_id'], text=msg
+                )
+            except Exception as e:
+                logger.error(f"Failed to send arb trade to {sub['chat_id']}: {e}")
 # ═══════════════════════════════════════════════════════════════
 
 

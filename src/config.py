@@ -5,8 +5,9 @@ Loads settings from .env file and provides defaults.
 import os
 from dotenv import load_dotenv
 
-# Load .env file from project root
-load_dotenv()
+# Load .env file from project root — override=True so .env wins over parent process env
+# (OpenClaw injects its own TELEGRAM_BOT_TOKEN which is the wrong bot)
+load_dotenv(override=True)
 
 # Database
 DB_URL = os.getenv("DB_URL", "postgresql://node@localhost:5432/polyedge")
