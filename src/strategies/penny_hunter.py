@@ -1,11 +1,11 @@
 """
 Penny Hunter Strategy
-Scans ALL Polymarket markets for contracts priced 1-3¢ with asymmetric upside.
+Scans ALL Polymarket markets for contracts priced 1-3c with asymmetric upside.
 Paper trades only — no real execution.
 
 The Math:
-- Contracts at 1¢ have +$0.0336 EV per contract
-- 2.66% resolve at 99¢ (99x return), 3.33% bounce to 50¢+, 94% die at $0
+- Contracts at 1c have +$0.0336 EV per contract
+- 2.66% resolve at 99c (99x return), 3.33% bounce to 50c+, 94% die at $0
 - One 99x win covers 98 losses. Spread thin, buy wide, let asymmetry work.
 """
 import httpx
@@ -16,13 +16,13 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-PENNY_MAX_PRICE = 0.03   # 3¢ ceiling
-PENNY_MIN_PRICE = 0.005  # below 0.5¢ is probably dead/glitched
+PENNY_MAX_PRICE = 0.03   # 3c ceiling
+PENNY_MIN_PRICE = 0.005  # below 0.5c is probably dead/glitched
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 
 class PennyHunter:
-    """Scan Polymarket for 1-3¢ contracts with asymmetric upside."""
+    """Scan Polymarket for 1-3c contracts with asymmetric upside."""
 
     def __init__(self, db_pool):
         self.db_pool = db_pool
@@ -67,7 +67,7 @@ class PennyHunter:
     async def scan_penny_contracts(self) -> List[Dict]:
         """
         Fetch active Polymarket markets from Gamma API.
-        Filter for any outcome priced 1-3¢.
+        Filter for any outcome priced 1-3c.
         Paginate through at least 500 markets.
         """
         penny_contracts: List[Dict] = []
@@ -213,13 +213,13 @@ class PennyHunter:
         price = market.get('buy_price', 0.03)
         if price <= 0.01:
             score += 2
-            reasons.append("1¢ max asymmetry")
+            reasons.append("1c max asymmetry")
         elif price <= 0.02:
             score += 1
-            reasons.append("2¢ good asymmetry")
+            reasons.append("2c good asymmetry")
         else:
             score += 0.5
-            reasons.append("3¢ moderate")
+            reasons.append("3c moderate")
 
         reason_str = ' | '.join(reasons) if reasons else 'Asymmetric value'
         return (min(score, 10.0), reason_str)
@@ -300,7 +300,7 @@ class PennyHunter:
                 if pos_id:
                     logger.info(
                         f"🎰 PENNY BET #{pos_id}: {contract['question'][:50]} | "
-                        f"{buy_price*100:.0f}¢ | ${size_usd} → potential ${potential_payout:.0f} | "
+                        f"{buy_price*100:.0f}c | ${size_usd} → potential ${potential_payout:.0f} | "
                         f"Score: {catalyst_score:.0f}/10"
                     )
                 return pos_id
@@ -439,7 +439,7 @@ class PennyHunter:
                             'current_price': current_price,
                             'pnl_usd': round((current_price - buy_price) * quantity, 2),
                             'status': 'bouncing',
-                            'resolution': f'bounced to {current_price*100:.0f}¢',
+                            'resolution': f'bounced to {current_price*100:.0f}c',
                         })
 
         except Exception as e:
