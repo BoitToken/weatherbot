@@ -7,6 +7,15 @@ Runs every 3 minutes to:
 3. Run correlation engine (logical arbitrage)
 4. Run cross-odds engine (value plays)
 5. Store signals in DB
+6. Auto-execute qualifying trades per INTELLIGENCE.md protocols
+
+Protocols (loaded from INTELLIGENCE.md at startup):
+- Protocol 1: Internal Arb (YES+NO < $1, risk-free, every 2 min)
+- Protocol 2: Cross-Market Arb (sportsbook vs PM, >7% raw / >5% after 2% fee)
+- Protocol 3: Edge Decay Monitor (exit if edge < 2%)
+- Protocol 4: Line Movement (sharp money detection)
+- Protocol 5: Settlement + Learning (post-trade feedback loop)
+- Protocol 6: Risk Management (circuit breaker, Kelly sizing, position caps)
 """
 import logging
 from datetime import datetime
@@ -29,8 +38,15 @@ class SportsSignalLoop:
         self.cross_odds = CrossOddsEngine(db_pool)
     
     async def run_once(self):
-        """Run one complete sports intelligence cycle."""
-        logger.info("🏀 Sports signal loop starting...")
+        """Run one complete sports intelligence cycle.
+        
+        Follows INTELLIGENCE.md protocols:
+        - Protocol 2: Cross-Market Arb (sportsbook vs PM, fee-adjusted edge >5%)
+        - Protocol 4: Line Movement (sharp money detection via odds changes)
+        - Protocol 6: Risk Management (circuit breaker, position caps, Kelly sizing)
+        Auto-execute all qualifying trades. No human approval for paper mode.
+        """
+        logger.info("🏀 Sports signal loop starting — Protocol 2+4+6 active")
         start_time = datetime.utcnow()
         
         try:
@@ -129,8 +145,10 @@ class SportsSignalLoop:
         Position sizing: $25 base, $50 if edge > 15%
         """
         from src.execution.paper_trader import PaperTrader
+        from src.execution.orderbook import OrderbookChecker
 
         trader = PaperTrader(self.db_pool)
+        checker = OrderbookChecker()
         trades_created = 0
 
         # --- Pre-flight risk checks (run once, not per-signal) ---
@@ -197,8 +215,39 @@ class SportsSignalLoop:
             # --- Position sizing ---
             size_usd = 50.0 if abs(edge_pct) > 15 else 25.0
 
+            # --- Orderbook depth check (best-effort for paper mode) ---
+            depth_info = {}
+            try:
+                depth_info = await checker.check_depth(
+                    token_id=None,
+                    side=trade_signal,
+                    size_usd=size_usd,
+                    market_id=market_id,
+                    db_pool=self.db_pool,
+                )
+                if depth_info.get('has_depth') is False and depth_info.get('available_depth_usd', 0) > 0:
+                    old_size = size_usd
+                    size_usd = min(size_usd, depth_info['available_depth_usd'] * 0.5)
+                    logger.info(f"  📉 Reduced size ${old_size} → ${size_usd:.2f} (thin book: ${depth_info['available_depth_usd']:.0f} available)")
+                elif depth_info.get('has_depth') is False and depth_info.get('available_depth_usd', 0) == 0:
+                    logger.warning(f"  ⚠️ Empty orderbook for {market_id} — paper trade anyway")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Depth check error for {market_id}: {e}")
+
             # --- Execute ---
             try:
+                trade_metadata = {
+                    "signal": trade_signal,
+                    "confidence": confidence,
+                    "edge_pct": edge_pct,
+                    "reasoning": signal.get("reasoning"),
+                    "sport": signal.get("sport"),
+                    "fair_value": signal.get("fair_value"),
+                    "depth_checked": depth_info.get("depth_checked", False),
+                    "has_depth": depth_info.get("has_depth"),
+                    "available_depth": depth_info.get("available_depth_usd"),
+                    "slippage_pct": depth_info.get("slippage_pct"),
+                }
                 trade_id = await trader.create_trade(
                     market_id=market_id,
                     market_title=signal.get("market_title", ""),
@@ -207,14 +256,7 @@ class SportsSignalLoop:
                     size_usd=size_usd,
                     edge_pct=abs(edge_pct),
                     strategy=signal.get("edge_type", "unknown"),
-                    metadata={
-                        "signal": trade_signal,
-                        "confidence": confidence,
-                        "edge_pct": edge_pct,
-                        "reasoning": signal.get("reasoning"),
-                        "sport": signal.get("sport"),
-                        "fair_value": signal.get("fair_value"),
-                    },
+                    metadata=trade_metadata,
                 )
                 if trade_id:
                     trades_created += 1

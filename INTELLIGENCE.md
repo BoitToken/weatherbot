@@ -71,6 +71,86 @@ After every resolved trade:
 - **Polymarket CLOB API** — market prices, order books, resolution
 - **Open-Meteo** — weather data (original use case)
 
+## Execution Protocols (Fed to bot at every scan cycle)
+
+### Protocol 1: Internal Arbitrage (RISK-FREE)
+**Trigger:** YES + NO < $1.00 on same Polymarket market
+**Process:**
+1. Scan all active markets for YES + NO < $1.00
+2. Calculate raw profit: `(1.0 - combined_cost) / combined_cost * 100`
+3. Subtract 2% Polymarket fee on winnings
+4. If net profit > 0.5% → EXECUTE (buy both YES and NO)
+5. Log: market_id, prices, profit %, stake, timestamp
+6. Auto-resolve immediately (profit is guaranteed at entry)
+7. Broadcast to all subscribers on Telegram
+**Risk:** Near zero. Only risk is Polymarket settlement delay (capital lock-up)
+**Priority:** HIGHEST — run every 2 minutes, 24/7
+
+### Protocol 2: Cross-Market Arbitrage (Sportsbook vs Polymarket)
+**Trigger:** Sportsbook consensus price differs from Polymarket by > 7% (5% after fees)
+**Process:**
+1. Fetch odds from 22 sportsbooks via Odds API
+2. Calculate consensus implied probability
+3. Compare to Polymarket YES price
+4. Calculate fee-adjusted edge: `raw_edge - 2%`
+5. Require 3+ sportsbooks agreeing on direction
+6. Check orderbook depth (if available): depth must be > 2x position size
+7. If all pass → EXECUTE paper trade
+8. Log: strategy, sport, edge (raw + fee-adjusted), book count, depth info
+9. Broadcast HIGH confidence signals to subscribers
+**Risk:** Directional — sportsbooks can be wrong. This is why accuracy tracking matters.
+**Priority:** HIGH — run every 3 minutes
+
+### Protocol 3: Edge Decay Monitoring
+**Trigger:** Open position where current edge < 2% (was higher at entry)
+**Process:**
+1. For each open trade, fetch current Polymarket price
+2. Fetch current sportsbook consensus
+3. Calculate current edge vs entry edge
+4. If edge < 2% → flag EXIT_EDGE_DECAY
+5. If edge < 0% (underwater) → flag EXIT_URGENT
+6. Alert admin on Telegram with entry vs current edge
+7. In paper mode: informational. In live mode: auto-exit.
+**Risk:** Holding a position whose edge has evaporated = gambling, not trading
+**Priority:** MEDIUM — check every 5 minutes
+
+### Protocol 4: Line Movement Detection
+**Trigger:** Sportsbook odds moved > 3% in last 2 hours, Polymarket hasn't adjusted
+**Process:**
+1. Compare current sportsbook odds to odds from 2 hours ago
+2. If movement > 3% AND Polymarket price hasn't moved proportionally
+3. This means smart money moved the sportsbook line but Polymarket is lagging
+4. Fee-adjust the edge, check depth, then EXECUTE
+5. These are often the highest-conviction trades
+**Risk:** Line could move back. But historically, sharp money is right 55-60% of the time.
+**Priority:** HIGH — checked during every signal scan
+
+### Protocol 5: Settlement & Learning (Post-Trade)
+**Trigger:** Match/event completes
+**Process:**
+1. Check Odds API + ESPN for completed events (every 5 min)
+2. Match completed event to open trades (strict: both teams in title + sport alignment)
+3. Calculate P&L: won = shares * (1.0 - entry_price), lost = -size_usd
+4. Update trade record (status, pnl_usd, resolved_at)
+5. Feed to learning engine:
+   a. Was our predicted edge accurate? (edge_at_entry vs actual outcome)
+   b. Update per-strategy win rate (rolling 30 trades)
+   c. Update per-sport performance
+   d. Check if qualifying thresholds need adjustment
+   e. Auto-disable strategy if win rate < 48% over 30+ trades
+6. Broadcast result to all subscribers
+7. Weekly: generate strategy report for CEO
+**Priority:** CRITICAL — this is how the bot gets smarter
+
+### Protocol 6: Risk Management (Always Active)
+**Rules enforced before every trade:**
+- Daily loss circuit breaker: -$200 → no new trades until next day
+- Max concurrent positions: 50
+- No single sport > 40% of deployed capital
+- Position sizing via half-Kelly (min $10, max $50)
+- No duplicate trades on same market_id
+- For live mode (future): CEO approval gate required
+
 ## Key Files
 
 - `src/execution/settlement.py` — Trade settlement service

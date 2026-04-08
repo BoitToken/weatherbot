@@ -74,7 +74,10 @@ _last_sports_scan: Optional[datetime] = None
 
 
 async def scheduled_sports_scan():
-    """Run sports intelligence cycle on schedule."""
+    """Run sports intelligence cycle on schedule.
+    Protocols: P2 (Cross-Market Arb) + P4 (Line Movement) + P6 (Risk Mgmt)
+    See INTELLIGENCE.md for full protocol definitions.
+    """
     global _last_sports_scan, _sports_loop
     try:
         if _sports_loop is None:
@@ -93,7 +96,48 @@ async def scheduled_sports_scan():
 # ═══════════════════════════════════════════════════════════════
 
 
+async def scheduled_edge_monitor():
+    """Protocol 3: Edge Decay Monitoring.
+    Check all open positions — if edge < 2%, flag for exit.
+    See INTELLIGENCE.md Protocol 3.
+    """
+    try:
+        from src.execution.edge_monitor import EdgeMonitor
+        monitor = EdgeMonitor(get_async_pool())
+        alerts = await monitor.check_all_positions()
+
+        exit_needed = [a for a in alerts if a['recommendation'].startswith('EXIT')]
+        if exit_needed:
+            logger.warning(f"⚠️ {len(exit_needed)} positions need exit!")
+            # Send Telegram alert
+            if _telegram_bot:
+                for alert in exit_needed[:3]:
+                    msg = (
+                        f"⚠️ EDGE DECAY ALERT\n\n"
+                        f"{alert['market_title'][:50]}\n"
+                        f"Entry edge: {alert['entry_edge']:.1f}%\n"
+                        f"Current edge: {alert['current_edge']:.1f}%\n"
+                        f"Action: {alert['recommendation']}"
+                    )
+                    try:
+                        await _telegram_bot.app.bot.send_message(
+                            chat_id=_telegram_bot.admin_chat_id, text=msg
+                        )
+                    except Exception:
+                        pass
+        else:
+            total = len(alerts)
+            if total > 0:
+                logger.info(f"✅ Edge monitor: {total} positions healthy")
+    except Exception as e:
+        logger.error(f"❌ Edge monitor failed: {e}")
+
+
 async def scheduled_settlement():
+    """Protocol 5: Settlement & Learning.
+    Check completed events, settle trades, feed learning engine.
+    See INTELLIGENCE.md Protocol 5.
+    """
     """Auto-settle completed trades every 5 minutes."""
     try:
         from src.execution.settlement import settle_trades
@@ -301,6 +345,64 @@ async def daily_summary_task():
         logger.error(f"\u274c Daily summary failed: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# INTERNAL ARBITRAGE — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_last_internal_arb_scan: Optional[datetime] = None
+
+
+async def scheduled_internal_arb_scan():
+    """Protocol 1: Internal Arbitrage (RISK-FREE).
+    Scan all Polymarket markets for YES+NO < $1.00.
+    Buy both sides for guaranteed profit after 2% fee.
+    See INTELLIGENCE.md Protocol 1. Priority: HIGHEST.
+    """
+    global _last_internal_arb_scan
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_combined()
+        _last_internal_arb_scan = datetime.utcnow()
+        if opps:
+            logger.info(f"💰 Found {len(opps)} internal arb opportunities!")
+            # Auto-execute paper trades for profitable ones
+            for opp in opps:
+                if opp['fee_adjusted_profit_pct'] > 0.5:
+                    await scanner.execute_internal_arb(
+                        opp['market_id'], opp['yes_price'], opp['no_price'],
+                        opp.get('recommended_stake', 25)
+                    )
+            # Broadcast to Telegram
+            if _telegram_bot and opps:
+                await broadcast_internal_arb(opps)
+        else:
+            logger.info("💰 Internal arb scan: no opportunities found")
+    except Exception as e:
+        logger.error(f"❌ Internal arb scan failed: {e}\n{traceback.format_exc()}")
+
+
+async def broadcast_internal_arb(opportunities):
+    """Send internal arb alerts to Telegram subscribers."""
+    if not _telegram_bot:
+        return
+    for opp in opportunities[:5]:  # Max 5 per broadcast
+        msg = (
+            f"💰 INTERNAL ARB FOUND!\n\n"
+            f"{opp['question'][:60]}\n"
+            f"YES: {opp['yes_price']:.4f} | NO: {opp['no_price']:.4f}\n"
+            f"Combined: {opp['combined_cost']:.4f} (< $1.00)\n"
+            f"Guaranteed Profit: {opp['fee_adjusted_profit_pct']:.1f}%\n"
+            f"Stake: ${opp.get('recommended_stake', 25)}"
+        )
+        try:
+            await _telegram_bot.app.bot.send_message(
+                chat_id=_telegram_bot.admin_chat_id, text=msg
+            )
+        except Exception as e:
+            logger.error(f"Failed to broadcast arb alert: {e}")
+# ═══════════════════════════════════════════════════════════════
+
+
 async def pre_match_alerts():
     """Check for matches starting in 1 hour and send alerts."""
     global _telegram_bot
@@ -459,6 +561,18 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_settlement, 'interval', minutes=5, id='settlement_loop', replace_existing=True)
     logger.info("✅ Settlement loop scheduled (every 5 min)")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # EDGE MONITOR — Check open positions for edge decay every 5 min
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_edge_monitor, 'interval', minutes=5, id='edge_monitor', replace_existing=True)
+    logger.info("✅ Edge monitor scheduled (every 5 min)")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # INTERNAL ARBITRAGE — Primary strategy, scan every 2 minutes
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_internal_arb_scan, 'interval', minutes=2, id='internal_arb', replace_existing=True)
+    logger.info("✅ Internal arb scanner scheduled (every 2 min)")
     
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
@@ -2391,6 +2505,26 @@ async def stop_bot():
     return {"status": "stopped", "running": scheduler.running, "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/positions/health")
+async def get_position_health():
+    """Check health of all open positions — edge decay monitoring."""
+    try:
+        from src.execution.edge_monitor import EdgeMonitor
+        monitor = EdgeMonitor(get_async_pool())
+        alerts = await monitor.check_all_positions()
+        return {
+            "positions": alerts,
+            "exit_needed": len([a for a in alerts if a['recommendation'].startswith('EXIT')]),
+            "watch": len([a for a in alerts if a['recommendation'] == 'WATCH']),
+            "healthy": len([a for a in alerts if a['recommendation'] == 'HOLD']),
+            "total_open": len(alerts),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Position health error: {e}")
+        return {"positions": [], "exit_needed": 0, "total_open": 0, "error": str(e)}
+
+
 @app.get("/api/wallet/balance")
 async def get_wallet_balance():
     """Get USDC + MATIC balance from Polygon."""
@@ -2455,6 +2589,83 @@ from src.sports.espn_live import ESPNLiveScores
 from src.sports.correlation_engine import CorrelationEngine
 from src.sports.cross_odds_engine import CrossOddsEngine
 
+
+# =============================================================================
+# Internal Arbitrage API
+# =============================================================================
+
+@app.get("/api/arb/internal")
+async def get_internal_arb_opportunities():
+    """Get current internal arb opportunities (YES+NO < $1.00)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_combined()
+        return {
+            "opportunities": opps,
+            "count": len(opps),
+            "last_scan": _last_internal_arb_scan.isoformat() if _last_internal_arb_scan else None,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Internal arb API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/arb/internal/db")
+async def get_internal_arb_db_only():
+    """Get arb opportunities from DB only (faster, no external API calls)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_all_markets()
+        return {"opportunities": opps, "count": len(opps)}
+    except Exception as e:
+        logger.error(f"Internal arb DB API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/arb/internal/live")
+async def get_internal_arb_live():
+    """Get arb opportunities from Gamma API (real-time, slower)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_clob_live()
+        return {"opportunities": opps, "count": len(opps)}
+    except Exception as e:
+        logger.error(f"Internal arb live API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/arb/trades")
+async def get_internal_arb_trades(limit: int = 50):
+    """Get executed internal arb paper trades."""
+    try:
+        results = await fetch_all("""
+            SELECT id, market_id, market_title, side, entry_price, shares,
+                   size_usd, edge_at_entry, status, pnl_usd, pnl_pct,
+                   entry_at, resolved_at, metadata
+            FROM trades
+            WHERE strategy = 'internal_arb'
+            ORDER BY entry_at DESC
+            LIMIT %s
+        """, (min(limit, 200),))
+        
+        total_pnl = sum(float(r.get('pnl_usd', 0) or 0) for r in (results or []))
+        return {
+            "trades": results or [],
+            "count": len(results or []),
+            "total_pnl": round(total_pnl, 2),
+        }
+    except Exception as e:
+        logger.error(f"Internal arb trades error: {e}")
+        return {"trades": [], "count": 0, "error": str(e)}
+
+
+# =============================================================================
+# Sports Intelligence Endpoints
+# =============================================================================
 
 @app.get("/api/sports/markets")
 async def sports_markets(sport: str = None, limit: int = 200):
