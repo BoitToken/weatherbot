@@ -543,6 +543,87 @@ async def pre_match_alerts():
 # ═══════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════
+# BTC SIGNAL ENGINE — Scheduled Scan Functions
+# ═══════════════════════════════════════════════════════════════
+_btc_engine = None
+_last_btc_scan: Optional[datetime] = None
+_last_btc_resolution: Optional[datetime] = None
+
+
+async def scheduled_btc_signal_scan():
+    """BTC Signal Engine: scan for active BTC windows, compute 7-factor signals."""
+    global _last_btc_scan, _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+            logger.info("✅ BTC Signal Engine initialized")
+
+        results = await _btc_engine.run_scan()
+        _last_btc_scan = datetime.utcnow()
+
+        # Telegram alerts for HIGH confidence predictions (prob > 0.70)
+        if _telegram_bot and results:
+            for sig in results:
+                prob = sig.get('prob_up', 0.5)
+                conf = sig.get('confidence', 0)
+                pred = sig.get('prediction', 'SKIP')
+                if pred == 'SKIP':
+                    continue
+                # High confidence: prob > 0.70 (UP) or prob < 0.30 (DOWN)
+                if prob > 0.70 or prob < 0.30:
+                    price = sig.get('btc_price', 0)
+                    btc_open = sig.get('btc_open', price)
+                    delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
+                    factors = sig.get('factors', {})
+                    close_time = sig.get('close_time', '')
+                    if hasattr(close_time, 'strftime'):
+                        close_str = close_time.strftime('%H:%M:%S UTC')
+                    else:
+                        close_str = str(close_time)
+                    wl = sig.get('window_length', 15)
+                    msg = (
+                        f"📊 BTC {wl}M SIGNAL\n\n"
+                        f"Prediction: {pred} ({prob*100:.0f}%)\n"
+                        f"Window closes: {close_str}\n"
+                        f"BTC: ${price:,.0f} ({delta_pct:+.2f}%)\n"
+                        f"Confidence: {conf*100:.0f}%\n"
+                        f"Factors: Delta {factors.get('f_price_delta', 0):+.2f} | "
+                        f"Mom {factors.get('f_momentum', 0):+.2f} | "
+                        f"Vol {factors.get('f_volume_imbalance', 0):+.2f}"
+                    )
+                    try:
+                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                        for sub in subscribers:
+                            try:
+                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+        logger.info(f"📊 BTC scan: {len(results)} signals")
+    except Exception as e:
+        logger.error(f"❌ BTC signal scan failed: {e}\n{traceback.format_exc()}")
+
+
+async def scheduled_btc_resolution_check():
+    """BTC Signal Engine: check closed windows, score predictions."""
+    global _last_btc_resolution, _btc_engine
+    try:
+        if _btc_engine is None:
+            return
+        resolved = await _btc_engine.check_resolutions()
+        _last_btc_resolution = datetime.utcnow()
+        if resolved:
+            logger.info(f"📊 BTC resolved: {len(resolved)} windows")
+    except Exception as e:
+        logger.error(f"❌ BTC resolution check failed: {e}")
+# ═══════════════════════════════════════════════════════════════
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
@@ -668,6 +749,13 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_penny_scan, 'interval', minutes=30, id='penny_hunter', replace_existing=True)
     logger.info("✅ Penny Hunter scheduled (every 30 min)")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # BTC SIGNAL ENGINE — Scan every 45 seconds, resolve every 2 min
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
+    scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
+    logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
     
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
@@ -2807,6 +2895,90 @@ async def get_penny_scan():
     except Exception as e:
         logger.error(f"Penny scan API error: {e}")
         return {"contracts": [], "total_found": 0, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# BTC SIGNAL ENGINE — API Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/btc/state")
+async def get_btc_state():
+    """Live engine state: BTC price, active windows, signals, factors, accuracy."""
+    global _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+        return await _btc_engine.get_current_state()
+    except Exception as e:
+        logger.error(f"BTC state error: {e}")
+        return {"error": str(e), "btc_price": 0, "active_windows": [], "accuracy": {}}
+
+
+@app.get("/api/btc/signals")
+async def get_btc_signals(limit: int = 50):
+    """Recent signals with accuracy info."""
+    global _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+        signals = await _btc_engine.get_recent_signals(limit=min(limit, 200))
+        return {"signals": signals, "count": len(signals)}
+    except Exception as e:
+        logger.error(f"BTC signals error: {e}")
+        return {"signals": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/btc/accuracy")
+async def get_btc_accuracy():
+    """Rolling accuracy stats."""
+    global _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+        return await _btc_engine.get_accuracy_stats()
+    except Exception as e:
+        logger.error(f"BTC accuracy error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/btc/windows")
+async def get_btc_windows(limit: int = 50):
+    """Active + recent windows."""
+    global _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+        windows = await _btc_engine.get_windows(limit=min(limit, 200))
+        return {"windows": windows, "count": len(windows)}
+    except Exception as e:
+        logger.error(f"BTC windows error: {e}")
+        return {"windows": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/btc/calibration")
+async def get_btc_calibration(limit: int = 30):
+    """Weight calibration history."""
+    global _btc_engine
+    try:
+        if _btc_engine is None:
+            from src.strategies.btc_signal_engine import BTCSignalEngine
+            _btc_engine = BTCSignalEngine(get_async_pool())
+            await _btc_engine.ensure_tables()
+        calibrations = await _btc_engine.get_calibration_history(limit=min(limit, 100))
+        return {"calibrations": calibrations, "count": len(calibrations)}
+    except Exception as e:
+        logger.error(f"BTC calibration error: {e}")
+        return {"calibrations": [], "count": 0, "error": str(e)}
+# ═══════════════════════════════════════════════════════════════
 
 
 @app.get("/api/arb/internal")
