@@ -564,40 +564,60 @@ async def scheduled_btc_signal_scan():
         results = await _btc_engine.run_scan()
         _last_btc_scan = datetime.utcnow()
 
-        # Only send Telegram when we actually TAKE a paper trade
-        # Criteria: prob > 0.70 (UP) or prob < 0.30 (DOWN), confidence > 50%, and not SKIP
-        # This filters out 90%+ of signals — only trades, not noise
+        # ═══════════════════════════════════════════════════════════
+        # STRATEGY V2 (2026-04-09 12:36 IST)
+        # Rule 1: MAX ENTRY = 70c (never buy shares above 70c)
+        # Rule 2: Scale stake to odds (<30c=$50, 30-50c=$35, 50-70c=$25, >70c=$0)
+        # Rule 3: Skip 15M windows (always 85c+ entries, negative EV)
+        # Rule 4: Ignore confidence for sizing (entry price is king)
+        # ═══════════════════════════════════════════════════════════
         if _telegram_bot and results:
             for sig in results:
                 prob = sig.get('prob_up', 0.5)
                 conf = sig.get('confidence', 0)
                 pred = sig.get('prediction', 'SKIP')
-                if pred == 'SKIP' or conf < 0.50:
+                if pred == 'SKIP':
                     continue
-                # Only trade-worthy signals (high conviction)
+                # Must have directional conviction
                 if not (prob > 0.70 or prob < 0.30):
                     continue
                 
-                price = sig.get('btc_price', 0)
-                btc_open = sig.get('btc_open', price)
-                delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
                 wl = sig.get('window_length', 15)
                 up_price = sig.get('up_price', 0.5)
                 down_price = sig.get('down_price', 0.5)
-                entry_price = down_price if pred == 'UP' else up_price  # Buy the underpriced side
-                edge = abs(prob - 0.5) * 2  # Simplified edge
-                potential = (1.0 / entry_price - 1) * 25 if entry_price > 0 else 0  # $25 bet potential
+                entry_price = down_price if pred == 'UP' else up_price
+
+                # RULE 3: Skip 15M windows entirely
+                if wl == 15:
+                    continue
+
+                # RULE 1: Max entry price 70c
+                if entry_price > 0.70:
+                    continue
+
+                # RULE 2: Scale stake based on entry price
+                if entry_price < 0.30:
+                    stake = 50
+                elif entry_price < 0.50:
+                    stake = 35
+                else:  # 50-70c
+                    stake = 25
+
+                price = sig.get('btc_price', 0)
+                btc_open = sig.get('btc_open', price)
+                delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
+                potential = (stake / entry_price - stake) * 0.98 if entry_price > 0 else 0
+                payout_ratio = f"{(1/entry_price - 1):.1f}x" if entry_price > 0 else "?"
                 
                 msg = (
                     f"🟢 BTC PAPER TRADE OPENED\n\n"
                     f"₿ BTC/USD {wl}-Minute Window\n"
                     f"Direction: {pred} ({prob*100:.0f}%)\n"
-                    f"Entry: {entry_price*100:.0f}c\n"
+                    f"Entry: {entry_price*100:.0f}c | Payout: {payout_ratio}\n"
                     f"BTC: ${price:,.0f} ({delta_pct:+.2f}% from open)\n"
-                    f"Confidence: {conf*100:.0f}%\n"
-                    f"Stake: $25 (paper)\n"
-                    f"Potential: +${potential:.2f}\n\n"
-                    f"Window ID: {sig.get('window_id', '?')}"
+                    f"Stake: ${stake} (paper) | Potential: +${potential:.2f}\n\n"
+                    f"Strategy V2: entry<70c, scaled stake\n"
+                    f"Window: {sig.get('window_id', '?')}"
                 )
                 try:
                     subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
@@ -606,6 +626,28 @@ async def scheduled_btc_signal_scan():
                             await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
                         except Exception:
                             pass
+                except Exception:
+                    pass
+
+                # Track volatility per hour slot
+                try:
+                    pool = get_async_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO btc_volatility_hours (
+                                date, hour_ist, window_length, trades_taken, avg_entry, 
+                                btc_price_range_pct, session_tag
+                            ) VALUES (
+                                CURRENT_DATE,
+                                EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Asia/Kolkata')::int,
+                                $1, 1, $2, $3, 'v2'
+                            )
+                            ON CONFLICT (date, hour_ist, window_length) DO UPDATE SET
+                                trades_taken = btc_volatility_hours.trades_taken + 1,
+                                avg_entry = (btc_volatility_hours.avg_entry * btc_volatility_hours.trades_taken + $2) 
+                                    / (btc_volatility_hours.trades_taken + 1),
+                                btc_price_range_pct = GREATEST(btc_volatility_hours.btc_price_range_pct, $3)
+                        """, wl, entry_price, abs(delta_pct))
                 except Exception:
                     pass
 
@@ -735,7 +777,57 @@ async def scheduled_btc_hourly_summary():
 
         lines.append(f"")
         lines.append(f"Record: {a_wins}W-{a_total-a_wins}L ({a_wins/a_total*100:.0f}%)" if a_total > 0 else "")
-        lines.append(f"Dashboard: weatherbot.1nnercircle.club/btc15m")
+
+        # V2 strategy stats (entries < 70c, 5M only)
+        try:
+            async with pool.acquire() as conn:
+                v2 = await conn.fetchrow("""
+                    WITH best AS (
+                        SELECT DISTINCT ON (s.window_id)
+                            s.window_id, s.prediction, w.resolution, w.window_length,
+                            w.close_time,
+                            (s.prediction = w.resolution) as correct,
+                            CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                        FROM btc_signals s
+                        JOIN btc_windows w ON s.window_id = w.window_id
+                        WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                            AND w.window_length = 5
+                            AND CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END <= 0.70
+                        ORDER BY s.window_id, s.confidence DESC
+                    ),
+                    pnl AS (
+                        SELECT *,
+                            CASE
+                                WHEN entry_price < 0.30 THEN 50
+                                WHEN entry_price < 0.50 THEN 35
+                                ELSE 25
+                            END as stake,
+                            CASE
+                                WHEN correct AND entry_price > 0 AND entry_price < 1 THEN
+                                    (CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END 
+                                     / entry_price - CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END) * 0.98
+                                WHEN NOT correct THEN 
+                                    -1 * CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END
+                                ELSE 0
+                            END as trade_pnl
+                        FROM best
+                    )
+                    SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
+                        ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                        ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
+                        ROUND(AVG(entry_price)::numeric, 3) as avg_entry
+                    FROM pnl
+                """)
+                if v2 and v2['total'] > 0:
+                    v2_sign = '+' if float(v2['net_pnl'] or 0) >= 0 else ''
+                    lines.append(f"")
+                    lines.append(f"\u2501\u2501\u2501 STRATEGY V2 (entry<70c, 5M only) \u2501\u2501\u2501")
+                    lines.append(f"Trades: {v2['wins']}W-{v2['total']-v2['wins']}L | {v2_sign}${v2['net_pnl']}")
+                    lines.append(f"Avg entry: {float(v2['avg_entry'])*100:.0f}c | Best: +${v2['best_trade']}")
+        except Exception:
+            pass
+
+        lines.append(f"\nDashboard: weatherbot.1nnercircle.club/btc15m")
 
         msg = "\n".join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
@@ -747,6 +839,155 @@ async def scheduled_btc_hourly_summary():
         logger.info(f"\U0001f4ca BTC hourly summary sent to {len(subscribers)} subscribers")
     except Exception as e:
         logger.error(f"\u274c BTC hourly summary failed: {e}")
+
+
+async def scheduled_btc_daily_strategy_report():
+    """Daily strategy analysis at 11:30 PM IST — volatility, hourly performance, adjustments."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
+        cur = conn.cursor()
+
+        # Today's hourly breakdown with V2 filters
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length,
+                    w.close_time,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    AND w.close_time::date = CURRENT_DATE
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *,
+                    CASE
+                        WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                        WHEN NOT correct THEN -25.0 ELSE 0
+                    END as trade_pnl,
+                    CASE WHEN entry_price <= 0.70 AND window_length = 5 THEN true ELSE false END as v2_eligible
+                FROM best
+            )
+            SELECT 
+                EXTRACT(HOUR FROM close_time AT TIME ZONE 'Asia/Kolkata')::int as hour_ist,
+                COUNT(*) as all_trades,
+                COUNT(*) FILTER (WHERE correct) as all_wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as all_pnl,
+                COUNT(*) FILTER (WHERE v2_eligible) as v2_trades,
+                COUNT(*) FILTER (WHERE v2_eligible AND correct) as v2_wins,
+                ROUND(SUM(CASE WHEN v2_eligible THEN trade_pnl ELSE 0 END)::numeric, 2) as v2_pnl,
+                ROUND(AVG(entry_price)::numeric, 3) as avg_entry,
+                ROUND(AVG(CASE WHEN v2_eligible THEN entry_price END)::numeric, 3) as v2_avg_entry
+            FROM pnl
+            GROUP BY 1 ORDER BY 1
+        """)
+        hourly = cur.fetchall()
+
+        # Volatility data
+        cur.execute("""
+            SELECT hour_ist, trades_taken, trades_won, net_pnl, avg_entry, btc_price_range_pct, session_tag
+            FROM btc_volatility_hours
+            WHERE date = CURRENT_DATE
+            ORDER BY hour_ist
+        """)
+        volatility = cur.fetchall()
+
+        # Overall today
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    AND w.close_time::date = CURRENT_DATE
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *,
+                    CASE
+                        WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                        WHEN NOT correct THEN -25.0 ELSE 0
+                    END as trade_pnl,
+                    CASE WHEN entry_price <= 0.70 AND window_length = 5 THEN true ELSE false END as v2_eligible
+                FROM best
+            )
+            SELECT 
+                COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as net,
+                ROUND(MAX(trade_pnl)::numeric, 2) as best,
+                COUNT(*) FILTER (WHERE v2_eligible) as v2_total,
+                COUNT(*) FILTER (WHERE v2_eligible AND correct) as v2_wins,
+                ROUND(SUM(CASE WHEN v2_eligible THEN trade_pnl ELSE 0 END)::numeric, 2) as v2_net
+            FROM pnl
+        """)
+        totals = cur.fetchone()
+        conn.close()
+
+        # Build report
+        lines = ["\U0001f4ca BTC DAILY STRATEGY REPORT", f"Date: {datetime.now().strftime('%Y-%m-%d')} IST", ""]
+
+        # Hourly heat map
+        lines.append("\u2501\u2501\u2501 HOURLY PERFORMANCE \u2501\u2501\u2501")
+        best_hour, worst_hour = None, None
+        best_pnl, worst_pnl = -999999, 999999
+        for h in hourly:
+            hr, all_t, all_w, all_p, v2_t, v2_w, v2_p, avg_e, v2_e = h
+            emoji = '\U0001f7e2' if float(all_p) >= 0 else '\U0001f534'
+            sign = '+' if float(all_p) >= 0 else ''
+            v2_str = f" | V2: {v2_w}/{v2_t} {'+' if float(v2_p)>=0 else ''}${v2_p}" if v2_t > 0 else ""
+            lines.append(f"{emoji} {hr:02d}:00 | {all_w}W-{all_t-all_w}L | {sign}${all_p} | entry: {float(avg_e)*100:.0f}c{v2_str}")
+            if float(all_p) > best_pnl:
+                best_pnl, best_hour = float(all_p), hr
+            if float(all_p) < worst_pnl:
+                worst_pnl, worst_hour = float(all_p), hr
+
+        if best_hour is not None:
+            lines.append(f"\n\U0001f3c6 Best hour: {best_hour:02d}:00 (+${best_pnl:.2f})")
+            lines.append(f"\U0001f4a9 Worst hour: {worst_hour:02d}:00 (${worst_pnl:.2f})")
+
+        # Volatility slots
+        if volatility:
+            lines.append("")
+            lines.append("\u2501\u2501\u2501 VOLATILITY MAP \u2501\u2501\u2501")
+            for v in volatility:
+                v_hr, v_trades, v_won, v_pnl, v_entry, v_range, v_tag = v
+                vol_emoji = '\U0001f525' if float(v_range) > 0.3 else '\u26a1' if float(v_range) > 0.1 else '\U0001f4a4'
+                lines.append(f"{vol_emoji} {v_hr:02d}:00 | Range: {float(v_range):.2f}% | {v_trades} trades | tag: {v_tag}")
+
+        # Totals
+        total, wins, net, best, v2_total, v2_wins, v2_net = totals
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 DAY TOTALS \u2501\u2501\u2501")
+        lines.append(f"All trades: {wins}W-{total-wins}L | {'+' if float(net)>=0 else ''}${net}")
+        if v2_total > 0:
+            lines.append(f"V2 only (<70c, 5M): {v2_wins}W-{v2_total-v2_wins}L | {'+' if float(v2_net)>=0 else ''}${v2_net}")
+        lines.append(f"\U0001f3c6 Best trade: +${best}")
+
+        lines.append("\n\u2501\u2501\u2501 STRATEGY NOTES \u2501\u2501\u2501")
+        lines.append("V2 active: entry<70c, 5M only, scaled stakes")
+        lines.append("Tracking: hourly vol slots stored for weekly review")
+        lines.append("Next review: after 7 days of data")
+        lines.append("\nDashboard: weatherbot.1nnercircle.club/btc15m")
+
+        msg = "\n".join(lines)
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+            except Exception:
+                pass
+        logger.info(f"\U0001f4ca BTC daily strategy report sent")
+    except Exception as e:
+        logger.error(f"\u274c BTC daily strategy report failed: {e}")
 
 
 async def scheduled_btc_resolution_check():
@@ -944,6 +1185,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
     scheduler.add_job(scheduled_btc_hourly_summary, 'interval', minutes=60, id='btc_hourly', replace_existing=True)
+    scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
     
     # ═══════════════════════════════════════════════════════════════

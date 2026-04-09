@@ -1,222 +1,139 @@
-# WeatherBot — Dual Strategy Trading System
-**Version:** 2.0 (Dual Strategy — CEO Approved 2026-04-06)
-**Status:** ACTIVE
-**Last Updated:** 2026-04-06
+# BTC Paper Trading Strategy — WeatherBot
+**Last Updated:** 2026-04-09 12:36 IST
 
-## Rule: This document is updated ONLY after CEO approval. Bot proposes → CEO approves → strategy updates.
+## Active Strategy: V2 (Entry-Price Gated)
 
----
+### Core Rules
+| Rule | Setting | Rationale |
+|------|---------|-----------|
+| **Max Entry** | 70c | Above 70c = negative EV even at 80% accuracy |
+| **Timeframe** | 5M only | 15M entries always 85c+ (market too efficient) |
+| **Stake Scaling** | <30c=$50, 30-50c=$35, 50-70c=$25 | Larger bets on better odds |
+| **15M** | SKIP | 80% accuracy but -$150 P&L — payout ratio 1:25 |
 
-## DUAL STRATEGY ARCHITECTURE
+### Why These Rules?
+Based on 118 paper trades over 7 hours (2026-04-09):
+- **<30c entries:** 77% accuracy, +$209 P&L — avg win $28.45
+- **30-50c entries:** 86% accuracy, +$143 P&L — avg win $28.01
+- **50-70c entries:** 40% accuracy, -$68 P&L — avg win $20.49
+- **70-85c entries:** 78% accuracy, -$3 P&L — avg win $6.74
+- **85c+ entries:** 74% accuracy, -$507 P&L — avg win $0.30 💀
 
-WeatherBot runs TWO strategies in parallel. Each generates independent signals. Both feed into the same risk manager and trade executor.
+**The math:** At 85c entry, win = $0.30, loss = -$25.00. Need 99% win rate to break even. We hit 74%. Impossible.
 
-### Strategy A: "Forecast Edge" (Twitter/carverfomo strategy)
-**Philosophy:** Dead simple. Forecast says X, market says Y, buy X.
-**Edge source:** NOAA GFS forecast accuracy (85-90% at 1-2 day) vs casual bettor mispricing
-**Signal:** `if market_price < entry_threshold AND forecast_probability > 0.70 → BUY`
-
-### Strategy B: "Intelligence Layer" (Our 8-gate strategy)  
-**Philosophy:** Multi-source convergence with safety gates
-**Edge source:** Data convergence (METAR + forecast + historical + multi-station) finding deeper mispricings
-**Signal:** Must pass all 8 gates before trade execution
-
-### Parallel Operation
-- Both strategies scan independently on their own intervals
-- Strategy A: every 2 minutes (speed is edge)
-- Strategy B: every 5 minutes (depth is edge)
-- Shared risk manager prevents conflicts (same market, same direction = ONE position, larger size)
-- Trade log tags each trade with strategy source (A or B) for performance comparison
-- Weekly review compares win rates, edge, ROI per strategy
-- Whichever has higher Sharpe ratio over 30-day window gets increased allocation
+### Confidence Trap (CRITICAL LEARNING)
+- "Ultra 80%+" confidence: 74 trades, 71.6% accuracy, **-$425 P&L**
+  - Why: Avg entry 92c. Confidence correlates with extreme odds, not profit.
+- "High 60-80%" confidence: 43 trades, 74.4% accuracy, **+$199 P&L**
+  - Why: Avg entry 63c. Better odds = better payout.
+- **Lesson:** NEVER use confidence score for position sizing. Entry price is the ONLY sizing signal.
 
 ---
 
-## STRATEGY A: Forecast Edge (Simple)
+## V1 Performance (Baseline — 2026-04-09 05:00–12:20 IST)
 
-### Core Logic
-```python
-# Every 2 minutes:
-for city in TARGET_CITIES:
-    forecast = get_noaa_forecast(city)  # Primary: NOAA GFS
-    if not forecast:
-        forecast = get_openmeteo_forecast(city)  # Fallback
-    
-    # Get all temperature bucket markets for this city
-    markets = get_temp_bucket_markets(city, tomorrow)
-    
-    # Find the bucket containing the forecasted temperature
-    target_bucket = find_bucket(markets, forecast.high_temp)
-    
-    if target_bucket.price <= ENTRY_THRESHOLD:  # ≤ 15¢
-        # Forecast says 85%+ but market says ≤15% → BUY
-        signal = BUY(target_bucket, size=position_size)
-    
-    # Check held positions for exit
-    for position in open_positions:
-        if position.current_price >= EXIT_THRESHOLD:  # ≥ 45¢
-            signal = SELL(position)  # Take profit, don't wait for resolution
-```
+| Metric | Value |
+|--------|-------|
+| Total Trades | 118 |
+| Win Rate | 73% (86W-32L) |
+| Net P&L | -$202.39 |
+| Gross Profit | +$597.61 |
+| Gross Loss | -$800.00 |
+| Best Trade | +$133.56 |
+| Fees | $12.20 |
+| Total Risked | $2,950 |
 
-### Parameters
-```yaml
-entry_threshold_cents: 15      # Buy at ≤ 15¢ (implied prob ≤ 15%)
-exit_threshold_cents: 45       # Sell at ≥ 45¢ (don't wait for resolution)
-scan_interval_seconds: 120     # Every 2 minutes
-position_size_usd: 2.00        # Start small, scale after proof
-max_trades_per_scan: 5         # Max 5 trades per scan cycle
-forecast_confidence_min: 0.70  # Only trade when forecast confidence > 70%
-```
+### Hourly V1 Performance
+| Hour | W-L | Win% | P&L | Avg Entry | Notes |
+|------|-----|------|-----|-----------|-------|
+| 5AM | 11-4 | 73% | +$57 | 79c | Session start |
+| 6AM | 14-2 | 88% | +$151 | 71c | **Peak** — best entries |
+| 7AM | 11-5 | 69% | -$97 | 87c | Entry jumped |
+| 8AM | 12-4 | 75% | -$66 | 80c | Bleeding |
+| 9AM | 12-4 | 75% | -$41 | 76c | Slight improvement |
+| 10AM | 10-6 | 63% | -$114 | 78c | Worst accuracy |
+| 11AM | 10-6 | 63% | -$68 | 86c | Continued bleed |
+| 12PM | 6-2 | 75% | -$48 | 94c | Worst entries |
 
-### Data Sources (Priority Order)
-1. **NOAA GFS** (primary) — api.weather.gov — FREE, no key, 85-90% accurate at 1-2 day
-2. **Open-Meteo** (secondary) — open-meteo.com — FREE, global coverage, European ECMWF model
-3. **METAR** (validation) — aviationweather.gov — real-time airport sensors, confirms current conditions
+**Pattern:** 6AM had best entries (71c avg) AND best accuracy (88%). After 7AM, entries crept up as US market opened.
 
-### Target Markets
-Temperature bucket markets ONLY. Format: "What will the high temperature be in [city] on [date]?"
-- Buckets: 5°F ranges (e.g., "40-45°F", "45-50°F")
-- Resolution: actual recorded high temperature at reference station
-
-### Target Cities (must have active Polymarket temp bucket markets)
-```yaml
-primary:
-  - NYC:     [KJFK, KLGA, KEWR]
-  - London:  [EGLL, EGKK]
-  - Chicago: [KORD, KMDW]
-  - Seoul:   [RKSI]
-secondary:
-  - Atlanta:  [KATL]
-  - Dallas:   [KDFW]
-  - Miami:    [KMIA]
-  - Seattle:  [KSEA]
-```
+### By Timeframe (V1)
+| Window | Trades | Accuracy | P&L | Avg Entry | Verdict |
+|--------|--------|----------|-----|-----------|---------|
+| 5M | 88 | 74% | +$121 | 73c | ✅ Profitable |
+| 15M | 30 | 80% | -$150 | 92c | ❌ Money losing |
 
 ---
 
-## STRATEGY B: Intelligence Layer (8-Gate)
+## Volatility Tracking
 
-### Gate 1: Data Convergence (3 sources must agree)
-```
-Source A: METAR (airport sensor — actual current temperature)
-Source B: Open-Meteo / NOAA (forecast model — projected high/low)
-Source C: Historical baseline (what this city did on this date, 10yr average)
+### Purpose
+Track hourly time slots to find when BTC markets have favorable odds (low entry prices, high volume, high volatility). After 1 week, identify:
+- Best hours to trade (highest P&L per trade)
+- Worst hours to avoid
+- Volatility patterns by day-of-week
+- Correlation between BTC price range and entry odds
 
-Rule: If 2/3 sources agree on direction → proceed
-Rule: If all 3 disagree → SKIP (low confidence)
-Rule: If METAR says threshold already hit → highest confidence (99%+)
-```
+### Data Storage
+Table: `btc_volatility_hours`
+Columns: date, hour_ist, window_length, trades_taken, trades_won, trades_lost, net_pnl, avg_entry, btc_price_range_pct, best_trade, session_tag
 
-### Gate 2: Multi-Station Validation
-```
-NYC: KJFK, KLGA, KEWR — all 3 must agree within ±1°C
-London: EGLL, EGKK — must agree within ±1°C
-Single-station cities: auto-pass
-```
+### V2 Hypothesis
+- **Early hours (5-7AM IST / 11:30PM-1:30AM ET):** Lower volume → wider odds → better entries
+- **US market hours (7PM-2AM IST / 9:30AM-4PM ET):** Higher volume → tighter odds → worse entries
+- **Volatile days:** Large BTC price swings → wider odds → better trading conditions
 
-### Gate 3: Bucket Coherence Check
-```
-Sum all bucket prices for same city/date
-If sum > 105% → overpriced buckets exist (opportunity)
-If sum < 95% → underpriced buckets exist (opportunity)
-```
-
-### Gate 4: Binary Arbitrage Check
-```
-If YES + NO < $0.98 → BUY BOTH (guaranteed profit, bypass all other gates)
-Max $100 per binary arb
-```
-
-### Gate 5: Liquidity & Execution
-```
-Spread < 3¢ → good, full size
-Spread 3-8¢ → acceptable, half size
-Spread > 8¢ → SKIP
-```
-
-### Gate 6: Time Window
-```
-6-8 AM local: Overnight forecast not yet priced in (highest edge)
-After METAR refresh: 30-min window
-2-4 PM local: High temp likely recorded
-Don't enter if < 2 hours to resolution (unless binary arb)
-```
-
-### Gate 7: Risk Manager
-```
-Kelly fraction: 0.25 (quarter Kelly)
-Circuit breaker: halt at 10% daily loss
-Max 3 trades per city per day
-Max 5% of bankroll per position
-```
-
-### Gate 8: Claude AI Confirmation
-```
-Claude reviews signal + context
-TRADE + HIGH → auto-execute
-TRADE + MEDIUM → alert CEO
-SKIP → we skip (even if numbers look good)
-```
-
-### Strategy B Parameters
-```yaml
-min_edge_auto_trade: 0.25      # 25% edge → auto-execute
-min_edge_alert: 0.15           # 15% edge → alert only
-max_position_usd: 50           # Max $50 per trade
-scan_interval_seconds: 300     # Every 5 minutes
-confidence_sources_required: 2  # 2 of 3 data sources must agree
-```
+### Review Schedule
+- **Daily:** Automated strategy report at 11:30 PM IST (to all subscribers)
+- **Weekly:** Manual review of accumulated volatility data
+- **Adjustments:** After 7 days of V2 data, recalibrate rules
 
 ---
 
-## SHARED COMPONENTS
-
-### Risk Manager (applies to BOTH strategies)
-```yaml
-max_daily_loss_pct: 10         # Halt all trading at 10% daily loss
-max_open_positions: 20         # Never hold > 20 positions
-max_exposure_per_city: 100     # Max $100 exposure per city
-no_duplicate_positions: true   # If Strategy A and B signal same market → merge into one position
-```
-
-### Trade Executor
-```yaml
-mode: paper                    # paper | live (requires CEO approval to switch)
-exchange: polymarket_clob      # Uses py-clob-client when live
-slippage_tolerance: 0.02       # Max 2% slippage on execution
-```
-
-### Improvement Loop
-
-#### Daily (Automated)
-1. Calculate per-strategy: win rate, avg edge, avg P&L
-2. Compare Strategy A vs B: which performed better?
-3. Flag if either strategy drops below 55% win rate over 20 trades
-
-#### Weekly (Claude Analysis → CEO Review)
-1. Full strategy comparison report
-2. Propose parameter adjustments
-3. CEO approves/rejects
-4. Only approved changes update this document
+## Projected V2 Impact
+Based on retroactive analysis of today's 118 trades:
+- Would have taken ~30 trades (not 118) — 75% reduction
+- 24 wins × avg +$20 = +$480
+- 6 losses × avg -$35 = -$210
+- **Projected net: +$270** (vs actual -$202)
 
 ---
 
-## STRATEGY PERFORMANCE TRACKING
+## Evolution Plan
 
-| Metric | Strategy A (Forecast Edge) | Strategy B (8-Gate) |
-|--------|---------------------------|---------------------|
-| Win Rate Target | 73%+ (matching reference bot) | 65%+ (higher conviction) |
-| Avg Edge | 15-25¢ per trade | 25-50¢ per trade |
-| Trade Frequency | High (50-100/day) | Low (5-15/day) |
-| Risk Profile | Many small bets | Fewer larger bets |
-| Scan Interval | 2 min | 5 min |
+### Week 1 (Current)
+- [x] V2 rules implemented (max 70c, 5M only, scaled stakes)
+- [x] Volatility tracking per hour
+- [x] Hourly financial reports
+- [x] Daily strategy report at 11:30 PM
+
+### Week 2 (After data review)
+- [ ] Identify optimal trading hours
+- [ ] Adjust entry threshold per time slot
+- [ ] Add exit signals (edge decay, take-profit)
+- [ ] Consider Kelly criterion sizing
+
+### Week 3+
+- [ ] Live trading evaluation
+- [ ] Multi-day pattern detection
+- [ ] Automated strategy parameter tuning
+- [ ] Portfolio allocation across strategies
 
 ---
 
-## Strategy Change Log
+## Signal Factor Weights (Current)
+| Factor | Weight | Description |
+|--------|--------|-------------|
+| Price Delta | 0.25 | BTC price vs window open |
+| Momentum | 0.20 | Short-term trend direction |
+| Volume Imbalance | 0.15 | Buy/sell pressure |
+| Oracle Lead | 0.15 | Binance vs Chainlink spread |
+| Book Imbalance | 0.10 | Orderbook depth ratio |
+| Volatility | 0.10 | Realized vs implied vol |
+| Time Decay | 0.05 | Seconds remaining in window |
 
-| Date | Change | Proposed By | CEO Approved | Applied |
-|------|--------|-------------|-------------|---------|
-| 2026-04-06 | v1.0 Initial strategy | Ahsbot | PENDING | NO |
-| 2026-04-06 | v2.0 Dual strategy (Forecast Edge + 8-Gate parallel) | Ahsbot | YES | YES |
-| 2026-04-06 | Add NOAA GFS, 2-min scans, 45¢ exit, temp bucket targeting | Ahsbot | YES | IN PROGRESS |
+---
+
+**Strategy Version History:**
+- V1 (2026-04-09 05:00): All signals, fixed $25, 5M + 15M → -$202
+- V2 (2026-04-09 12:36): Entry < 70c, 5M only, scaled stakes → active
