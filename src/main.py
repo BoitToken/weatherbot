@@ -1021,14 +1021,32 @@ async def scheduled_btc_intelligence_loop():
         new_win_lengths = list(win_lengths)
         new_stakes = json.loads(stakes) if isinstance(stakes, str) else dict(stakes)
 
-        if action == 'revert' and prev_version:
-            cur.execute("SELECT max_entry, min_rr, min_factors, window_lengths, stakes FROM btc_strategy_versions WHERE version = %s", (prev_version,))
-            prev_strat = cur.fetchone()
-            if prev_strat:
-                new_max_entry, new_min_rr, new_min_factors = float(prev_strat[0]), float(prev_strat[1]), prev_strat[2]
-                new_win_lengths = list(prev_strat[3])
-                new_stakes = json.loads(prev_strat[4]) if isinstance(prev_strat[4], str) else dict(prev_strat[4])
-                adjustment_note = f'Reverted to {prev_version} parameters.'
+        if action == 'revert':
+            # Find the BEST historical version (highest P&L in performance_snapshot)
+            cur.execute("""
+                SELECT version, max_entry, min_rr, min_factors, window_lengths, stakes,
+                    (performance_snapshot->>'net_pnl')::numeric as hist_pnl
+                FROM btc_strategy_versions 
+                WHERE performance_snapshot IS NOT NULL 
+                    AND (performance_snapshot->>'net_pnl')::numeric > 0
+                ORDER BY (performance_snapshot->>'net_pnl')::numeric DESC
+                LIMIT 1
+            """)
+            best_hist = cur.fetchone()
+            
+            # Fallback to previous day's version if no profitable history
+            if not best_hist and prev_version:
+                cur.execute("SELECT version, max_entry, min_rr, min_factors, window_lengths, stakes FROM btc_strategy_versions WHERE version = %s", (prev_version,))
+                best_hist = cur.fetchone()
+            
+            if best_hist:
+                revert_to = best_hist[0]
+                new_max_entry, new_min_rr, new_min_factors = float(best_hist[1]), float(best_hist[2]), best_hist[3]
+                new_win_lengths = list(best_hist[4])
+                new_stakes = json.loads(best_hist[5]) if isinstance(best_hist[5], str) else dict(best_hist[5])
+                hist_pnl = float(best_hist[6]) if len(best_hist) > 6 and best_hist[6] else None
+                pnl_note = f' (was +${hist_pnl:.2f})' if hist_pnl else ''
+                adjustment_note = f'Reverted to {revert_to} parameters{pnl_note}. Proven profitable.'
         elif verdict == 'progressive':
             # Small optimization: if avg entry is clustered, widen slightly
             if t_avg_entry and float(t_avg_entry) < 0.35:
@@ -1052,12 +1070,31 @@ async def scheduled_btc_intelligence_loop():
         # Only create new version if parameters actually changed
         if (new_max_entry != float(max_entry) or new_min_rr != float(min_rr) or 
             new_min_factors != min_factors or new_win_lengths != list(win_lengths)):
-            cur.execute("UPDATE btc_strategy_versions SET status = 'superseded', deactivated_at = NOW() WHERE status = 'active'")
+            # Snapshot today's performance onto the outgoing version (immutable record)
             cur.execute("""
-                INSERT INTO btc_strategy_versions (version, status, max_entry, min_rr, min_factors, window_lengths, stakes, notes)
-                VALUES (%s, 'active', %s, %s, %s, %s, %s, %s)
+                UPDATE btc_strategy_versions 
+                SET status = %s, deactivated_at = NOW(),
+                    performance_snapshot = %s,
+                    revert_reason = CASE WHEN %s = 'revert' THEN %s ELSE NULL END
+                WHERE status = 'active'
+            """, (
+                'retained' if action == 'retain' else 'reverted' if action == 'revert' else 'superseded',
+                json.dumps({
+                    'date': datetime.now().strftime('%Y-%m-%d'),
+                    'trades': t_total or 0, 'wins': t_wins or 0,
+                    'net_pnl': float(t_net or 0), 'best_trade': float(t_best or 0),
+                    'avg_entry': float(t_avg_entry or 0), 'avg_rr': float(t_avg_rr or 0),
+                    'verdict': verdict
+                }),
+                action, '\n'.join(learnings)
+            ))
+            # Create new version — APPEND ONLY, old versions never modified after this
+            cur.execute("""
+                INSERT INTO btc_strategy_versions 
+                (version, status, max_entry, min_rr, min_factors, window_lengths, stakes, parent_version, notes)
+                VALUES (%s, 'active', %s, %s, %s, %s, %s, %s, %s)
             """, (new_version, new_max_entry, new_min_rr, new_min_factors, new_win_lengths,
-                   json.dumps(new_stakes), adjustment_note))
+                   json.dumps(new_stakes), active_version, adjustment_note))
             next_version = new_version
         else:
             next_version = active_version
