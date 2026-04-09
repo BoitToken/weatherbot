@@ -724,12 +724,12 @@ function AnalysisPanel({ font, fontSans, isMobile }) {
       .catch(() => setLoading(false));
   }, [tf]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh every 5s for analysis data
   useEffect(() => {
     const iv = setInterval(() => {
       fetch(`/api/btc/analysis?hours=${TF_MAP[tf]}`)
         .then(r => r.json()).then(d => setData(d)).catch(() => {});
-    }, 30000);
+    }, 5000);
     return () => clearInterval(iv);
   }, [tf]);
 
