@@ -730,74 +730,36 @@ async def scheduled_btc_hourly_summary():
         conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
         cur = conn.cursor()
 
-        # All-time per timeframe
+        # All-time per timeframe — uses btc_pnl view (correct stakes + filters invalid prices)
         cur.execute("""
-            WITH best AS (
-                SELECT DISTINCT ON (s.window_id)
-                    s.window_id, s.prediction, w.resolution, w.window_length,
-                    (s.prediction = w.resolution) as correct,
-                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                FROM btc_signals s
-                JOIN btc_windows w ON s.window_id = w.window_id
-                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                ORDER BY s.window_id, s.confidence DESC
-            ),
-            pnl AS (
-                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
-            )
             SELECT window_length, COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
                 ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
                 ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2) as gross_profit,
                 ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2) as gross_loss,
                 ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
-                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN (25.0/entry_price-25.0)*0.02 ELSE 0 END)::numeric, 2) as fees
-            FROM pnl GROUP BY window_length ORDER BY window_length
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN stake * (1.0/entry_price - 1.0) * 0.02 ELSE 0 END)::numeric, 2) as fees
+            FROM btc_pnl GROUP BY window_length ORDER BY window_length
         """)
         stats = cur.fetchall()
 
         # Last hour
         cur.execute("""
-            WITH best AS (
-                SELECT DISTINCT ON (s.window_id)
-                    s.window_id, s.prediction, w.resolution, w.window_length, w.close_time,
-                    (s.prediction = w.resolution) as correct,
-                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                FROM btc_signals s
-                JOIN btc_windows w ON s.window_id = w.window_id
-                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL AND w.close_time > NOW() - INTERVAL '1 hour'
-                ORDER BY s.window_id, s.confidence DESC
-            ),
-            pnl AS (
-                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
-            )
             SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
-                ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl, ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
-            FROM pnl
+                ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
+            FROM btc_pnl WHERE close_time > NOW() - INTERVAL '1 hour'
         """)
         last_hour = cur.fetchone()
 
         # Today's P&L
         cur.execute("""
-            WITH best AS (
-                SELECT DISTINCT ON (s.window_id)
-                    s.window_id, s.prediction, w.resolution, w.window_length,
-                    (s.prediction = w.resolution) as correct,
-                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                FROM btc_signals s JOIN btc_windows w ON s.window_id = w.window_id
-                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                    AND w.close_time::date = CURRENT_DATE
-                ORDER BY s.window_id, s.confidence DESC
-            ),
-            pnl AS (
-                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
-            )
             SELECT COUNT(*), COUNT(*) FILTER (WHERE correct),
                 ROUND(SUM(trade_pnl)::numeric, 2),
                 ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2),
                 ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2),
-                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN (25.0/entry_price-25.0)*0.02 ELSE 0 END)::numeric, 2),
-                ROUND(SUM(CASE WHEN correct THEN 25.0/entry_price*0.98 WHEN NOT correct THEN 0 ELSE 0 END)::numeric, 2)
-            FROM pnl
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN stake * (1.0/entry_price - 1.0) * 0.02 ELSE 0 END)::numeric, 2),
+                ROUND(SUM(stake)::numeric, 2)
+            FROM btc_pnl WHERE close_time::date = CURRENT_DATE
         """)
         today_stats = cur.fetchone()
 
