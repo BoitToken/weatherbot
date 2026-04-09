@@ -1366,52 +1366,89 @@ async def scheduled_btc_resolution_check():
         if resolved:
             logger.info(f"📊 BTC resolved: {len(resolved)} windows")
             
-            # Broadcast results for windows where we had a trade
+            # Broadcast WON/LOST for each resolved window with a signal
             if _telegram_bot:
+                import psycopg2 as _pg
+                import httpx as _httpx
                 for r in resolved:
                     if not r.get('had_signal'):
                         continue
                     was_correct = r.get('was_correct', False)
                     pred = r.get('prediction', '?')
                     actual = r.get('resolution', '?')
-                    prob = r.get('prob_up', 0.5)
                     wl = r.get('window_length', 15)
-                    
-                    if was_correct:
-                        emoji = '✅'
-                        result = 'WON'
-                        pnl = '+$12.50'  # Simplified: $25 bet at ~50c
-                    else:
-                        emoji = '❌'
-                        result = 'LOST'
-                        pnl = '-$25.00'
-                    
-                    # Get running stats
+                    window_id = r.get('window_id', '')
+
                     try:
-                        stats = await _btc_engine.get_accuracy_stats()
-                        total = stats.get('total_predictions', 0)
-                        correct = stats.get('correct', 0)
-                        accuracy = stats.get('accuracy', 0)
-                    except Exception:
-                        total, correct, accuracy = 0, 0, 0
-                    
-                    msg = (
-                        f"{emoji} BTC PAPER TRADE {result}\n\n"
-                        f"₿ BTC/USD {wl}-Minute Window\n"
-                        f"Called: {pred} ({prob*100:.0f}%)\n"
-                        f"Actual: {actual}\n"
-                        f"P&L: {pnl}\n\n"
-                        f"📊 Running Record: {correct}W-{total-correct}L ({accuracy*100:.0f}%)\n"
-                        f"Window: {r.get('window_id', '?')}"
-                    )
+                        _conn = _pg.connect(dbname='polyedge', user='node', host='localhost')
+                        _cur = _conn.cursor()
+                        _cur.execute("""
+                            SELECT p.entry_price, p.stake, ROUND(p.trade_pnl::numeric,2),
+                                s.prob_up, s.confidence,
+                                s.f_price_delta, s.f_momentum, s.f_volume_imbalance, s.f_oracle_lead,
+                                w.btc_open, w.btc_close,
+                                (CASE WHEN (p.prediction='DOWN' AND s.f_price_delta<0) OR (p.prediction='UP' AND s.f_price_delta>0) THEN 1 ELSE 0 END +
+                                 CASE WHEN (p.prediction='DOWN' AND s.f_momentum<0) OR (p.prediction='UP' AND s.f_momentum>0) THEN 1 ELSE 0 END +
+                                 CASE WHEN (p.prediction='DOWN' AND s.f_volume_imbalance<0) OR (p.prediction='UP' AND s.f_volume_imbalance>0) THEN 1 ELSE 0 END +
+                                 CASE WHEN (p.prediction='DOWN' AND s.f_oracle_lead<0) OR (p.prediction='UP' AND s.f_oracle_lead>0) THEN 1 ELSE 0 END +
+                                 CASE WHEN s.f_book_imbalance IS NOT NULL THEN 1 ELSE 0 END) as factors_agreed
+                            FROM btc_pnl p
+                            JOIN btc_windows w ON p.window_id = w.window_id
+                            JOIN LATERAL (
+                                SELECT * FROM btc_signals WHERE window_id = p.window_id AND prediction != 'SKIP'
+                                ORDER BY confidence DESC LIMIT 1
+                            ) s ON true
+                            WHERE p.window_id = %s
+                        """, (window_id,))
+                        row = _cur.fetchone()
+                        _cur.execute("""
+                            SELECT COUNT(*), COUNT(*) FILTER (WHERE correct), ROUND(SUM(trade_pnl)::numeric,2)
+                            FROM btc_pnl
+                        """)
+                        ytd = _cur.fetchone()
+                        _conn.close()
+
+                        if row:
+                            ep, stake, pnl, prob, conf, f_pd, f_mom, f_vol, f_orc, btc_open, btc_close, factors = row
+                            ep=float(ep); stake=float(stake); pnl=float(pnl)
+                            btc_move = float(btc_close or 0) - float(btc_open or 0)
+                            roi = pnl/stake*100 if stake else 0
+                            ytd_t, ytd_w, ytd_net = ytd
+                            pnl_str = f"+${pnl:.2f}" if pnl>=0 else f"-${abs(pnl):.2f}"
+                            move_str = f"+${btc_move:,.0f}" if btc_move>=0 else f"-${abs(btc_move):,.0f}"
+                            re = '✅' if was_correct else '❌'
+                            rw = 'WON' if was_correct else 'LOST'
+                            msg = (
+                                f"{re} BTC {rw} — {wl}M\n"
+                                f"\n"
+                                f"Called: {pred} | Actual: {actual}\n"
+                                f"Entry: {ep*100:.1f}¢ | Stake: ${stake:.0f}\n"
+                                f"P&L: {pnl_str} | ROI: {'+' if roi>=0 else ''}{roi:.0f}%\n"
+                                f"BTC: ${float(btc_open):,.0f} → ${float(btc_close):,.0f} ({move_str})\n"
+                                f"\n"
+                                f"📊 Signals: {factors}/5 agreed | Conf: {float(conf)*100:.0f}%\n"
+                                f"📈 YTD: {ytd_w}W-{ytd_t-ytd_w}L | {'+' if float(ytd_net)>=0 else ''}${float(ytd_net):.2f}"
+                            )
+                        else:
+                            re = '✅' if was_correct else '❌'
+                            msg = f"{re} BTC {'WON' if was_correct else 'LOST'} — {wl}M | {pred} → {actual}"
+                    except Exception as _e:
+                        logger.error(f"❌ Trade broadcast error: {_e}")
+                        re = '✅' if was_correct else '❌'
+                        msg = f"{re} BTC {'WON' if was_correct else 'LOST'} — {wl}M | {pred} → {actual}"
+
                     try:
-                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
-                        for sub in subscribers:
-                            try:
-                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-                            except Exception:
-                                pass
+                        BOT_TOKEN = _telegram_bot.bot_token
+                        subs = await _telegram_bot.get_all_subscribers(instant_only=False)
+                        async with _httpx.AsyncClient(timeout=10) as _c:
+                            for sub in subs:
+                                try:
+                                    await _c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                        json={"chat_id": sub['chat_id'], "text": msg})
+                                except Exception:
+                                    pass
                     except Exception:
+                        pass                    except Exception:
                         pass
     except Exception as e:
         logger.error(f"❌ BTC resolution check failed: {e}")
