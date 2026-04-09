@@ -745,6 +745,31 @@ async def scheduled_btc_hourly_summary():
         """)
         last_hour = cur.fetchone()
 
+        # Today's P&L
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    AND w.close_time::date = CURRENT_DATE
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
+            )
+            SELECT COUNT(*), COUNT(*) FILTER (WHERE correct),
+                ROUND(SUM(trade_pnl)::numeric, 2),
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2),
+                ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2),
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN (25.0/entry_price-25.0)*0.02 ELSE 0 END)::numeric, 2),
+                ROUND(SUM(CASE WHEN correct THEN 25.0/entry_price*0.98 WHEN NOT correct THEN 0 ELSE 0 END)::numeric, 2)
+            FROM pnl
+        """)
+        today_stats = cur.fetchone()
+
         # Active strategy
         cur.execute("SELECT version FROM btc_strategy_versions WHERE status = 'active' LIMIT 1")
         active_v = cur.fetchone()
@@ -765,8 +790,24 @@ async def scheduled_btc_hourly_summary():
         else:
             lines.append("\u23f0 Last Hour: No trades resolved")
 
+        # TODAY section
+        d_total, d_wins, d_net, d_profit, d_loss, d_fees, d_returns = today_stats if today_stats else (0,0,0,0,0,0,0)
+        d_total = d_total or 0; d_wins = d_wins or 0; d_net = float(d_net or 0)
+        d_profit = float(d_profit or 0); d_loss = float(d_loss or 0)
+        d_fees = float(d_fees or 0); d_spent = d_total * 25
         lines.append("")
-        lines.append("\u2501\u2501\u2501 CUMULATIVE P&L \u2501\u2501\u2501")
+        lines.append("\u2501\u2501\u2501 TODAY \u2501\u2501\u2501")
+        d_emoji = '\U0001f7e2' if d_net >= 0 else '\U0001f534'
+        d_sign = '+' if d_net >= 0 else ''
+        lines.append(f"{d_emoji} Net P&L: {d_sign}${d_net:.2f}")
+        lines.append(f"\U0001f4b0 Profit: +${d_profit:.2f} | \U0001f4c9 Loss: -${d_loss:.2f}")
+        lines.append(f"\U0001f4b5 Spent: ${d_spent} | \U0001f4b8 Fees: ${d_fees:.2f}")
+        if d_total > 0:
+            lines.append(f"Record: {d_wins}W-{d_total-d_wins}L ({d_wins/d_total*100:.0f}%)")
+
+        # YTD (all-time) section
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 ALL-TIME (YTD) \u2501\u2501\u2501")
 
         a_net = sum(float(r[3] or 0) for r in stats)
         a_profit = sum(float(r[4] or 0) for r in stats)
@@ -775,15 +816,14 @@ async def scheduled_btc_hourly_summary():
         a_fees = sum(float(r[7] or 0) for r in stats)
         a_total = sum(r[1] for r in stats)
         a_wins = sum(r[2] for r in stats)
+        a_spent = a_total * 25
 
         net_emoji = '\U0001f7e2' if a_net >= 0 else '\U0001f534'
         net_sign = '+' if a_net >= 0 else ''
         lines.append(f"{net_emoji} Net P&L: {net_sign}${a_net:.2f}")
-        lines.append(f"\U0001f4b0 Gross Profit: +${a_profit:.2f}")
-        lines.append(f"\U0001f4c9 Gross Loss: -${a_loss:.2f}")
+        lines.append(f"\U0001f4b0 Profit: +${a_profit:.2f} | \U0001f4c9 Loss: -${a_loss:.2f}")
         lines.append(f"\U0001f3c6 Best Trade: +${a_best:.2f}")
-        lines.append(f"\U0001f4b8 Fees: ${a_fees:.2f}")
-        lines.append(f"\U0001f4b5 Risked: ${a_total * 25}")
+        lines.append(f"\U0001f4b5 Spent: ${a_spent} | \U0001f4b8 Fees: ${a_fees:.2f}")
 
         lines.append("")
         for r in stats:
