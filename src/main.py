@@ -142,7 +142,8 @@ async def scheduled_settlement():
             # Broadcast results via Telegram
             if _telegram_bot:
                 for t in result.get('trades', []):
-                    await _telegram_bot.broadcast_trade_result({
+                    # DISABLED: old sports trade broadcast
+                    # await _telegram_bot.broadcast_trade_result({
                         'market_title': t.get('market_title', ''),
                         'entry_price': 50,
                         'exit_price': 100 if t['outcome'] == 'won' else 0,
@@ -378,27 +379,7 @@ async def scheduled_penny_scan():
         resolved = await hunter.check_resolutions()
         _last_penny_scan = datetime.utcnow()
 
-        # Broadcast new bets to Telegram
-        if _telegram_bot and executed > 0:
-            for contract in executed_contracts:
-                bp = contract['buy_price']
-                msg = (
-                    f"🎰 PENNY BET PLACED\n\n"
-                    f"{contract['question'][:60]}\n"
-                    f"Price: {bp*100:.0f}¢\n"
-                    f"Potential: {(1/bp):.0f}x return\n"
-                    f"Catalyst: {contract.get('catalyst_reason', 'Asymmetric value')}\n"
-                    f"Score: {contract['catalyst_score']:.0f}/10"
-                )
-                try:
-                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
-                    for sub in subscribers:
-                        try:
-                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+        # Penny bet placed — silent (only HIT/DEAD broadcasts, no entry noise)
 
         # Broadcast resolutions
         if _telegram_bot and resolved:
@@ -456,7 +437,8 @@ async def scheduled_internal_arb_scan():
             # Broadcast ONLY executed trades to subscribers (not raw opportunities)
             executed = [o for o in opps if o.get('fee_adjusted_profit_pct', 0) > 0.5]
             if _telegram_bot and executed:
-                await broadcast_internal_arb_trades(executed)
+                # Internal arb broadcasts disabled (noise)
+                # await broadcast_internal_arb_trades(executed)
         else:
             logger.info("💰 Internal arb scan: no opportunities found")
     except Exception as e:
@@ -1416,18 +1398,41 @@ async def scheduled_btc_resolution_check():
                             ytd_t, ytd_w, ytd_net = ytd
                             pnl_str = f"+${pnl:.2f}" if pnl>=0 else f"-${abs(pnl):.2f}"
                             move_str = f"+${btc_move:,.0f}" if btc_move>=0 else f"-${abs(btc_move):,.0f}"
-                            re = '✅' if was_correct else '❌'
+                            re = '\u2705' if was_correct else '\u274c'
                             rw = 'WON' if was_correct else 'LOST'
+                            crowd_pct = max(float(prob or 0.5), 1-float(prob or 0.5)) * 100
+                            crowd_side = 'bullish' if float(prob or 0.5) > 0.5 else 'bearish'
+                            rr = (1/ep - 1)*0.98 if ep > 0 else 0
+
+                            # Per-factor confluence
+                            def _fa(val, direction):
+                                v = float(val or 0)
+                                agree = (direction=='DOWN' and v<0) or (direction=='UP' and v>0)
+                                bar = '\u2588' * min(int(abs(v)*5), 5)
+                                return ('\u2705' if agree else '\u274c'), bar
+                            pd_e,pd_b = _fa(f_pd, pred)
+                            mm_e,mm_b = _fa(f_mom, pred)
+                            vi_e,vi_b = _fa(f_vol, pred)
+                            ol_e,ol_b = _fa(f_orc, pred)
+                            bk_e = '\u2705' if factors >= 4 else '\u274c'
+
                             msg = (
-                                f"{re} BTC {rw} — {wl}M\n"
+                                f"{re} BTC {rw} \u2014 {wl}M\n"
                                 f"\n"
-                                f"Called: {pred} | Actual: {actual}\n"
-                                f"Entry: {ep*100:.1f}¢ | Stake: ${stake:.0f}\n"
+                                f"\u2501\u2501\u2501 TRADE \u2501\u2501\u2501\n"
+                                f"Direction: {pred} \u2192 Actual: {actual}\n"
+                                f"Entry: {ep*100:.1f}\u00a2 | Stake: ${stake:.0f} | R:R {rr:.1f}:1\n"
                                 f"P&L: {pnl_str} | ROI: {'+' if roi>=0 else ''}{roi:.0f}%\n"
-                                f"BTC: ${float(btc_open):,.0f} → ${float(btc_close):,.0f} ({move_str})\n"
+                                f"BTC: ${float(btc_open):,.0f} \u2192 ${float(btc_close):,.0f} ({move_str})\n"
                                 f"\n"
-                                f"📊 Signals: {factors}/5 agreed | Conf: {float(conf)*100:.0f}%\n"
-                                f"📈 YTD: {ytd_w}W-{ytd_t-ytd_w}L | {'+' if float(ytd_net)>=0 else ''}${float(ytd_net):.2f}"
+                                f"\u2501\u2501\u2501 SIGNALS ({factors}/5 agreed) \u2501\u2501\u2501\n"
+                                f"{pd_e} Price Delta   {float(f_pd or 0):+.3f} {pd_b}\n"
+                                f"{mm_e} Momentum      {float(f_mom or 0):+.3f} {mm_b}\n"
+                                f"{vi_e} Volume        {float(f_vol or 0):+.3f} {vi_b}\n"
+                                f"{ol_e} Oracle Lead   {float(f_orc or 0):+.3f} {ol_b}\n"
+                                f"{bk_e} Crowd: {crowd_pct:.0f}% {crowd_side} | Conf: {float(conf or 0)*100:.0f}%\n"
+                                f"\n"
+                                f"\U0001f4c8 YTD: {ytd_w}W-{ytd_t-ytd_w}L | {'+' if float(ytd_net)>=0 else ''}${float(ytd_net):.2f}"
                             )
                         else:
                             re = '✅' if was_correct else '❌'
@@ -1552,9 +1557,12 @@ async def lifespan(app: FastAPI):
     # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
     # ═══════════════════════════════════════════════════════════════
     if _telegram_bot:
-        scheduler.add_job(check_and_broadcast_signals, 'interval', seconds=45, id='telegram_signals', replace_existing=True)
-        scheduler.add_job(daily_summary_task, 'cron', hour=3, minute=30, id='telegram_daily', replace_existing=True)  # 9 AM IST
-        scheduler.add_job(pre_match_alerts, 'interval', minutes=15, id='telegram_prematch', replace_existing=True)
+        # DISABLED: sports signal broadcasts (noise)
+        # scheduler.add_job(check_and_broadcast_signals, ...)
+        # DISABLED: old sports daily summary (replaced by BTC daily)
+        # scheduler.add_job(daily_summary_task, ...)
+        # DISABLED: pre-match sports alerts (noise)
+        # scheduler.add_job(pre_match_alerts, ...)
         logger.info("✅ Telegram broadcast jobs scheduled")
     
     # ═══════════════════════════════════════════════════════════════
