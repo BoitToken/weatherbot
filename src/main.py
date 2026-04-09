@@ -1257,40 +1257,16 @@ async def scheduled_btc_daily_strategy_report():
         conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
         cur = conn.cursor()
 
-        # Today's hourly breakdown with V2 filters
+        # Today's hourly breakdown — uses btc_pnl view (correct filters + scaled stakes)
         cur.execute("""
-            WITH best AS (
-                SELECT DISTINCT ON (s.window_id)
-                    s.window_id, s.prediction, w.resolution, w.window_length,
-                    w.close_time,
-                    (s.prediction = w.resolution) as correct,
-                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                FROM btc_signals s
-                JOIN btc_windows w ON s.window_id = w.window_id
-                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                    AND w.close_time::date = CURRENT_DATE
-                ORDER BY s.window_id, s.confidence DESC
-            ),
-            pnl AS (
-                SELECT *,
-                    CASE
-                        WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
-                        WHEN NOT correct THEN -25.0 ELSE 0
-                    END as trade_pnl,
-                    CASE WHEN entry_price <= 0.70 AND window_length = 5 THEN true ELSE false END as v2_eligible
-                FROM best
-            )
             SELECT 
                 EXTRACT(HOUR FROM close_time AT TIME ZONE 'Asia/Kolkata')::int as hour_ist,
                 COUNT(*) as all_trades,
                 COUNT(*) FILTER (WHERE correct) as all_wins,
                 ROUND(SUM(trade_pnl)::numeric, 2) as all_pnl,
-                COUNT(*) FILTER (WHERE v2_eligible) as v2_trades,
-                COUNT(*) FILTER (WHERE v2_eligible AND correct) as v2_wins,
-                ROUND(SUM(CASE WHEN v2_eligible THEN trade_pnl ELSE 0 END)::numeric, 2) as v2_pnl,
-                ROUND(AVG(entry_price)::numeric, 3) as avg_entry,
-                ROUND(AVG(CASE WHEN v2_eligible THEN entry_price END)::numeric, 3) as v2_avg_entry
-            FROM pnl
+                ROUND(AVG(entry_price)::numeric, 3) as avg_entry
+            FROM btc_pnl
+            WHERE close_time::date = CURRENT_DATE
             GROUP BY 1 ORDER BY 1
         """)
         hourly = cur.fetchall()
@@ -1304,36 +1280,16 @@ async def scheduled_btc_daily_strategy_report():
         """)
         volatility = cur.fetchall()
 
-        # Overall today
+        # Overall today — from btc_pnl view
         cur.execute("""
-            WITH best AS (
-                SELECT DISTINCT ON (s.window_id)
-                    s.window_id, s.prediction, w.resolution, w.window_length,
-                    (s.prediction = w.resolution) as correct,
-                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                FROM btc_signals s
-                JOIN btc_windows w ON s.window_id = w.window_id
-                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                    AND w.close_time::date = CURRENT_DATE
-                ORDER BY s.window_id, s.confidence DESC
-            ),
-            pnl AS (
-                SELECT *,
-                    CASE
-                        WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
-                        WHEN NOT correct THEN -25.0 ELSE 0
-                    END as trade_pnl,
-                    CASE WHEN entry_price <= 0.70 AND window_length = 5 THEN true ELSE false END as v2_eligible
-                FROM best
-            )
             SELECT 
                 COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
                 ROUND(SUM(trade_pnl)::numeric, 2) as net,
                 ROUND(MAX(trade_pnl)::numeric, 2) as best,
-                COUNT(*) FILTER (WHERE v2_eligible) as v2_total,
-                COUNT(*) FILTER (WHERE v2_eligible AND correct) as v2_wins,
-                ROUND(SUM(CASE WHEN v2_eligible THEN trade_pnl ELSE 0 END)::numeric, 2) as v2_net
-            FROM pnl
+                ROUND(SUM(stake)::numeric, 2) as spent,
+                ROUND(SUM(CASE WHEN trade_pnl>0 THEN stake*(1.0/entry_price-1.0)*0.02 ELSE 0 END)::numeric, 2) as fees
+            FROM btc_pnl
+            WHERE close_time::date = CURRENT_DATE
         """)
         totals = cur.fetchone()
         conn.close()
@@ -1346,11 +1302,10 @@ async def scheduled_btc_daily_strategy_report():
         best_hour, worst_hour = None, None
         best_pnl, worst_pnl = -999999, 999999
         for h in hourly:
-            hr, all_t, all_w, all_p, v2_t, v2_w, v2_p, avg_e, v2_e = h
+            hr, all_t, all_w, all_p, avg_e = h
             emoji = '\U0001f7e2' if float(all_p) >= 0 else '\U0001f534'
             sign = '+' if float(all_p) >= 0 else ''
-            v2_str = f" | V2: {v2_w}/{v2_t} {'+' if float(v2_p)>=0 else ''}${v2_p}" if v2_t > 0 else ""
-            lines.append(f"{emoji} {hr:02d}:00 | {all_w}W-{all_t-all_w}L | {sign}${all_p} | entry: {float(avg_e)*100:.0f}c{v2_str}")
+            lines.append(f"{emoji} {hr:02d}:00 | {all_w}W-{all_t-all_w}L | {sign}${all_p} | avg entry: {float(avg_e)*100:.0f}c")
             if float(all_p) > best_pnl:
                 best_pnl, best_hour = float(all_p), hr
             if float(all_p) < worst_pnl:
@@ -1369,20 +1324,28 @@ async def scheduled_btc_daily_strategy_report():
                 vol_emoji = '\U0001f525' if float(v_range) > 0.3 else '\u26a1' if float(v_range) > 0.1 else '\U0001f4a4'
                 lines.append(f"{vol_emoji} {v_hr:02d}:00 | Range: {float(v_range):.2f}% | {v_trades} trades | tag: {v_tag}")
 
-        # Totals
-        total, wins, net, best, v2_total, v2_wins, v2_net = totals
+        # Totals — uses corrected btc_pnl view
+        total, wins, net, best, spent, fees = totals
+        net_f = float(net or 0); spent_f = float(spent or 0); fees_f = float(fees or 0)
         lines.append("")
         lines.append("\u2501\u2501\u2501 DAY TOTALS \u2501\u2501\u2501")
-        lines.append(f"All trades: {wins}W-{total-wins}L | {'+' if float(net)>=0 else ''}${net}")
-        if v2_total > 0:
-            lines.append(f"V2 only (<70c, 5M): {v2_wins}W-{v2_total-v2_wins}L | {'+' if float(v2_net)>=0 else ''}${v2_net}")
-        lines.append(f"\U0001f3c6 Best trade: +${best}")
+        net_emoji = '\U0001f7e2' if net_f >= 0 else '\U0001f534'
+        net_sign = '+' if net_f >= 0 else ''
+        lines.append(f"{net_emoji} Net P&L: {net_sign}${net_f:.2f}")
+        if total > 0:
+            lines.append(f"Record: {wins}W-{total-wins}L ({wins/total*100:.0f}%)")
+        lines.append(f"\U0001f4b5 Spent: ${spent_f:.0f} | \U0001f4b8 Fees: ${fees_f:.2f}")
+        if best:
+            lines.append(f"\U0001f3c6 Best trade: +${best}")
 
-        lines.append("\n\u2501\u2501\u2501 STRATEGY NOTES \u2501\u2501\u2501")
-        lines.append("V2 active: entry<70c, 5M only, scaled stakes")
-        lines.append("Tracking: hourly vol slots stored for weekly review")
-        lines.append("Next review: after 7 days of data")
+        cur.execute("SELECT version, max_entry, min_factors, min_rr FROM btc_strategy_versions WHERE status=\'active\' LIMIT 1")
+        strat = cur.fetchone()
+        lines.append("\n\u2501\u2501\u2501 STRATEGY \u2501\u2501\u2501")
+        if strat:
+            lines.append(f"Active: {strat[0]} | Entry <{float(strat[1])*100:.0f}c | {strat[2]}/7 factors | Min R:R {float(strat[3]):.1f}x")
+        lines.append("Hourly slots tracked for weekly review")
         lines.append("\nDashboard: weatherbot.1nnercircle.club/btc15m")
+        conn.close()
 
         msg = "\n".join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
