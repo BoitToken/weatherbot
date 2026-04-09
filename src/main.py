@@ -686,189 +686,147 @@ async def scheduled_btc_signal_scan():
         logger.error(f"❌ BTC signal scan failed: {e}\n{traceback.format_exc()}")
 
 
+_pinned_hourly_msg_ids = {}  # chat_id -> message_id for pin management
+
 async def scheduled_btc_hourly_summary():
-    """Send hourly performance summary with financials to Telegram subscribers."""
-    global _btc_engine, _telegram_bot
+    """Send hourly performance summary with financials to Telegram. Pins the message."""
+    global _telegram_bot, _pinned_hourly_msg_ids
     if not _telegram_bot:
+        logger.warning("\u26a0\ufe0f BTC hourly: _telegram_bot is None, skipping")
         return
     try:
-        pool = get_async_pool()
-        STAKE = 25.0
-        FEE_PCT = 0.02
+        import psycopg2
+        conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
+        cur = conn.cursor()
 
-        async with pool.acquire() as conn:
-            # All-time financials per timeframe
-            stats = await conn.fetch("""
-                WITH best AS (
-                    SELECT DISTINCT ON (s.window_id)
-                        s.window_id, s.prediction, w.resolution, w.window_length,
-                        (s.prediction = w.resolution) as correct,
-                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                    FROM btc_signals s
-                    JOIN btc_windows w ON s.window_id = w.window_id
-                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                    ORDER BY s.window_id, s.confidence DESC
-                ),
-                pnl AS (
-                    SELECT *,
-                        CASE
-                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN
-                                (25.0 / entry_price - 25.0) * (1 - 0.02)
-                            WHEN NOT correct THEN -25.0
-                            ELSE 0
-                        END as trade_pnl
-                    FROM best
-                )
-                SELECT window_length,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE correct) as wins,
-                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
-                    ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2) as gross_profit,
-                    ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2) as gross_loss,
-                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
-                    ROUND(SUM(CASE WHEN trade_pnl > 0 THEN (25.0/entry_price - 25.0)*0.02 ELSE 0 END)::numeric, 2) as total_fees
-                FROM pnl
-                GROUP BY window_length ORDER BY window_length
-            """)
-
-            # Last hour financials
-            last_hour = await conn.fetch("""
-                WITH best AS (
-                    SELECT DISTINCT ON (s.window_id)
-                        s.window_id, s.prediction, w.resolution, w.window_length,
-                        w.close_time,
-                        (s.prediction = w.resolution) as correct,
-                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                    FROM btc_signals s
-                    JOIN btc_windows w ON s.window_id = w.window_id
-                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                      AND w.close_time > NOW() - INTERVAL '1 hour'
-                    ORDER BY s.window_id, s.confidence DESC
-                ),
-                pnl AS (
-                    SELECT *,
-                        CASE
-                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN
-                                (25.0 / entry_price - 25.0) * (1 - 0.02)
-                            WHEN NOT correct THEN -25.0
-                            ELSE 0
-                        END as trade_pnl
-                    FROM best
-                )
-                SELECT
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE correct) as wins,
-                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
-                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
-                FROM pnl
-            """)
-
-        # Build summary
-        lines = ["\U0001f4ca BTC PAPER TRADING \u2014 Hourly Report\n"]
+        # All-time per timeframe
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
+            )
+            SELECT window_length, COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2) as gross_profit,
+                ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2) as gross_loss,
+                ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN (25.0/entry_price-25.0)*0.02 ELSE 0 END)::numeric, 2) as fees
+            FROM pnl GROUP BY window_length ORDER BY window_length
+        """)
+        stats = cur.fetchall()
 
         # Last hour
-        h = last_hour[0] if last_hour else None
-        if h and h['total'] > 0:
-            h_sign = '+' if h['net_pnl'] >= 0 else ''
-            lines.append(f"\u23f0 Last Hour: {h['wins']}W-{h['total']-h['wins']}L | {h_sign}${h['net_pnl']}")
-            if h['best_trade'] and h['best_trade'] > 0:
-                lines.append(f"   Best trade: +${h['best_trade']}")
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length, w.close_time,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL AND w.close_time > NOW() - INTERVAL '1 hour'
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price-25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl FROM best
+            )
+            SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl, ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
+            FROM pnl
+        """)
+        last_hour = cur.fetchone()
+
+        # Active strategy
+        cur.execute("SELECT version FROM btc_strategy_versions WHERE status = 'active' LIMIT 1")
+        active_v = cur.fetchone()
+        strategy_name = active_v[0] if active_v else '?'
+        conn.close()
+
+        # Build message
+        from datetime import datetime as dt
+        now_ist = dt.now().strftime('%H:%M IST')
+        lines = [f"\U0001f4ca BTC PAPER TRADING \u2014 {now_ist}", f"Strategy: {strategy_name}", ""]
+
+        h_total, h_wins, h_net, h_best = last_hour if last_hour else (0, 0, 0, 0)
+        if h_total and h_total > 0:
+            h_sign = '+' if float(h_net or 0) >= 0 else ''
+            lines.append(f"\u23f0 Last Hour: {h_wins}W-{h_total-h_wins}L | {h_sign}${h_net}")
+            if h_best and float(h_best) > 0:
+                lines.append(f"   Best: +${h_best}")
         else:
             lines.append("\u23f0 Last Hour: No trades resolved")
 
         lines.append("")
         lines.append("\u2501\u2501\u2501 CUMULATIVE P&L \u2501\u2501\u2501")
 
-        a_net = sum(float(r['net_pnl'] or 0) for r in stats)
-        a_profit = sum(float(r['gross_profit'] or 0) for r in stats)
-        a_loss = sum(float(r['gross_loss'] or 0) for r in stats)
-        a_fees = sum(float(r['total_fees'] or 0) for r in stats)
-        a_best = max((float(r['best_trade'] or 0) for r in stats), default=0)
-        a_total = sum(r['total'] for r in stats)
-        a_wins = sum(r['wins'] for r in stats)
+        a_net = sum(float(r[3] or 0) for r in stats)
+        a_profit = sum(float(r[4] or 0) for r in stats)
+        a_loss = sum(float(r[5] or 0) for r in stats)
+        a_best = max((float(r[6] or 0) for r in stats), default=0)
+        a_fees = sum(float(r[7] or 0) for r in stats)
+        a_total = sum(r[1] for r in stats)
+        a_wins = sum(r[2] for r in stats)
 
-        net_sign = '+' if a_net >= 0 else ''
         net_emoji = '\U0001f7e2' if a_net >= 0 else '\U0001f534'
-
+        net_sign = '+' if a_net >= 0 else ''
         lines.append(f"{net_emoji} Net P&L: {net_sign}${a_net:.2f}")
         lines.append(f"\U0001f4b0 Gross Profit: +${a_profit:.2f}")
         lines.append(f"\U0001f4c9 Gross Loss: -${a_loss:.2f}")
         lines.append(f"\U0001f3c6 Best Trade: +${a_best:.2f}")
-        lines.append(f"\U0001f4b8 Fees Paid: ${a_fees:.2f}")
-        lines.append(f"\U0001f4b5 Total Risked: ${a_total * 25}")
+        lines.append(f"\U0001f4b8 Fees: ${a_fees:.2f}")
+        lines.append(f"\U0001f4b5 Risked: ${a_total * 25}")
 
         lines.append("")
-        lines.append("\u2501\u2501\u2501 BY TIMEFRAME \u2501\u2501\u2501")
         for r in stats:
-            wl = r['window_length']
-            acc = r['wins']/r['total']*100 if r['total'] > 0 else 0
-            net_s = '+' if float(r['net_pnl'] or 0) >= 0 else ''
-            lines.append(f"{wl}m: {r['wins']}W-{r['total']-r['wins']}L ({acc:.0f}%) | {net_s}${r['net_pnl']}")
+            wl, total, wins, net_pnl = r[0], r[1], r[2], r[3]
+            acc = wins/total*100 if total > 0 else 0
+            lines.append(f"{wl}m: {wins}W-{total-wins}L ({acc:.0f}%) | {'+' if float(net_pnl or 0) >= 0 else ''}${net_pnl}")
 
-        lines.append(f"")
-        lines.append(f"Record: {a_wins}W-{a_total-a_wins}L ({a_wins/a_total*100:.0f}%)" if a_total > 0 else "")
-
-        # V2 strategy stats (entries < 70c, 5M only)
-        try:
-            async with pool.acquire() as conn:
-                v2 = await conn.fetchrow("""
-                    WITH best AS (
-                        SELECT DISTINCT ON (s.window_id)
-                            s.window_id, s.prediction, w.resolution, w.window_length,
-                            w.close_time,
-                            (s.prediction = w.resolution) as correct,
-                            CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
-                        FROM btc_signals s
-                        JOIN btc_windows w ON s.window_id = w.window_id
-                        WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
-                            AND w.window_length = 5
-                            AND CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END <= 0.70
-                        ORDER BY s.window_id, s.confidence DESC
-                    ),
-                    pnl AS (
-                        SELECT *,
-                            CASE
-                                WHEN entry_price < 0.30 THEN 50
-                                WHEN entry_price < 0.50 THEN 35
-                                ELSE 25
-                            END as stake,
-                            CASE
-                                WHEN correct AND entry_price > 0 AND entry_price < 1 THEN
-                                    (CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END 
-                                     / entry_price - CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END) * 0.98
-                                WHEN NOT correct THEN 
-                                    -1 * CASE WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.50 THEN 35 ELSE 25 END
-                                ELSE 0
-                            END as trade_pnl
-                        FROM best
-                    )
-                    SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
-                        ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
-                        ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
-                        ROUND(AVG(entry_price)::numeric, 3) as avg_entry
-                    FROM pnl
-                """)
-                if v2 and v2['total'] > 0:
-                    v2_sign = '+' if float(v2['net_pnl'] or 0) >= 0 else ''
-                    lines.append(f"")
-                    lines.append(f"\u2501\u2501\u2501 STRATEGY V2 (entry<70c, 5M only) \u2501\u2501\u2501")
-                    lines.append(f"Trades: {v2['wins']}W-{v2['total']-v2['wins']}L | {v2_sign}${v2['net_pnl']}")
-                    lines.append(f"Avg entry: {float(v2['avg_entry'])*100:.0f}c | Best: +${v2['best_trade']}")
-        except Exception:
-            pass
-
-        lines.append(f"\nDashboard: weatherbot.1nnercircle.club/btc15m")
+        if a_total > 0:
+            lines.append(f"\nRecord: {a_wins}W-{a_total-a_wins}L ({a_wins/a_total*100:.0f}%)")
+        lines.append(f"Dashboard: weatherbot.1nnercircle.club/btc15m")
 
         msg = "\n".join(lines)
-        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
-        for sub in subscribers:
-            try:
-                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-            except Exception:
-                pass
-        logger.info(f"\U0001f4ca BTC hourly summary sent to {len(subscribers)} subscribers")
+        BOT_TOKEN = _telegram_bot.bot_token
+
+        # Send to all subscribers, pin the message, unpin old one
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+            for sub in subscribers:
+                chat_id = sub['chat_id']
+                try:
+                    # Unpin previous hourly message
+                    old_msg_id = _pinned_hourly_msg_ids.get(chat_id)
+                    if old_msg_id:
+                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
+                            json={"chat_id": chat_id, "message_id": old_msg_id})
+
+                    # Send new message
+                    resp = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": msg})
+                    result = resp.json()
+                    if result.get('ok'):
+                        new_msg_id = result['result']['message_id']
+                        # Pin it
+                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
+                            json={"chat_id": chat_id, "message_id": new_msg_id, "disable_notification": True})
+                        _pinned_hourly_msg_ids[chat_id] = new_msg_id
+                except Exception as e:
+                    logger.error(f"\u274c Hourly send/pin failed for {chat_id}: {e}")
+
+        logger.info(f"\U0001f4ca BTC hourly summary sent + pinned to {len(subscribers)} subscribers")
     except Exception as e:
-        logger.error(f"\u274c BTC hourly summary failed: {e}")
+        logger.error(f"\u274c BTC hourly summary failed: {e}\n{traceback.format_exc()}")
 
 
 async def scheduled_btc_intelligence_loop():
