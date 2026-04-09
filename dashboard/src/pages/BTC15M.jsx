@@ -329,6 +329,10 @@ export default function BTCPolymarketEngine() {
   // Real stats from /api/btc/stats
   const [realStats, setRealStats] = useState(null);
 
+  // Bankroll state
+  const [bankrollData, setBankrollData] = useState(null);
+  const BTC_STARTING_BALANCE = 5000;
+
   // Trade drill-down
   const [detailTrades, setDetailTrades] = useState([]);
   const [tradeSort, setTradeSort] = useState("recent");
@@ -351,6 +355,20 @@ export default function BTCPolymarketEngine() {
     };
     fetchStats();
     const iv = setInterval(fetchStats, 10000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Fetch bankroll every 10s
+  useEffect(() => {
+    const fetchBankroll = async () => {
+      try {
+        const res = await fetch("/api/btc/bankroll");
+        const data = await res.json();
+        if (!data.error) setBankrollData(data);
+      } catch (e) { /* silent */ }
+    };
+    fetchBankroll();
+    const iv = setInterval(fetchBankroll, 10000);
     return () => clearInterval(iv);
   }, []);
 
@@ -601,6 +619,74 @@ export default function BTCPolymarketEngine() {
               </div>
             ))}
           </div>
+
+          {/* BANKROLL CARD ROW */}
+          {bankrollData && (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1.5, marginBottom: 8 }}>BANKROLL</div>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: isMobile ? 8 : 12 }}>
+                {/* Balance */}
+                <div style={{ background: C.card, border: `1px solid ${bankrollData.balance >= BTC_STARTING_BALANCE ? "rgba(0,255,135,0.2)" : "rgba(255,51,102,0.2)"}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>BALANCE</div>
+                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: bankrollData.balance >= BTC_STARTING_BALANCE ? C.win : C.loss }}>
+                    ${Number(bankrollData.balance).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </div>
+                  <div style={{ fontSize: 10, color: bankrollData.pnl_pct >= 0 ? C.win : C.loss, fontFamily: font, marginTop: 3 }}>
+                    {bankrollData.pnl_pct >= 0 ? "+" : ""}{Number(bankrollData.pnl_pct).toFixed(1)}% from ${BTC_STARTING_BALANCE.toLocaleString()}
+                  </div>
+                </div>
+                {/* Available */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>AVAILABLE</div>
+                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: C.white }}>
+                    ${Number(bankrollData.available).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </div>
+                  <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>ready to deploy</div>
+                </div>
+                {/* In Positions */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>IN POSITIONS</div>
+                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: "#ffaa00" }}>
+                    ${Number(bankrollData.in_positions).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </div>
+                  <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>currently deployed</div>
+                </div>
+                {/* Peak / Drawdown */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>PEAK / DRAWDOWN</div>
+                  <div style={{ fontSize: isMobile ? 14 : 18, fontFamily: font, fontWeight: 700, color: C.win }}>
+                    ${Number(bankrollData.peak_balance).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </div>
+                  <div style={{ fontSize: 10, color: bankrollData.max_drawdown_pct > 5 ? C.loss : C.muted, fontFamily: font, marginTop: 3 }}>
+                    DD: {Number(bankrollData.max_drawdown_pct).toFixed(1)}%
+                  </div>
+                </div>
+                {/* Capacity bar */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px" }}>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 8 }}>EXPOSURE CAPACITY</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.muted, fontFamily: font, marginBottom: 4 }}>
+                    <span>Used ${Number(bankrollData.in_positions).toFixed(0)}</span>
+                    <span>Max ${Number(bankrollData.max_exposure).toFixed(0)}</span>
+                  </div>
+                  <div style={{ height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 4,
+                      width: `${Math.min(100, (bankrollData.in_positions / Math.max(bankrollData.max_exposure, 1)) * 100)}%`,
+                      background: bankrollData.in_positions / bankrollData.max_exposure > 0.8
+                        ? `linear-gradient(90deg, ${C.loss}99, ${C.loss})`
+                        : bankrollData.in_positions / bankrollData.max_exposure > 0.5
+                        ? `linear-gradient(90deg, #ffaa0099, #ffaa00)`
+                        : `linear-gradient(90deg, ${C.win}99, ${C.win})`,
+                      transition: "width 0.5s",
+                    }} />
+                  </div>
+                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, marginTop: 6 }}>
+                    {bankrollData.max_exposure > 0 ? ((1 - bankrollData.in_positions / bankrollData.max_exposure) * 100).toFixed(0) : 100}% capacity remaining
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Signal Panel */}
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isMobile ? 12 : 18, gridRow: isMobile ? "auto" : "span 2" }}>

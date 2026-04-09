@@ -518,6 +518,158 @@ async def pre_match_alerts():
 
 
 # ═══════════════════════════════════════════════════════════════
+# BTC BANKROLL MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+BTC_STARTING_BALANCE = 5000.00
+
+async def get_btc_bankroll_state():
+    """Fetch current bankroll from DB. Returns dict with balance, available, in_positions."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT balance, available, in_positions, total_won, total_lost, total_trades, peak_balance, max_drawdown_pct "
+                "FROM btc_bankroll ORDER BY id DESC LIMIT 1"
+            )
+            if row:
+                return dict(row)
+    except Exception as e:
+        logger.error(f"❌ Bankroll fetch failed: {e}")
+    return {
+        'balance': BTC_STARTING_BALANCE,
+        'available': BTC_STARTING_BALANCE,
+        'in_positions': 0,
+        'total_won': 0,
+        'total_lost': 0,
+        'total_trades': 0,
+        'peak_balance': BTC_STARTING_BALANCE,
+        'max_drawdown_pct': 0,
+    }
+
+async def compute_btc_stake(entry_price: float, prediction: str, bankroll_state: dict) -> tuple:
+    """
+    Compute bankroll-proportional stake for a BTC trade.
+    Returns (stake, skip_reason) where skip_reason is None if trade is allowed.
+    """
+    balance = float(bankroll_state.get('balance', BTC_STARTING_BALANCE))
+    available = float(bankroll_state.get('available', BTC_STARTING_BALANCE))
+    in_positions = float(bankroll_state.get('in_positions', 0))
+
+    max_single_bet = balance * 0.10
+    max_exposure = balance * 0.30
+    conviction_max = balance * 0.20
+
+    # Base stake as % of bankroll
+    if prediction == 'DOWN':
+        if entry_price < 0.20:
+            base_pct = 0.030
+        elif entry_price < 0.30:
+            base_pct = 0.020
+        elif entry_price < 0.40:
+            base_pct = 0.015
+        else:  # 40-50c
+            base_pct = 0.010
+    else:  # UP
+        base_pct = 0.005
+
+    stake = balance * base_pct
+    stake = min(stake, max_single_bet)
+
+    # Check bankroll guards
+    if available < stake:
+        return 0, f"BANKROLL: insufficient available (${available:.0f} < ${stake:.0f})"
+    if in_positions + stake > max_exposure:
+        return 0, f"BANKROLL: exposure limit (${in_positions:.0f}+${stake:.0f} > ${max_exposure:.0f})"
+
+    return round(stake, 2), None
+
+async def update_btc_bankroll_open(stake: float):
+    """Reserve stake in bankroll when opening a trade."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE btc_bankroll SET
+                    available = available - $1,
+                    in_positions = in_positions + $1,
+                    updated_at = NOW()
+                WHERE id = (SELECT id FROM btc_bankroll ORDER BY id DESC LIMIT 1)
+            """, stake)
+    except Exception as e:
+        logger.error(f"❌ Bankroll open update failed: {e}")
+
+async def update_btc_bankroll_close(stake: float, pnl: float, won: bool):
+    """Update bankroll after trade resolves."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            if won:
+                # WON: balance += pnl, return stake + gain
+                await conn.execute("""
+                    UPDATE btc_bankroll SET
+                        balance = balance + $1,
+                        available = available + $2 + $1,
+                        in_positions = GREATEST(0, in_positions - $2),
+                        total_won = total_won + $1,
+                        total_trades = total_trades + 1,
+                        peak_balance = GREATEST(peak_balance, balance + $1),
+                        max_drawdown_pct = CASE
+                            WHEN GREATEST(peak_balance, balance + $1) > 0
+                            THEN ROUND((GREATEST(peak_balance, balance + $1) - (balance + $1)) / GREATEST(peak_balance, balance + $1) * 100, 2)
+                            ELSE 0 END,
+                        updated_at = NOW()
+                    WHERE id = (SELECT id FROM btc_bankroll ORDER BY id DESC LIMIT 1)
+                """, pnl, stake)
+            else:
+                # LOST: balance -= stake, lose stake
+                await conn.execute("""
+                    UPDATE btc_bankroll SET
+                        balance = balance - $1,
+                        available = available,
+                        in_positions = GREATEST(0, in_positions - $1),
+                        total_lost = total_lost + $1,
+                        total_trades = total_trades + 1,
+                        max_drawdown_pct = CASE
+                            WHEN peak_balance > 0
+                            THEN ROUND((peak_balance - (balance - $1)) / peak_balance * 100, 2)
+                            ELSE 0 END,
+                        updated_at = NOW()
+                    WHERE id = (SELECT id FROM btc_bankroll ORDER BY id DESC LIMIT 1)
+                """, stake)
+    except Exception as e:
+        logger.error(f"❌ Bankroll close update failed: {e}")
+
+async def sync_btc_in_positions():
+    """Recalculate in_positions from open (unresolved) btc_signals."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT COALESCE(SUM(s.stake_used), 0) as open_stake
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NULL
+                AND s.stake_used IS NOT NULL
+            """)
+            open_stake = float(row['open_stake']) if row else 0
+            state = await get_btc_bankroll_state()
+            balance = float(state['balance'])
+            total_won = float(state['total_won'])
+            total_lost = float(state['total_lost'])
+            # available = balance - open_stake
+            available = max(0, balance - open_stake)
+            await conn.execute("""
+                UPDATE btc_bankroll SET
+                    in_positions = $1,
+                    available = $2,
+                    updated_at = NOW()
+                WHERE id = (SELECT id FROM btc_bankroll ORDER BY id DESC LIMIT 1)
+            """, open_stake, available)
+    except Exception as e:
+        logger.error(f"❌ Bankroll sync failed: {e}")
+
+# ═══════════════════════════════════════════════════════════════
 # BTC SIGNAL ENGINE — Scheduled Scan Functions
 # ═══════════════════════════════════════════════════════════════
 _btc_engine = None
@@ -580,15 +732,24 @@ async def scheduled_btc_signal_scan():
                 if reward_risk < 1.0:
                     continue  # Hard floor: upside must exceed downside
 
-                # RULE 2: Scale stake — bigger on better odds
-                if entry_price < 0.20:
-                    stake = 75
-                elif entry_price < 0.30:
-                    stake = 50
-                elif entry_price < 0.40:
-                    stake = 35
-                else:  # 40-50c
-                    stake = 25
+                # RULE 2: Scale stake — bankroll-proportional sizing
+                try:
+                    _br_state = await get_btc_bankroll_state()
+                    stake, _br_skip = await compute_btc_stake(entry_price, pred, _br_state)
+                    if _br_skip:
+                        logger.warning(f"⚠️ Trade skipped: {_br_skip}")
+                        continue
+                except Exception as _br_e:
+                    logger.error(f"❌ Bankroll check failed: {_br_e}, using fallback stake")
+                    # Fallback to fixed stakes
+                    if entry_price < 0.20:
+                        stake = 150
+                    elif entry_price < 0.30:
+                        stake = 100
+                    elif entry_price < 0.40:
+                        stake = 75
+                    else:
+                        stake = 50
 
                 # RULE 4: Check factor agreement (from signal factors)
                 factors = sig.get('factors', {})
@@ -616,6 +777,20 @@ async def scheduled_btc_signal_scan():
                 # Trade opened — log only, NO telegram broadcast
                 # WON/LOST sent on resolution with full analysis
                 logger.info(f"V4 trade: {pred} {wl}M | {entry_price*100:.0f}c | ${stake} | R:R {reward_risk:.1f}x | {agreeing}/7")
+
+                # Store stake_used on the signal row and update bankroll
+                _window_id = sig.get('window_id', '')
+                if _window_id:
+                    try:
+                        pool = get_async_pool()
+                        async with pool.acquire() as conn:
+                            await conn.execute("""
+                                UPDATE btc_signals SET stake_used = $1
+                                WHERE window_id = $2 AND prediction != 'SKIP'
+                            """, stake, _window_id)
+                    except Exception as _se:
+                        logger.error(f"❌ Stake save failed: {_se}")
+                await update_btc_bankroll_open(stake)
 
                 # Track volatility per hour slot
                 try:
@@ -784,6 +959,26 @@ async def scheduled_btc_hourly_summary():
 
         if a_total > 0:
             lines.append(f"\nRecord: {a_wins}W-{a_total-a_wins}L ({a_wins/a_total*100:.0f}%)")
+
+        # BANKROLL section
+        try:
+            br = await get_btc_bankroll_state()
+            br_bal = float(br.get('balance', BTC_STARTING_BALANCE))
+            br_avail = float(br.get('available', br_bal))
+            br_in_pos = float(br.get('in_positions', 0))
+            br_dd = float(br.get('max_drawdown_pct', 0))
+            br_pnl_pct = (br_bal - BTC_STARTING_BALANCE) / BTC_STARTING_BALANCE * 100
+            br_emoji = '\U0001f7e2' if br_bal >= BTC_STARTING_BALANCE else '\U0001f534'
+            lines.append("")
+            lines.append("\u2501\u2501\u2501 BANKROLL \u2501\u2501\u2501")
+            lines.append(f"{br_emoji} Balance: ${br_bal:,.0f} ({'+' if br_pnl_pct>=0 else ''}{br_pnl_pct:.1f}% from ${BTC_STARTING_BALANCE:,.0f})")
+            lines.append(f"\U0001f4b3 Available: ${br_avail:,.0f} | In Positions: ${br_in_pos:,.0f}")
+            if br_dd > 0.01:
+                lines.append(f"\U0001f4c9 Max Drawdown: {br_dd:.1f}%")
+            lines.append(f"\U0001f3af Max Bet: ${br_bal*0.10:,.0f} | Max Exposure: ${br_bal*0.30:,.0f}")
+        except Exception as _bre:
+            logger.error(f"Bankroll section failed: {_bre}")
+
         lines.append(f"Dashboard: weatherbot.1nnercircle.club/btc15m")
 
         msg = "\n".join(lines)
@@ -1376,6 +1571,13 @@ async def scheduled_btc_resolution_check():
                             move_str = f"+${btc_move:,.0f}" if btc_move>=0 else f"-${abs(btc_move):,.0f}"
                             re = '\u2705' if was_correct else '\u274c'
                             rw = 'WON' if was_correct else 'LOST'
+
+                            # ✔️ Update bankroll on resolution
+                            try:
+                                await update_btc_bankroll_close(stake, pnl, was_correct)
+                                await sync_btc_in_positions()
+                            except Exception as _bre:
+                                logger.error(f"❌ Bankroll resolution update failed: {_bre}")
                             crowd_pct = max(float(prob or 0.5), 1-float(prob or 0.5)) * 100
                             crowd_side = 'bullish' if float(prob or 0.5) > 0.5 else 'bearish'
                             rr = (1/ep - 1)*0.98 if ep > 0 else 0
@@ -1391,6 +1593,19 @@ async def scheduled_btc_resolution_check():
                             vi_e,vi_b = _fa(f_vol, pred)
                             ol_e,ol_b = _fa(f_orc, pred)
                             bk_e = '\u2705' if factors >= 4 else '\u274c'
+
+                            # Get updated bankroll for display
+                            try:
+                                _br_disp = await get_btc_bankroll_state()
+                                _br_bal = float(_br_disp.get('balance', BTC_STARTING_BALANCE))
+                                _br_avail = float(_br_disp.get('available', BTC_STARTING_BALANCE))
+                                _br_dd = float(_br_disp.get('max_drawdown_pct', 0))
+                                _br_pnl_pct = (_br_bal - BTC_STARTING_BALANCE) / BTC_STARTING_BALANCE * 100
+                                bankroll_line = (f"\n\u2501\u2501\u2501 BANKROLL \u2501\u2501\u2501\n"
+                                    f"\U0001f4b0 ${_br_bal:,.0f} ({'+' if _br_pnl_pct>=0 else ''}{_br_pnl_pct:.1f}%) | Avail: ${_br_avail:,.0f}"
+                                    + (f" | DD: {_br_dd:.1f}%" if _br_dd > 0.01 else ""))
+                            except Exception:
+                                bankroll_line = ""
 
                             msg = (
                                 f"{re} BTC {rw} \u2014 {wl}M\n"
@@ -1409,6 +1624,7 @@ async def scheduled_btc_resolution_check():
                                 f"{bk_e} Crowd: {crowd_pct:.0f}% {crowd_side} | Conf: {float(conf or 0)*100:.0f}%\n"
                                 f"\n"
                                 f"\U0001f4c8 YTD: {ytd_w}W-{ytd_t-ytd_w}L | {'+' if float(ytd_net)>=0 else ''}${float(ytd_net):.2f}"
+                                f"{bankroll_line}"
                             )
                         else:
                             re = '✅' if was_correct else '❌'
@@ -1479,16 +1695,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ Initial data fetch failed: {e}")
 
-    # Initialize bankroll if empty
+    # Initialize btc_bankroll if empty
     try:
-        existing = await fetch_one("SELECT id FROM bankroll LIMIT 1")
+        existing = await fetch_one("SELECT id FROM btc_bankroll LIMIT 1")
         if not existing:
-            await execute(
-                "INSERT INTO bankroll (total_usd, available_usd, in_positions_usd, daily_pnl) VALUES (0, 0, 0, 0)"
-            )
-            logger.info("✅ Initial bankroll record created")
+            pool = get_async_pool()
+            async with pool.acquire() as _conn:
+                await _conn.execute(
+                    "INSERT INTO btc_bankroll (balance, available, peak_balance) VALUES ($1, $2, $3)",
+                    BTC_STARTING_BALANCE, BTC_STARTING_BALANCE, BTC_STARTING_BALANCE
+                )
+            logger.info("✅ BTC bankroll initialized at $5,000")
+        else:
+            await sync_btc_in_positions()
+            br_state = await get_btc_bankroll_state()
+            logger.info(f"✅ BTC bankroll: ${float(br_state.get('balance', 0)):,.0f} available ${float(br_state.get('available', 0)):,.0f}")
     except Exception as e:
-        logger.error(f"⚠️ Bankroll init failed: {e}")
+        logger.error(f"⚠️ BTC Bankroll init failed: {e}")
+
+    # Legacy bankroll table
+    try:
+        existing2 = await fetch_one("SELECT id FROM bankroll LIMIT 1")
+        if not existing2:
+            await execute("INSERT INTO bankroll (total_usd, available_usd, in_positions_usd, daily_pnl) VALUES (0, 0, 0, 0)")
+    except Exception:
+        pass
 
     # Initialize Telegram subscriber bot
     try:
@@ -4022,6 +4253,41 @@ async def get_btc_analysis(hours: int = 1):
         }
     except Exception as e:
         logger.error(f"BTC analysis error: {e}\n{traceback.format_exc()}")
+        return {"error": str(e)}
+
+
+@app.get("/api/btc/bankroll")
+async def get_btc_bankroll_endpoint():
+    """Current bankroll status with P&L metrics."""
+    try:
+        state = await get_btc_bankroll_state()
+        balance = float(state.get('balance', BTC_STARTING_BALANCE))
+        available = float(state.get('available', balance))
+        in_positions = float(state.get('in_positions', 0))
+        total_won = float(state.get('total_won', 0))
+        total_lost = float(state.get('total_lost', 0))
+        total_trades = int(state.get('total_trades', 0))
+        peak_balance = float(state.get('peak_balance', balance))
+        max_drawdown_pct = float(state.get('max_drawdown_pct', 0))
+        pnl_pct = (balance - BTC_STARTING_BALANCE) / BTC_STARTING_BALANCE * 100 if BTC_STARTING_BALANCE > 0 else 0
+        max_single_bet = balance * 0.10
+        max_exposure = balance * 0.30
+        return {
+            "balance": round(balance, 2),
+            "available": round(available, 2),
+            "in_positions": round(in_positions, 2),
+            "total_won": round(total_won, 2),
+            "total_lost": round(total_lost, 2),
+            "total_trades": total_trades,
+            "peak_balance": round(peak_balance, 2),
+            "max_drawdown_pct": round(max_drawdown_pct, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "max_single_bet": round(max_single_bet, 2),
+            "max_exposure": round(max_exposure, 2),
+            "starting_balance": BTC_STARTING_BALANCE,
+        }
+    except Exception as e:
+        logger.error(f"BTC bankroll endpoint error: {e}")
         return {"error": str(e)}
 
 
