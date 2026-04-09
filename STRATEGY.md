@@ -1,127 +1,64 @@
 # BTC Paper Trading Strategy — WeatherBot
-**Last Updated:** 2026-04-09 12:36 IST
+**Last Updated:** 2026-04-09 13:29 IST
 
-## Active Strategy: V2 (Entry-Price Gated)
+## Active Strategy: V3 (Reward:Risk Gated)
+**Activated:** 2026-04-09 13:29 IST
 
 ### Core Rules
 | Rule | Setting | Rationale |
 |------|---------|-----------|
-| **Max Entry** | 70c | Above 70c = negative EV even at 80% accuracy |
+| **R:R Floor** | >= 1:1 | Potential profit must cover loss + fee. Entry < 50c. |
 | **Timeframe** | 5M only | 15M entries always 85c+ (market too efficient) |
-| **Stake Scaling** | <30c=$50, 30-50c=$35, 50-70c=$25 | Larger bets on better odds |
+| **Stake Scaling** | <20c=$75, 20-30c=$50, 30-40c=$35, 40-50c=$25 | Biggest bets on best odds |
+| **Factor Agreement** | >= 4/7 | At least 4 of 7 signal factors must agree with direction |
 | **15M** | SKIP | 80% accuracy but -$150 P&L — payout ratio 1:25 |
 
-### Why These Rules?
-Based on 118 paper trades over 7 hours (2026-04-09):
-- **<30c entries:** 77% accuracy, +$209 P&L — avg win $28.45
-- **30-50c entries:** 86% accuracy, +$143 P&L — avg win $28.01
-- **50-70c entries:** 40% accuracy, -$68 P&L — avg win $20.49
-- **70-85c entries:** 78% accuracy, -$3 P&L — avg win $6.74
-- **85c+ entries:** 74% accuracy, -$507 P&L — avg win $0.30 💀
+### V3 Math: Why 50c Max Entry
+| Entry | Win Amount | Loss | R:R | Breakeven WR | Verdict |
+|-------|-----------|------|-----|-------------|--------|
+| 10c | +$220.50 | -$75 | 2.9x | 25% | ✅ GREAT |
+| 20c | +$98.00 | -$75 | 1.3x | 43% | ✅ GREAT |
+| 30c | +$57.17 | -$50 | 1.1x | 47% | ✅ GOOD |
+| 40c | +$36.75 | -$35 | 1.1x | 49% | ✅ OK |
+| 50c | +$24.50 | -$25 | 0.98x | 51% | ⚠️ EDGE |
+| 60c | +$16.33 | -$25 | 0.65x | 60% | ❌ BURN |
+| 70c | +$10.50 | -$25 | 0.42x | 70% | ❌ BURN |
+| 85c | +$4.41 | -$25 | 0.18x | 85% | 💀 SUICIDE |
 
-**The math:** At 85c entry, win = $0.30, loss = -$25.00. Need 99% win rate to break even. We hit 74%. Impossible.
+### V3 Evidence (from 135 V1 trades)
+| R:R Bucket | Trades | Wins | P&L | Verdict |
+|-----------|--------|------|-----|--------|
+| <0.5x (burn) | 113 | 82 (73%) | **-$710** | 💀 |
+| 0.5-1x (partial) | 9 | 5 (56%) | +$5 | Breakeven |
+| 1-2x (covers loss) | 9 | 7 (78%) | **+$149** | ✅ |
+| 2x+ (great) | 4 | 3 (75%) | **+$259** | ✅ |
 
-### Confidence Trap (CRITICAL LEARNING)
-- "Ultra 80%+" confidence: 74 trades, 71.6% accuracy, **-$425 P&L**
-  - Why: Avg entry 92c. Confidence correlates with extreme odds, not profit.
-- "High 60-80%" confidence: 43 trades, 74.4% accuracy, **+$199 P&L**
-  - Why: Avg entry 63c. Better odds = better payout.
-- **Lesson:** NEVER use confidence score for position sizing. Entry price is the ONLY sizing signal.
-
----
-
-## V1 Performance (Baseline — 2026-04-09 05:00–12:20 IST)
-
-| Metric | Value |
-|--------|-------|
-| Total Trades | 118 |
-| Win Rate | 73% (86W-32L) |
-| Net P&L | -$202.39 |
-| Gross Profit | +$597.61 |
-| Gross Loss | -$800.00 |
-| Best Trade | +$133.56 |
-| Fees | $12.20 |
-| Total Risked | $2,950 |
-
-### Hourly V1 Performance
-| Hour | W-L | Win% | P&L | Avg Entry | Notes |
-|------|-----|------|-----|-----------|-------|
-| 5AM | 11-4 | 73% | +$57 | 79c | Session start |
-| 6AM | 14-2 | 88% | +$151 | 71c | **Peak** — best entries |
-| 7AM | 11-5 | 69% | -$97 | 87c | Entry jumped |
-| 8AM | 12-4 | 75% | -$66 | 80c | Bleeding |
-| 9AM | 12-4 | 75% | -$41 | 76c | Slight improvement |
-| 10AM | 10-6 | 63% | -$114 | 78c | Worst accuracy |
-| 11AM | 10-6 | 63% | -$68 | 86c | Continued bleed |
-| 12PM | 6-2 | 75% | -$48 | 94c | Worst entries |
-
-**Pattern:** 6AM had best entries (71c avg) AND best accuracy (88%). After 7AM, entries crept up as US market opened.
-
-### By Timeframe (V1)
-| Window | Trades | Accuracy | P&L | Avg Entry | Verdict |
-|--------|--------|----------|-----|-----------|---------|
-| 5M | 88 | 74% | +$121 | 73c | ✅ Profitable |
-| 15M | 30 | 80% | -$150 | 92c | ❌ Money losing |
+**84% of trades were structurally guaranteed to lose money regardless of accuracy.**
+V3 eliminates them entirely.
 
 ---
 
-## Volatility Tracking
+## Strategy Version History
 
-### Purpose
-Track hourly time slots to find when BTC markets have favorable odds (low entry prices, high volume, high volatility). After 1 week, identify:
-- Best hours to trade (highest P&L per trade)
-- Worst hours to avoid
-- Volatility patterns by day-of-week
-- Correlation between BTC price range and entry odds
+### V1 (2026-04-09 05:00-12:36): No filters
+- All signals, fixed $25, 5M + 15M
+- Result: 86W-32L (73%) but **-$202 P&L**
+- Problem: 67% of trades at 85c+ entry (win $0.30, lose $25)
 
-### Data Storage
-Table: `btc_volatility_hours`
-Columns: date, hour_ist, window_length, trades_taken, trades_won, trades_lost, net_pnl, avg_entry, btc_price_range_pct, best_trade, session_tag
+### V2 (2026-04-09 12:36-13:29): Entry < 70c
+- Max entry 70c, 5M only, scaled stakes
+- Improvement: Eliminated worst 85c+ trades
+- Problem: Still took 50-70c trades where R:R < 1:1
 
-### V2 Hypothesis
-- **Early hours (5-7AM IST / 11:30PM-1:30AM ET):** Lower volume → wider odds → better entries
-- **US market hours (7PM-2AM IST / 9:30AM-4PM ET):** Higher volume → tighter odds → worse entries
-- **Volatile days:** Large BTC price swings → wider odds → better trading conditions
-
-### Review Schedule
-- **Daily:** Automated strategy report at 11:30 PM IST (to all subscribers)
-- **Weekly:** Manual review of accumulated volatility data
-- **Adjustments:** After 7 days of V2 data, recalibrate rules
+### V3 (2026-04-09 13:29+): R:R >= 1:1 (CURRENT)
+- Entry < 50c (upside covers downside + fee)
+- 4/7 factor agreement minimum
+- Aggressive scaling on best odds
+- Expected: ~5-10 trades/day, each with +EV structure
 
 ---
 
-## Projected V2 Impact
-Based on retroactive analysis of today's 118 trades:
-- Would have taken ~30 trades (not 118) — 75% reduction
-- 24 wins × avg +$20 = +$480
-- 6 losses × avg -$35 = -$210
-- **Projected net: +$270** (vs actual -$202)
-
----
-
-## Evolution Plan
-
-### Week 1 (Current)
-- [x] V2 rules implemented (max 70c, 5M only, scaled stakes)
-- [x] Volatility tracking per hour
-- [x] Hourly financial reports
-- [x] Daily strategy report at 11:30 PM
-
-### Week 2 (After data review)
-- [ ] Identify optimal trading hours
-- [ ] Adjust entry threshold per time slot
-- [ ] Add exit signals (edge decay, take-profit)
-- [ ] Consider Kelly criterion sizing
-
-### Week 3+
-- [ ] Live trading evaluation
-- [ ] Multi-day pattern detection
-- [ ] Automated strategy parameter tuning
-- [ ] Portfolio allocation across strategies
-
----
-
-## Signal Factor Weights (Current)
+## Signal Factor Weights
 | Factor | Weight | Description |
 |--------|--------|-------------|
 | Price Delta | 0.25 | BTC price vs window open |
@@ -134,6 +71,20 @@ Based on retroactive analysis of today's 118 trades:
 
 ---
 
-**Strategy Version History:**
-- V1 (2026-04-09 05:00): All signals, fixed $25, 5M + 15M → -$202
-- V2 (2026-04-09 12:36): Entry < 70c, 5M only, scaled stakes → active
+## Volatility Tracking
+- Table: `btc_volatility_hours` (per-hour per-day performance)
+- Daily report: 11:30 PM IST (cron)
+- Weekly review: After 7 days, recalibrate time slot rules
+- Best observed time: 6AM IST (71c avg entry, 88% accuracy)
+- Worst observed: After 10AM IST (entries 85c+ as US market opens)
+
+---
+
+## Key Learnings
+1. **Entry price > win rate** for profitability
+2. **R:R ratio is the #1 filter** — no trade where upside < downside
+3. **Confidence trap** — highest confidence = worst P&L (correlates with extreme odds)
+4. **15M markets too efficient** — always 85c+ by discovery time
+5. **5M has variance** — wider odds = more opportunity for low entries
+6. **Factor agreement matters** — 4/7+ aligned = higher accuracy trades
+7. **Scale into conviction** — biggest stakes on best R:R trades
