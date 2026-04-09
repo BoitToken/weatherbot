@@ -540,9 +540,18 @@ class BTCSignalEngine:
                 prediction, prob_up, confidence = self.predict(factors)
 
                 skip_reason = None
+
+                # Hard filter: skip degenerate prices (0.00 or 1.00 = already resolved)
+                up_p = window.get('up_price', 0.5)
+                down_p = window.get('down_price', 0.5)
+                entry_p = up_p if prediction == 'UP' else down_p
+                if up_p <= 0.005 or up_p >= 0.995 or down_p <= 0.005 or down_p >= 0.995:
+                    prediction = 'SKIP'
+                    skip_reason = f'INVALID_PRICE: up={up_p} down={down_p} (degenerate market)'
+
                 if factors.get('volatility_skip'):
-                    skip_reason = 'HARD_FILTER: Volatility > 2σ'
-                elif prediction == 'SKIP':
+                    skip_reason = 'HARD_FILTER: Volatility > 2\u03c3'
+                elif prediction == 'SKIP' and not skip_reason:
                     skip_reason = 'Low conviction (prob_up between 0.45-0.55)'
 
                 signal = {
