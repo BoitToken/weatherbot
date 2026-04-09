@@ -142,14 +142,7 @@ async def scheduled_settlement():
             # Broadcast results via Telegram
             if _telegram_bot:
                 for t in result.get('trades', []):
-                    # DISABLED: old sports trade broadcast
-                    # await _telegram_bot.broadcast_trade_result({
-                        'market_title': t.get('market_title', ''),
-                        'entry_price': 50,
-                        'exit_price': 100 if t['outcome'] == 'won' else 0,
-                        'pnl_usd': t['pnl'],
-                        'pnl_pct': 0,
-                    })
+                    pass  # Sports trade broadcasts disabled (noise)
     except Exception as e:
         logger.error(f"\u274c Settlement error: {e}")
 
