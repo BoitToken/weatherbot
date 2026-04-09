@@ -80,6 +80,72 @@ V3 eliminates them entirely.
 
 ---
 
+## Intelligence Loop (Daily Automated Strategy Evolution)
+
+### The Loop (runs 11:00 PM IST daily)
+```
+┌─────────────────────────────────────────────────┐
+│              INTELLIGENCE LOOP                   │
+│                                                  │
+│  1. ANALYZE today's performance                  │
+│     └─ trades, P&L, R:R, hourly heatmap         │
+│                                                  │
+│  2. COMPARE to yesterday                         │
+│     └─ progressive? regressive? neutral?         │
+│                                                  │
+│  3. DECIDE action                                │
+│     ├─ 🟢 Progressive (+P&L) → RETAIN strategy  │
+│     ├─ 🟡 Neutral (small loss) → RETAIN + tweak │
+│     ├─ 🔴 Regressive (big loss) → REVERT        │
+│     └─ ⚪ No data → LOOSEN filters slightly      │
+│                                                  │
+│  4. CAPTURE learnings                            │
+│     └─ What worked, what didn't, why             │
+│                                                  │
+│  5. PROPOSE next strategy                        │
+│     ├─ Retain: same params, note wins            │
+│     ├─ Revert: restore previous version          │
+│     └─ Evolve: adjust ONE parameter              │
+│                                                  │
+│  6. ACTIVATE for next 24 hours                   │
+│     └─ New version in btc_strategy_versions      │
+│                                                  │
+│  7. LOG everything                               │
+│     └─ btc_intelligence_log (full audit trail)   │
+│                                                  │
+│  8. BROADCAST to Telegram                        │
+│     └─ Full report to all subscribers            │
+└─────────────────────────────────────────────────┘
+```
+
+### Decision Rules
+| Today's P&L | Verdict | Action | Next Strategy |
+|-------------|---------|--------|---------------|
+| > $0 | Progressive | RETAIN | Same version |
+| -$50 to $0 | Neutral | RETAIN + note | Same version |
+| < -$50 (prev profitable) | Regressive | REVERT | Previous version |
+| < -$50 (no prev data) | Regressive | EVOLVE | Adjust 1 param |
+| 0 trades | No Data | LOOSEN | +5c entry or -1 factor |
+
+### Adjustment Rules (ONE change per day)
+- **Loosen:** Increase max_entry by 5c OR reduce min_factors by 1
+- **Tighten:** Decrease max_entry by 5c OR increase min_factors by 1
+- **Never:** Change more than 1 parameter per day
+- **Always:** Compare against both previous day AND best historical day
+
+### Database Tables
+- `btc_strategy_versions` — Full version history with params (revertable)
+- `btc_intelligence_log` — Daily log with verdict, action, learnings, volatility
+- `btc_volatility_hours` — Per-hour per-day metrics for weekly patterns
+
+### Schedule
+- **11:00 PM IST** — Intelligence Loop runs (analyze + decide + activate)
+- **11:30 PM IST** — Daily Strategy Report (detailed heatmap + volatility)
+- **Hourly** — Financial P&L summary to Telegram
+- **Per trade** — Open/close broadcasts
+
+---
+
 ## Key Learnings
 1. **Entry price > win rate** for profitability
 2. **R:R ratio is the #1 filter** — no trade where upside < downside

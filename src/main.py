@@ -871,6 +871,289 @@ async def scheduled_btc_hourly_summary():
         logger.error(f"\u274c BTC hourly summary failed: {e}")
 
 
+async def scheduled_btc_intelligence_loop():
+    """Daily Intelligence Loop at 11:00 PM IST.
+    
+    THE LOOP:
+    1. Analyze today's performance under current strategy
+    2. Compare to previous day (progressive, regressive, or neutral)
+    3. If progressive: RETAIN strategy, note what worked
+    4. If regressive: REVERT to previous strategy + capture learnings
+    5. Either way: propose ONE adjustment for tomorrow
+    6. Activate new/adjusted strategy for next 24 hours
+    7. Log everything to btc_intelligence_log
+    8. Broadcast full report to Telegram
+    """
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    try:
+        import psycopg2, json
+        from datetime import date
+        conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
+        cur = conn.cursor()
+
+        # Get active strategy
+        cur.execute("SELECT version, max_entry, min_rr, min_factors, window_lengths, stakes FROM btc_strategy_versions WHERE status = 'active' ORDER BY id DESC LIMIT 1")
+        active = cur.fetchone()
+        if not active:
+            conn.close()
+            return
+        active_version, max_entry, min_rr, min_factors, win_lengths, stakes = active
+
+        # Today's performance (V3-eligible trades: entry < max_entry, correct window lengths)
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, s.confidence, w.resolution, w.window_length,
+                    w.close_time,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    AND w.close_time::date = CURRENT_DATE
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *,
+                    CASE
+                        WHEN entry_price < 0.20 THEN 75 WHEN entry_price < 0.30 THEN 50
+                        WHEN entry_price < 0.40 THEN 35 ELSE 25
+                    END as stake,
+                    CASE
+                        WHEN correct AND entry_price > 0 AND entry_price < 1 THEN
+                            (CASE WHEN entry_price < 0.20 THEN 75 WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.40 THEN 35 ELSE 25 END
+                             / entry_price - CASE WHEN entry_price < 0.20 THEN 75 WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.40 THEN 35 ELSE 25 END) * 0.98
+                        WHEN NOT correct THEN
+                            -1 * CASE WHEN entry_price < 0.20 THEN 75 WHEN entry_price < 0.30 THEN 50 WHEN entry_price < 0.40 THEN 35 ELSE 25 END
+                        ELSE 0
+                    END as trade_pnl,
+                    CASE WHEN entry_price > 0 THEN (1.0/entry_price - 1.0) * 0.98 ELSE 0 END as rr
+                FROM best
+            )
+            SELECT 
+                COUNT(*) as total, COUNT(*) FILTER (WHERE correct) as wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2) as gross_profit,
+                ROUND(ABS(SUM(CASE WHEN trade_pnl < 0 THEN trade_pnl ELSE 0 END))::numeric, 2) as gross_loss,
+                ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
+                ROUND(AVG(entry_price)::numeric, 4) as avg_entry,
+                ROUND(AVG(rr)::numeric, 2) as avg_rr
+            FROM pnl
+        """)
+        today = cur.fetchone()
+        t_total, t_wins, t_net, t_profit, t_loss, t_best, t_avg_entry, t_avg_rr = today
+
+        # Hourly breakdown for best/worst hour
+        cur.execute("""
+            WITH best AS (
+                SELECT DISTINCT ON (s.window_id)
+                    s.window_id, s.prediction, w.resolution, w.window_length, w.close_time,
+                    (s.prediction = w.resolution) as correct,
+                    CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                FROM btc_signals s
+                JOIN btc_windows w ON s.window_id = w.window_id
+                WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    AND w.close_time::date = CURRENT_DATE
+                ORDER BY s.window_id, s.confidence DESC
+            ),
+            pnl AS (
+                SELECT *, CASE WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98 WHEN NOT correct THEN -25.0 ELSE 0 END as trade_pnl
+                FROM best
+            )
+            SELECT EXTRACT(HOUR FROM close_time AT TIME ZONE 'Asia/Kolkata')::int as hr,
+                COUNT(*) as trades, COUNT(*) FILTER (WHERE correct) as wins,
+                ROUND(SUM(trade_pnl)::numeric, 2) as pnl,
+                ROUND(AVG(entry_price)::numeric, 3) as avg_entry
+            FROM pnl GROUP BY 1 ORDER BY 1
+        """)
+        hourly = cur.fetchall()
+        best_hour = max(hourly, key=lambda x: float(x[3])) if hourly else None
+        worst_hour = min(hourly, key=lambda x: float(x[3])) if hourly else None
+        vol_data = {str(h[0]): {"trades": h[1], "wins": h[2], "pnl": float(h[3]), "avg_entry": float(h[4])} for h in hourly}
+
+        # Previous day for comparison
+        cur.execute("SELECT net_pnl, trades_taken, strategy_version, verdict FROM btc_intelligence_log WHERE date = CURRENT_DATE - 1")
+        prev = cur.fetchone()
+        prev_pnl = float(prev[0]) if prev else None
+        prev_version = prev[2] if prev else None
+
+        # === INTELLIGENCE DECISION ===
+        t_net_f = float(t_net or 0)
+        verdict = 'neutral'
+        action = 'retain'
+        learnings = []
+        next_version = active_version
+
+        if t_total == 0:
+            verdict = 'no_data'
+            action = 'retain'
+            learnings.append('No trades taken today. Filters may be too tight or no favorable entries.')
+        elif t_net_f > 0:
+            verdict = 'progressive'
+            action = 'retain'
+            learnings.append(f'Profitable day (+${t_net_f}). Strategy {active_version} is working.')
+            if best_hour:
+                learnings.append(f'Best hour: {best_hour[0]:02d}:00 (+${float(best_hour[3]):.2f}, entry {float(best_hour[4])*100:.0f}c)')
+            if t_avg_rr and float(t_avg_rr) > 1.5:
+                learnings.append(f'Avg R:R {float(t_avg_rr):.1f}x — excellent trade selection.')
+        elif t_net_f < 0 and t_net_f > -50:
+            verdict = 'neutral'
+            action = 'retain'
+            learnings.append(f'Small loss (${t_net_f}). Within noise range. Retain strategy.')
+        else:
+            verdict = 'regressive'
+            # Check if we should revert or evolve
+            if prev and prev_pnl and float(prev_pnl) > 0:
+                action = 'revert'
+                learnings.append(f'Regressive day (${t_net_f}). Previous strategy {prev_version} was profitable.')
+                learnings.append('Reverting to previous strategy and capturing learnings.')
+            else:
+                action = 'evolve'
+                learnings.append(f'Regressive day (${t_net_f}). No profitable previous strategy to revert to.')
+
+        # === PROPOSE ADJUSTMENT ===
+        adjustment_note = ''
+        new_max_entry = float(max_entry)
+        new_min_rr = float(min_rr)
+        new_min_factors = min_factors
+        new_win_lengths = list(win_lengths)
+        new_stakes = json.loads(stakes) if isinstance(stakes, str) else dict(stakes)
+
+        if action == 'revert' and prev_version:
+            cur.execute("SELECT max_entry, min_rr, min_factors, window_lengths, stakes FROM btc_strategy_versions WHERE version = %s", (prev_version,))
+            prev_strat = cur.fetchone()
+            if prev_strat:
+                new_max_entry, new_min_rr, new_min_factors = float(prev_strat[0]), float(prev_strat[1]), prev_strat[2]
+                new_win_lengths = list(prev_strat[3])
+                new_stakes = json.loads(prev_strat[4]) if isinstance(prev_strat[4], str) else dict(prev_strat[4])
+                adjustment_note = f'Reverted to {prev_version} parameters.'
+        elif verdict == 'progressive':
+            # Small optimization: if avg entry is clustered, widen slightly
+            if t_avg_entry and float(t_avg_entry) < 0.35:
+                adjustment_note = 'Entries clustered low. Strategy is selective — good.'
+            elif worst_hour:
+                wh = worst_hour[0]
+                adjustment_note = f'Consider avoiding hour {wh:02d}:00 (worst P&L: ${float(worst_hour[3]):.2f}).'
+        elif verdict == 'no_data':
+            # Loosen slightly if no trades at all
+            if new_max_entry < 0.55:
+                new_max_entry = min(new_max_entry + 0.05, 0.55)
+                adjustment_note = f'No trades taken. Loosened max entry from {float(max_entry)*100:.0f}c to {new_max_entry*100:.0f}c.'
+            elif new_min_factors > 3:
+                new_min_factors = max(new_min_factors - 1, 3)
+                adjustment_note = f'No trades taken. Relaxed factor agreement from {min_factors}/7 to {new_min_factors}/7.'
+
+        # Create new version
+        version_num = int(active_version.replace('V', '')) + 1
+        new_version = f'V{version_num}'
+
+        # Only create new version if parameters actually changed
+        if (new_max_entry != float(max_entry) or new_min_rr != float(min_rr) or 
+            new_min_factors != min_factors or new_win_lengths != list(win_lengths)):
+            cur.execute("UPDATE btc_strategy_versions SET status = 'superseded', deactivated_at = NOW() WHERE status = 'active'")
+            cur.execute("""
+                INSERT INTO btc_strategy_versions (version, status, max_entry, min_rr, min_factors, window_lengths, stakes, notes)
+                VALUES (%s, 'active', %s, %s, %s, %s, %s, %s)
+            """, (new_version, new_max_entry, new_min_rr, new_min_factors, new_win_lengths,
+                   json.dumps(new_stakes), adjustment_note))
+            next_version = new_version
+        else:
+            next_version = active_version
+
+        # Log today's intelligence
+        cur.execute("""
+            INSERT INTO btc_intelligence_log (date, strategy_version, trades_taken, trades_won,
+                net_pnl, gross_profit, gross_loss, best_trade, avg_entry, avg_rr,
+                best_hour, worst_hour, best_hour_pnl, worst_hour_pnl,
+                volatility_data, verdict, action_taken, next_strategy, learnings)
+            VALUES (CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (date) DO UPDATE SET
+                trades_taken = EXCLUDED.trades_taken, trades_won = EXCLUDED.trades_won,
+                net_pnl = EXCLUDED.net_pnl, gross_profit = EXCLUDED.gross_profit,
+                gross_loss = EXCLUDED.gross_loss, best_trade = EXCLUDED.best_trade,
+                avg_entry = EXCLUDED.avg_entry, avg_rr = EXCLUDED.avg_rr,
+                best_hour = EXCLUDED.best_hour, worst_hour = EXCLUDED.worst_hour,
+                best_hour_pnl = EXCLUDED.best_hour_pnl, worst_hour_pnl = EXCLUDED.worst_hour_pnl,
+                volatility_data = EXCLUDED.volatility_data, verdict = EXCLUDED.verdict,
+                action_taken = EXCLUDED.action_taken, next_strategy = EXCLUDED.next_strategy,
+                learnings = EXCLUDED.learnings
+        """, (
+            active_version, t_total or 0, t_wins or 0,
+            t_net or 0, t_profit or 0, t_loss or 0, t_best or 0,
+            t_avg_entry or 0, t_avg_rr or 0,
+            best_hour[0] if best_hour else None,
+            worst_hour[0] if worst_hour else None,
+            float(best_hour[3]) if best_hour else None,
+            float(worst_hour[3]) if worst_hour else None,
+            json.dumps(vol_data),
+            verdict, action, next_version,
+            '\n'.join(learnings)
+        ))
+        conn.commit()
+        conn.close()
+
+        # === BROADCAST ===
+        verdict_emoji = {'progressive': '\U0001f7e2', 'regressive': '\U0001f534', 'neutral': '\U0001f7e1', 'no_data': '\u26aa'}
+        action_emoji = {'retain': '\u2705', 'revert': '\u21a9\ufe0f', 'evolve': '\U0001f52c'}
+
+        lines = [
+            '\U0001f9e0 BTC INTELLIGENCE LOOP \u2014 Daily Report',
+            f'Date: {datetime.now().strftime("%Y-%m-%d")} IST',
+            f'Strategy: {active_version}',
+            '',
+            '\u2501\u2501\u2501 TODAY\'S PERFORMANCE \u2501\u2501\u2501',
+        ]
+        if t_total and t_total > 0:
+            lines.append(f'Trades: {t_wins}W-{t_total-t_wins}L ({t_wins/t_total*100:.0f}%)')
+            lines.append(f'Net P&L: {"+ " if t_net_f >= 0 else ""}${t_net_f:.2f}')
+            lines.append(f'Gross Profit: +${float(t_profit or 0):.2f}')
+            lines.append(f'Gross Loss: -${float(t_loss or 0):.2f}')
+            lines.append(f'Best Trade: +${float(t_best or 0):.2f}')
+            lines.append(f'Avg Entry: {float(t_avg_entry or 0)*100:.0f}c | Avg R:R: {float(t_avg_rr or 0):.1f}x')
+        else:
+            lines.append('No trades taken today.')
+
+        if hourly:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 HOURLY HEATMAP \u2501\u2501\u2501')
+            for h in hourly:
+                hr, trades, wins, pnl, entry = h
+                e = '\U0001f7e2' if float(pnl) >= 0 else '\U0001f534'
+                lines.append(f'{e} {hr:02d}:00 | {wins}W-{trades-wins}L | {"+ " if float(pnl)>=0 else ""}${pnl} | entry: {float(entry)*100:.0f}c')
+
+        lines.append('')
+        lines.append('\u2501\u2501\u2501 INTELLIGENCE VERDICT \u2501\u2501\u2501')
+        lines.append(f'{verdict_emoji.get(verdict, "")} Verdict: {verdict.upper()}')
+        lines.append(f'{action_emoji.get(action, "")} Action: {action.upper()}')
+        if prev_pnl is not None:
+            lines.append(f'vs Yesterday: {"+ " if prev_pnl >= 0 else ""}${prev_pnl:.2f} ({prev_version})')
+        for l in learnings:
+            lines.append(f'\U0001f4a1 {l}')
+
+        lines.append('')
+        lines.append('\u2501\u2501\u2501 TOMORROW\'S STRATEGY \u2501\u2501\u2501')
+        lines.append(f'Version: {next_version}')
+        lines.append(f'Max Entry: {new_max_entry*100:.0f}c | Min R:R: {new_min_rr:.1f}x')
+        lines.append(f'Factor Agreement: {new_min_factors}/7 | Windows: {"m, ".join(str(w) for w in new_win_lengths)}m')
+        if adjustment_note:
+            lines.append(f'\U0001f527 {adjustment_note}')
+
+        lines.append(f'\nDashboard: weatherbot.1nnercircle.club/btc15m')
+
+        msg = '\n'.join(lines)
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+            except Exception:
+                pass
+        logger.info(f'\U0001f9e0 Intelligence Loop: {verdict} / {action} / next={next_version}')
+    except Exception as e:
+        logger.error(f'\u274c Intelligence Loop failed: {e}\n{traceback.format_exc()}')
+
+
 async def scheduled_btc_daily_strategy_report():
     """Daily strategy analysis at 11:30 PM IST — volatility, hourly performance, adjustments."""
     global _telegram_bot
@@ -1215,6 +1498,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
     scheduler.add_job(scheduled_btc_hourly_summary, 'interval', minutes=60, id='btc_hourly', replace_existing=True)
+    scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
     scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
     
