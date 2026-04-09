@@ -549,6 +549,19 @@ class BTCSignalEngine:
                     prediction = 'SKIP'
                     skip_reason = f'INVALID_PRICE: up={up_p} down={down_p} (degenerate market)'
 
+                # V4 filters: entry 10-50c, price_delta > 0.25, 5M only, factors >= 5
+                if prediction != 'SKIP' and entry_p is not None:
+                    pd = abs(float(factors.get('f_price_delta', 0)))
+                    if entry_p < 0.10:
+                        prediction = 'SKIP'
+                        skip_reason = f'V4: entry {entry_p*100:.1f}c < 10c (too random)'
+                    elif entry_p > 0.50:
+                        prediction = 'SKIP'
+                        skip_reason = f'V4: entry {entry_p*100:.1f}c > 50c (negative ROI zone)'
+                    elif pd < 0.25:
+                        prediction = 'SKIP'
+                        skip_reason = f'V4: price_delta {pd:.3f} < 0.25 (weak signal)'
+
                 if factors.get('volatility_skip'):
                     skip_reason = 'HARD_FILTER: Volatility > 2\u03c3'
                 elif prediction == 'SKIP' and not skip_reason:
