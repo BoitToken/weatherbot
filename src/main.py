@@ -192,7 +192,7 @@ async def check_and_broadcast_signals():
                         'source_count': 22,
                         'start_time': 'TBD'
                     }
-                    await _telegram_bot.broadcast_signal_alert(signal_dict)
+                    pass  # Signal alert broadcast disabled (noise)
                     logger.info(f"📢 Broadcasted signal: {signal_dict['market_title'][:40]}")
     except Exception as e:
         logger.error(f"❌ Signal broadcast failed: {e}")
@@ -613,25 +613,9 @@ async def scheduled_btc_signal_scan():
                 delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
                 potential = (stake / entry_price - stake) * 0.98
                 
-                msg = (
-                    f"🟢 BTC PAPER TRADE OPENED\n\n"
-                    f"₿ BTC/USD {wl}-Minute Window\n"
-                    f"Direction: {pred} ({prob*100:.0f}%)\n"
-                    f"Entry: {entry_price*100:.0f}c | R:R {reward_risk:.1f}x\n"
-                    f"BTC: ${price:,.0f} ({delta_pct:+.2f}% from open)\n"
-                    f"Stake: ${stake} | Win: +${potential:.2f} | Lose: -${stake}\n\n"
-                    f"Strategy V3: R:R>=1x, entry<50c, {agreeing}/7 factors\n"
-                    f"Window: {sig.get('window_id', '?')}"
-                )
-                try:
-                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
-                    for sub in subscribers:
-                        try:
-                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                # Trade opened — log only, NO telegram broadcast
+                # WON/LOST sent on resolution with full analysis
+                logger.info(f"V4 trade: {pred} {wl}M | {entry_price*100:.0f}c | ${stake} | R:R {reward_risk:.1f}x | {agreeing}/7")
 
                 # Track volatility per hour slot
                 try:
