@@ -565,11 +565,13 @@ async def scheduled_btc_signal_scan():
         _last_btc_scan = datetime.utcnow()
 
         # ═══════════════════════════════════════════════════════════
-        # STRATEGY V2 (2026-04-09 12:36 IST)
-        # Rule 1: MAX ENTRY = 70c (never buy shares above 70c)
-        # Rule 2: Scale stake to odds (<30c=$50, 30-50c=$35, 50-70c=$25, >70c=$0)
-        # Rule 3: Skip 15M windows (always 85c+ entries, negative EV)
-        # Rule 4: Ignore confidence for sizing (entry price is king)
+        # STRATEGY V3 (2026-04-09 13:29 IST)
+        # Rule 1: REWARD >= RISK — potential profit must cover loss + fee
+        #         This means entry_price < 50c (reward:risk >= 1:1)
+        # Rule 2: Scale stake aggressively on best odds
+        #         <20c=$75, 20-30c=$50, 30-40c=$35, 40-50c=$25
+        # Rule 3: Skip 15M (always 85c+ entries)
+        # Rule 4: Minimum factor agreement — at least 4/7 factors aligned
         # ═══════════════════════════════════════════════════════════
         if _telegram_bot and results:
             for sig in results:
@@ -591,32 +593,60 @@ async def scheduled_btc_signal_scan():
                 if wl == 15:
                     continue
 
-                # RULE 1: Max entry price 70c
-                if entry_price > 0.70:
+                # RULE 1: Reward must cover risk
+                # Entry must be < 50c for reward:risk >= 1:1
+                if entry_price >= 0.50:
+                    continue
+                if entry_price <= 0 or entry_price >= 1:
                     continue
 
-                # RULE 2: Scale stake based on entry price
-                if entry_price < 0.30:
+                # Calculate reward:risk
+                potential_per_dollar = (1.0 / entry_price - 1.0) * 0.98  # fee-adjusted
+                reward_risk = potential_per_dollar  # ratio per $1 risked
+                if reward_risk < 1.0:
+                    continue  # Hard floor: upside must exceed downside
+
+                # RULE 2: Scale stake — bigger on better odds
+                if entry_price < 0.20:
+                    stake = 75
+                elif entry_price < 0.30:
                     stake = 50
-                elif entry_price < 0.50:
+                elif entry_price < 0.40:
                     stake = 35
-                else:  # 50-70c
+                else:  # 40-50c
                     stake = 25
+
+                # RULE 4: Check factor agreement (from signal factors)
+                factors = sig.get('factors', {})
+                if factors:
+                    # Count how many factors agree with the prediction direction
+                    direction_sign = 1 if pred == 'UP' else -1
+                    factor_vals = [
+                        factors.get('f_price_delta', 0),
+                        factors.get('f_momentum', 0),
+                        factors.get('f_volume_imbalance', 0),
+                        factors.get('f_oracle_lead', 0),
+                        factors.get('f_book_imbalance', 0),
+                        factors.get('f_volatility', 0),
+                        factors.get('f_time_decay', 0),
+                    ]
+                    agreeing = sum(1 for f in factor_vals if f * direction_sign > 0)
+                    if agreeing < 4:  # Need at least 4 of 7 factors aligned
+                        continue
 
                 price = sig.get('btc_price', 0)
                 btc_open = sig.get('btc_open', price)
                 delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
-                potential = (stake / entry_price - stake) * 0.98 if entry_price > 0 else 0
-                payout_ratio = f"{(1/entry_price - 1):.1f}x" if entry_price > 0 else "?"
+                potential = (stake / entry_price - stake) * 0.98
                 
                 msg = (
                     f"🟢 BTC PAPER TRADE OPENED\n\n"
                     f"₿ BTC/USD {wl}-Minute Window\n"
                     f"Direction: {pred} ({prob*100:.0f}%)\n"
-                    f"Entry: {entry_price*100:.0f}c | Payout: {payout_ratio}\n"
+                    f"Entry: {entry_price*100:.0f}c | R:R {reward_risk:.1f}x\n"
                     f"BTC: ${price:,.0f} ({delta_pct:+.2f}% from open)\n"
-                    f"Stake: ${stake} (paper) | Potential: +${potential:.2f}\n\n"
-                    f"Strategy V2: entry<70c, scaled stake\n"
+                    f"Stake: ${stake} | Win: +${potential:.2f} | Lose: -${stake}\n\n"
+                    f"Strategy V3: R:R>=1x, entry<50c, {agreeing}/7 factors\n"
                     f"Window: {sig.get('window_id', '?')}"
                 )
                 try:
