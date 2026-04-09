@@ -1149,6 +1149,110 @@ async def scheduled_btc_intelligence_loop():
         logger.error(f'\u274c Intelligence Loop failed: {e}\n{traceback.format_exc()}')
 
 
+async def scheduled_penny_daily_report():
+    """Daily penny positions report at 9 PM IST — portfolio, timeline, risk."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT question, outcome, buy_price, quantity, size_usd, potential_payout,
+                catalyst_score, days_to_resolution, category, status, resolution, pnl_usd,
+                opened_at AT TIME ZONE 'Asia/Kolkata' as opened
+            FROM penny_positions ORDER BY days_to_resolution ASC
+        """)
+        positions = cur.fetchall()
+
+        # Decrement days_to_resolution daily
+        cur.execute("UPDATE penny_positions SET days_to_resolution = GREATEST(days_to_resolution - 1, 0) WHERE status = 'open'")
+        conn.commit()
+        conn.close()
+
+        open_pos = [p for p in positions if p[9] == 'open']
+        resolved_pos = [p for p in positions if p[9] == 'resolved']
+
+        if not open_pos and not resolved_pos:
+            return
+
+        total_invested = sum(float(p[4]) for p in open_pos)
+        total_upside = sum(float(p[5]) for p in open_pos)
+        avg_entry = sum(float(p[2]) for p in open_pos) / len(open_pos) if open_pos else 0
+        realized_pnl = sum(float(p[11] or 0) for p in resolved_pos)
+
+        lines = [
+            '\U0001f3b0 PENNY POSITIONS \u2014 Daily Report',
+            f'Date: {datetime.now().strftime("%Y-%m-%d %H:%M")} IST',
+            '',
+            '\u2501\u2501\u2501 PORTFOLIO \u2501\u2501\u2501',
+            f'Open: {len(open_pos)} | Resolved: {len(resolved_pos)}',
+            f'Capital at risk: ${total_invested:.2f}',
+            f'Potential payout: ${total_upside:.2f}',
+            f'Avg entry: {avg_entry*100:.1f}\u00a2',
+        ]
+
+        if resolved_pos:
+            won = len([p for p in resolved_pos if p[10] == 'yes'])
+            lines.append(f'Resolved: {won}W-{len(resolved_pos)-won}L | P&L: {"+ " if realized_pnl>=0 else ""}${realized_pnl:.2f}')
+
+        imminent = [p for p in open_pos if p[7] <= 4]
+        mid = [p for p in open_pos if 4 < p[7] <= 21]
+        far = [p for p in open_pos if p[7] > 21]
+
+        if imminent:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \u26a1 RESOLVING SOON (1-4d) \u2501\u2501\u2501')
+            for p in imminent:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | ${p[4]} \u2192 ${float(p[5]):.0f} | +${upside:.0f} | {p[7]}d')
+
+        if mid:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \U0001f4c5 MID-TERM (5-21d) \u2501\u2501\u2501')
+            for p in mid:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | +${upside:.0f} | {p[7]}d | {p[8]}')
+
+        if far:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \U0001f5d3\ufe0f LONG-TERM (22d+) \u2501\u2501\u2501')
+            for p in far:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | +${upside:.0f} | {p[7]}d | {p[8]}')
+
+        lines.append('')
+        lines.append('\u2501\u2501\u2501 RISK SCENARIOS \u2501\u2501\u2501')
+        avg_payout = total_upside / len(open_pos) if open_pos else 0
+        lines.append(f'If 1/{len(open_pos)} hits: +${avg_payout*0.98 - total_invested:.0f}')
+        lines.append(f'If 2 hit: +${2*avg_payout*0.98 - total_invested:.0f}')
+        lines.append(f'If 0 hit: -${total_invested:.2f}')
+
+        msg = '\n'.join(lines)
+        BOT_TOKEN = _telegram_bot.bot_token
+
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+            for sub in subscribers:
+                try:
+                    await client.post(f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
+                        json={'chat_id': sub['chat_id'], 'text': msg})
+                except Exception:
+                    pass
+        logger.info(f'\U0001f3b0 Penny daily report sent to {len(subscribers)} subscribers')
+    except Exception as e:
+        logger.error(f'\u274c Penny daily report failed: {e}\n{traceback.format_exc()}')
+
+
 async def scheduled_btc_daily_strategy_report():
     """Daily strategy analysis at 11:30 PM IST — volatility, hourly performance, adjustments."""
     global _telegram_bot
@@ -1492,10 +1596,11 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
-    scheduler.add_job(scheduled_btc_hourly_summary, 'interval', minutes=60, id='btc_hourly', replace_existing=True)
+    scheduler.add_job(scheduled_btc_hourly_summary, 'cron', minute=0, timezone='Asia/Kolkata', id='btc_hourly', replace_existing=True)
     scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
     scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
-    logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
+    scheduler.add_job(scheduled_penny_daily_report, 'cron', hour=21, minute=0, timezone='Asia/Kolkata', id='penny_daily', replace_existing=True)
+    logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min, hourly: on-the-hour)")
     
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
