@@ -490,25 +490,29 @@ export default function BTCPolymarketEngine() {
           <span style={{ fontFamily: font, fontWeight: 700, fontSize: 14, letterSpacing: 1.5, color: C.white }}>POLYMARKET EDGE ENGINE</span>
           <span style={{ fontSize: 10, color: C.muted, fontFamily: font }}>BTC/USD 5m</span>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        {/* Tabs + stop button — single wrapping row on mobile */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           {["dashboard", "analysis", "strategy", "trades"].map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: tab === t ? "rgba(255,255,255,0.08)" : "transparent",
               border: tab === t ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
-              color: tab === t ? C.white : C.muted, borderRadius: 6, padding: "5px 14px",
-              fontSize: 11, fontFamily: font, cursor: "pointer", textTransform: "uppercase", letterSpacing: 1,
-              minHeight: 44,
+              color: tab === t ? C.white : C.muted, borderRadius: 6,
+              padding: isMobile ? "6px 10px" : "5px 14px",
+              fontSize: isMobile ? 10 : 11, fontFamily: font, cursor: "pointer",
+              textTransform: "uppercase", letterSpacing: 1, minHeight: 36,
             }}>{t}</button>
           ))}
+          <button onClick={() => setRunning(!running)} style={{
+            background: running ? "rgba(255,51,102,0.15)" : "rgba(0,255,135,0.15)",
+            border: `1px solid ${running ? C.loss + "44" : C.win + "44"}`,
+            color: running ? C.loss : C.win, borderRadius: 8,
+            padding: isMobile ? "6px 10px" : "7px 20px",
+            fontFamily: font, fontSize: isMobile ? 10 : 11, fontWeight: 600,
+            cursor: "pointer", letterSpacing: 1, minHeight: 36,
+          }}>
+            {running ? "■ STOP" : "▶ START"}
+          </button>
         </div>
-        <button onClick={() => setRunning(!running)} style={{
-          background: running ? "rgba(255,51,102,0.15)" : "rgba(0,255,135,0.15)",
-          border: `1px solid ${running ? C.loss + "44" : C.win + "44"}`,
-          color: running ? C.loss : C.win, borderRadius: 8, padding: "7px 20px",
-          fontFamily: font, fontSize: 11, fontWeight: 600, cursor: "pointer", letterSpacing: 1, minHeight: 44,
-        }}>
-          {running ? "■ STOP" : "▶ START"} ENGINE
-        </button>
       </div>
 
       <style>{`
@@ -590,10 +594,10 @@ export default function BTCPolymarketEngine() {
               { label: "TRADES", value: realStats ? totalTrades : "—", sub: realStats ? `Today: ${realStats.today_trades}` : "", color: C.accent },
               { label: "BEST TRADE", value: realStats ? `+$${bestTrade.toFixed(2)}` : "—", sub: realStats ? `Spent: $${Number(realStats.total_spent).toFixed(0)}` : "", color: C.win },
             ].map((s, i) => (
-              <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 16px", textAlign: "center" }}>
-                <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1.5, marginBottom: 6 }}>{s.label}</div>
-                <div style={{ fontSize: 22, fontFamily: font, fontWeight: 700, color: s.color }}>{s.value}</div>
-                {s.sub && <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 4 }}>{s.sub}</div>}
+              <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center", minWidth: 0, overflow: "hidden" }}>
+                <div style={{ fontSize: isMobile ? 8 : 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.label}</div>
+                <div style={{ fontSize: isMobile ? 16 : 22, fontFamily: font, fontWeight: 700, color: s.color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.value}</div>
+                {s.sub && <div style={{ fontSize: isMobile ? 9 : 10, color: C.muted, fontFamily: font, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.sub}</div>}
               </div>
             ))}
           </div>
