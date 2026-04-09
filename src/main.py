@@ -686,11 +686,42 @@ async def scheduled_btc_signal_scan():
         logger.error(f"❌ BTC signal scan failed: {e}\n{traceback.format_exc()}")
 
 
-_pinned_hourly_msg_ids = {}  # chat_id -> message_id for pin management
+_pinned_msg_ids = {  # chat_id -> message_id per report type for pin management
+    'hourly': {},
+    'penny': {},
+    'intelligence': {},
+    'daily': {},
+}
+
+async def _send_and_pin(bot_token, subscribers, msg, report_type):
+    """Send message to all subscribers, pin it, unpin previous of same type."""
+    global _pinned_msg_ids
+    import httpx
+    async with httpx.AsyncClient(timeout=15) as client:
+        for sub in subscribers:
+            chat_id = sub['chat_id'] if isinstance(sub, dict) else sub
+            try:
+                # Unpin previous of same type
+                old_id = _pinned_msg_ids[report_type].get(chat_id)
+                if old_id:
+                    await client.post(f"https://api.telegram.org/bot{bot_token}/unpinChatMessage",
+                        json={"chat_id": chat_id, "message_id": old_id})
+                # Send
+                resp = await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg})
+                result = resp.json()
+                if result.get('ok'):
+                    new_id = result['result']['message_id']
+                    # Pin
+                    await client.post(f"https://api.telegram.org/bot{bot_token}/pinChatMessage",
+                        json={"chat_id": chat_id, "message_id": new_id, "disable_notification": True})
+                    _pinned_msg_ids[report_type][chat_id] = new_id
+            except Exception as e:
+                logger.error(f"\u274c {report_type} send/pin failed for {chat_id}: {e}")
 
 async def scheduled_btc_hourly_summary():
     """Send hourly performance summary with financials to Telegram. Pins the message."""
-    global _telegram_bot, _pinned_hourly_msg_ids
+    global _telegram_bot, _pinned_msg_ids
     if not _telegram_bot:
         logger.warning("\u26a0\ufe0f BTC hourly: _telegram_bot is None, skipping")
         return
@@ -836,34 +867,8 @@ async def scheduled_btc_hourly_summary():
         lines.append(f"Dashboard: weatherbot.1nnercircle.club/btc15m")
 
         msg = "\n".join(lines)
-        BOT_TOKEN = _telegram_bot.bot_token
-
-        # Send to all subscribers, pin the message, unpin old one
-        import httpx
-        async with httpx.AsyncClient(timeout=15) as client:
-            subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
-            for sub in subscribers:
-                chat_id = sub['chat_id']
-                try:
-                    # Unpin previous hourly message
-                    old_msg_id = _pinned_hourly_msg_ids.get(chat_id)
-                    if old_msg_id:
-                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
-                            json={"chat_id": chat_id, "message_id": old_msg_id})
-
-                    # Send new message
-                    resp = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": msg})
-                    result = resp.json()
-                    if result.get('ok'):
-                        new_msg_id = result['result']['message_id']
-                        # Pin it
-                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
-                            json={"chat_id": chat_id, "message_id": new_msg_id, "disable_notification": True})
-                        _pinned_hourly_msg_ids[chat_id] = new_msg_id
-                except Exception as e:
-                    logger.error(f"\u274c Hourly send/pin failed for {chat_id}: {e}")
-
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        await _send_and_pin(_telegram_bot.bot_token, subscribers, msg, 'hourly')
         logger.info(f"\U0001f4ca BTC hourly summary sent + pinned to {len(subscribers)} subscribers")
     except Exception as e:
         logger.error(f"\u274c BTC hourly summary failed: {e}\n{traceback.format_exc()}")
@@ -1179,11 +1184,7 @@ async def scheduled_btc_intelligence_loop():
 
         msg = '\n'.join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
-        for sub in subscribers:
-            try:
-                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-            except Exception:
-                pass
+        await _send_and_pin(_telegram_bot.bot_token, subscribers, msg, 'intelligence')
         logger.info(f'\U0001f9e0 Intelligence Loop: {verdict} / {action} / next={next_version}')
     except Exception as e:
         logger.error(f'\u274c Intelligence Loop failed: {e}\n{traceback.format_exc()}')
@@ -1277,18 +1278,9 @@ async def scheduled_penny_daily_report():
         lines.append(f'If 0 hit: -${total_invested:.2f}')
 
         msg = '\n'.join(lines)
-        BOT_TOKEN = _telegram_bot.bot_token
-
-        import httpx
-        async with httpx.AsyncClient(timeout=15) as client:
-            subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
-            for sub in subscribers:
-                try:
-                    await client.post(f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
-                        json={'chat_id': sub['chat_id'], 'text': msg})
-                except Exception:
-                    pass
-        logger.info(f'\U0001f3b0 Penny daily report sent to {len(subscribers)} subscribers')
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        await _send_and_pin(_telegram_bot.bot_token, subscribers, msg, 'penny')
+        logger.info(f'\U0001f3b0 Penny daily report sent + pinned to {len(subscribers)} subscribers')
     except Exception as e:
         logger.error(f'\u274c Penny daily report failed: {e}\n{traceback.format_exc()}')
 
@@ -1432,12 +1424,8 @@ async def scheduled_btc_daily_strategy_report():
 
         msg = "\n".join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
-        for sub in subscribers:
-            try:
-                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-            except Exception:
-                pass
-        logger.info(f"\U0001f4ca BTC daily strategy report sent")
+        await _send_and_pin(_telegram_bot.bot_token, subscribers, msg, 'daily')
+        logger.info(f"\U0001f4ca BTC daily strategy report sent + pinned")
     except Exception as e:
         logger.error(f"\u274c BTC daily strategy report failed: {e}")
 
