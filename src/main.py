@@ -3412,6 +3412,231 @@ async def get_btc_calibration(limit: int = 30):
 # ═══════════════════════════════════════════════════════════════
 
 
+@app.get("/api/btc/analysis")
+async def get_btc_analysis(hours: int = 1):
+    """Analysis data for dashboard with timeframe toggle (1h, 4h, 8h, 24h, 72h, 168h)."""
+    try:
+        pool = get_async_pool()
+        interval = f"{hours} hours"
+        async with pool.acquire() as conn:
+            # Entry price bucket performance
+            buckets = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl,
+                        CASE 
+                            WHEN entry_price < 0.3 THEN '<30c'
+                            WHEN entry_price < 0.5 THEN '30-50c'
+                            WHEN entry_price < 0.7 THEN '50-70c'
+                            WHEN entry_price < 0.85 THEN '70-85c'
+                            ELSE '85c+'
+                        END as bucket
+                    FROM best
+                )
+                SELECT bucket, COUNT(*) as trades, 
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(AVG(CASE WHEN correct THEN trade_pnl END)::numeric, 2) as avg_win,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
+                FROM pnl GROUP BY bucket ORDER BY bucket
+            """)
+
+            # Hourly heatmap
+            hourly = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl
+                    FROM best
+                )
+                SELECT 
+                    EXTRACT(HOUR FROM close_time AT TIME ZONE 'Asia/Kolkata')::int as hour_ist,
+                    COUNT(*) as trades,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(AVG(entry_price)::numeric, 3) as avg_entry,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
+                FROM pnl GROUP BY 1 ORDER BY 1
+            """)
+
+            # Cumulative P&L over time (for chart)
+            cumulative = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl
+                    FROM best
+                )
+                SELECT close_time, trade_pnl, correct, entry_price,
+                    SUM(trade_pnl) OVER (ORDER BY close_time) as running_pnl
+                FROM pnl ORDER BY close_time
+            """)
+
+            # Confidence vs P&L
+            confidence = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, s.confidence, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl,
+                        CASE 
+                            WHEN confidence < 0.4 THEN 'Low <40%'
+                            WHEN confidence < 0.6 THEN 'Med 40-60%'
+                            WHEN confidence < 0.8 THEN 'High 60-80%'
+                            ELSE 'Ultra 80%+'
+                        END as conf_tier
+                    FROM best
+                )
+                SELECT conf_tier, COUNT(*) as trades, 
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(AVG(entry_price)::numeric, 3) as avg_entry
+                FROM pnl GROUP BY conf_tier ORDER BY conf_tier
+            """)
+
+            # Timeframe comparison
+            timeframes = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl
+                    FROM best
+                )
+                SELECT window_length||'m' as wl,
+                    COUNT(*) as trades,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(AVG(entry_price)::numeric, 3) as avg_entry,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade
+                FROM pnl GROUP BY window_length ORDER BY window_length
+            """)
+
+            # V2 filter comparison
+            v2_compare = await conn.fetch(f"""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time,
+                        (s.prediction = w.resolution) as correct,
+                        CASE WHEN s.prediction = 'UP' THEN w.up_price ELSE w.down_price END as entry_price
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                        AND w.close_time > NOW() - INTERVAL '{interval}'
+                    ORDER BY s.window_id, s.confidence DESC
+                ),
+                pnl AS (
+                    SELECT *,
+                        CASE
+                            WHEN correct AND entry_price > 0 AND entry_price < 1 THEN (25.0/entry_price - 25.0)*0.98
+                            WHEN NOT correct THEN -25.0 ELSE 0
+                        END as trade_pnl
+                    FROM best
+                )
+                SELECT 
+                    'All Trades' as strategy,
+                    COUNT(*) as trades,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best
+                FROM pnl
+                UNION ALL
+                SELECT 
+                    'V2 (<70c, 5M)' as strategy,
+                    COUNT(*) as trades,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best
+                FROM pnl WHERE entry_price <= 0.70 AND window_length = 5
+            """)
+
+        def row_to_dict(r, keys):
+            return {k: (float(v) if isinstance(v, (int, float)) or (hasattr(v, '__float__')) else v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in zip(keys, r) if v is not None}
+
+        return {
+            "timeframe_hours": hours,
+            "buckets": [{"bucket": r['bucket'], "trades": r['trades'], "wins": r['wins'], "net_pnl": float(r['net_pnl'] or 0), "avg_win": float(r['avg_win'] or 0), "best_trade": float(r['best_trade'] or 0)} for r in buckets],
+            "hourly": [{"hour": r['hour_ist'], "trades": r['trades'], "wins": r['wins'], "net_pnl": float(r['net_pnl'] or 0), "avg_entry": float(r['avg_entry'] or 0), "best_trade": float(r['best_trade'] or 0)} for r in hourly],
+            "cumulative": [{"time": r['close_time'].isoformat(), "pnl": float(r['trade_pnl'] or 0), "running": float(r['running_pnl'] or 0), "correct": r['correct'], "entry": float(r['entry_price'] or 0)} for r in cumulative],
+            "confidence": [{"tier": r['conf_tier'], "trades": r['trades'], "wins": r['wins'], "net_pnl": float(r['net_pnl'] or 0), "avg_entry": float(r['avg_entry'] or 0)} for r in confidence],
+            "timeframes": [{"wl": r['wl'], "trades": r['trades'], "wins": r['wins'], "net_pnl": float(r['net_pnl'] or 0), "avg_entry": float(r['avg_entry'] or 0), "best_trade": float(r['best_trade'] or 0)} for r in timeframes],
+            "v2_compare": [{"strategy": r['strategy'], "trades": r['trades'], "wins": r['wins'], "net_pnl": float(r['net_pnl'] or 0), "best": float(r['best'] or 0)} for r in v2_compare],
+        }
+    except Exception as e:
+        logger.error(f"BTC analysis error: {e}\n{traceback.format_exc()}")
+        return {"error": str(e)}
+
+
 @app.get("/api/btc/performance")
 async def get_btc_performance():
     """Full performance summary — deduplicated best signal per window."""

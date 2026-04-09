@@ -342,7 +342,7 @@ export default function BTCPolymarketEngine() {
           <span style={{ fontSize: 10, color: "#4a5068", fontFamily: font }}>BTC/USD 5m</span>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          {["dashboard", "strategy", "trades"].map((t) => (
+          {["dashboard", "analysis", "strategy", "trades"].map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: tab === t ? "rgba(255,255,255,0.08)" : "transparent",
               border: tab === t ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
@@ -699,6 +699,256 @@ export default function BTCPolymarketEngine() {
           </div>
         </div>
       )}
+
+      {/* ═══ ANALYSIS TAB ═══ */}
+      {tab === "analysis" && <AnalysisPanel font={font} fontSans={fontSans} isMobile={isMobile} />}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════ */
+/* Analysis Panel Component                                        */
+/* ═══════════════════════════════════════════════════════════════ */
+function AnalysisPanel({ font, fontSans, isMobile }) {
+  const [tf, setTf] = useState("1h");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const TF_MAP = { "1h": 1, "4h": 4, "8h": 8, "1d": 24, "3d": 72, "1w": 168 };
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/btc/analysis?hours=${TF_MAP[tf]}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [tf]);
+
+  // Auto-refresh every 30s
+  useEffect(() => {
+    const iv = setInterval(() => {
+      fetch(`/api/btc/analysis?hours=${TF_MAP[tf]}`)
+        .then(r => r.json()).then(d => setData(d)).catch(() => {});
+    }, 30000);
+    return () => clearInterval(iv);
+  }, [tf]);
+
+  const card = { background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: isMobile ? 12 : 18 };
+  const headStyle = { fontSize: 10, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 12, textTransform: "uppercase" };
+
+  // P&L line chart
+  const PnlChart = ({ cumulative }) => {
+    if (!cumulative || cumulative.length < 2) return <div style={{ color: '#4a5068', fontSize: 11, fontFamily: font }}>Not enough data</div>;
+    const w = isMobile ? 320 : 500, h = 120, pad = 30;
+    const vals = cumulative.map(c => c.running);
+    const mn = Math.min(...vals, 0), mx = Math.max(...vals, 0);
+    const range = mx - mn || 1;
+    const toY = v => pad + ((mx - v) / range) * (h - pad * 2);
+    const toX = (i) => pad + (i / (cumulative.length - 1)) * (w - pad * 2);
+    const pts = cumulative.map((c, i) => `${toX(i)},${toY(c.running)}`).join(" ");
+    const zeroY = toY(0);
+    const lastVal = vals[vals.length - 1];
+    const lastColor = lastVal >= 0 ? "#00ff87" : "#ff3366";
+    return (
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <line x1={pad} y1={zeroY} x2={w-pad} y2={zeroY} stroke="rgba(255,255,255,0.1)" strokeDasharray="4,3" />
+        <text x={pad-4} y={zeroY+3} fill="#4a5068" fontSize={8} fontFamily={font} textAnchor="end">$0</text>
+        <text x={pad-4} y={pad+3} fill="#4a5068" fontSize={8} fontFamily={font} textAnchor="end">${mx >= 0 ? '+' : ''}${mx.toFixed(0)}</text>
+        <text x={pad-4} y={h-pad+3} fill="#4a5068" fontSize={8} fontFamily={font} textAnchor="end">${mn.toFixed(0)}</text>
+        {/* Fill under line */}
+        <polygon points={`${toX(0)},${zeroY} ${pts} ${toX(cumulative.length-1)},${zeroY}`} fill={lastVal >= 0 ? "rgba(0,255,135,0.08)" : "rgba(255,51,102,0.08)"} />
+        <polyline points={pts} fill="none" stroke={lastColor} strokeWidth={1.5} />
+        {/* Dots for wins/losses */}
+        {cumulative.map((c, i) => (
+          <circle key={i} cx={toX(i)} cy={toY(c.running)} r={2} fill={c.correct ? "#00ff87" : "#ff3366"} opacity={0.7} />
+        ))}
+        {/* End label */}
+        <rect x={w-pad-40} y={toY(lastVal)-8} width={38} height={16} rx={4} fill={lastColor} opacity={0.9} />
+        <text x={w-pad-21} y={toY(lastVal)+4} fill="#000" fontSize={9} fontFamily={font} textAnchor="middle" fontWeight="700">
+          {lastVal >= 0 ? '+' : ''}${lastVal.toFixed(0)}
+        </text>
+      </svg>
+    );
+  };
+
+  // Bar chart for buckets/hourly
+  const BarChart = ({ items, labelKey, valueKey, colorFn }) => {
+    if (!items || items.length === 0) return null;
+    const maxAbs = Math.max(...items.map(i => Math.abs(i[valueKey] || 0)), 1);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {items.map((item, i) => {
+          const val = item[valueKey] || 0;
+          const pct = Math.abs(val) / maxAbs * 100;
+          const color = colorFn ? colorFn(item) : (val >= 0 ? '#00ff87' : '#ff3366');
+          return (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 55, fontSize: 10, fontFamily: font, color: '#8a8fa8', textAlign: 'right', flexShrink: 0 }}>{item[labelKey]}</div>
+              <div style={{ flex: 1, height: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 3, overflow: 'hidden', position: 'relative' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: color, opacity: 0.7, borderRadius: 3, transition: 'width 0.5s' }} />
+                <span style={{ position: 'absolute', right: 6, top: 2, fontSize: 9, fontFamily: font, color: '#fff', fontWeight: 600 }}>
+                  {val >= 0 ? '+' : ''}${val.toFixed(0)}
+                </span>
+              </div>
+              <div style={{ width: 55, fontSize: 9, fontFamily: font, color: '#8a8fa8', flexShrink: 0 }}>
+                {item.wins}/{item.trades} ({item.trades > 0 ? (item.wins/item.trades*100).toFixed(0) : 0}%)
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  if (loading && !data) return (
+    <div style={{ padding: 40, textAlign: 'center', color: '#4a5068', fontFamily: font }}>
+      Loading analysis...
+    </div>
+  );
+
+  if (!data || data.error) return (
+    <div style={{ padding: 40, textAlign: 'center', color: '#ff3366', fontFamily: font }}>
+      Error loading analysis: {data?.error || 'No data'}
+    </div>
+  );
+
+  // Totals from v2_compare
+  const allTrades = data.v2_compare?.find(v => v.strategy === 'All Trades');
+  const v2Trades = data.v2_compare?.find(v => v.strategy === 'V2 (<70c, 5M)');
+
+  return (
+    <div style={{ padding: isMobile ? '12px' : '20px 24px' }}>
+      {/* Timeframe Toggle */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {Object.keys(TF_MAP).map(t => (
+          <button key={t} onClick={() => setTf(t)} style={{
+            background: tf === t ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.03)',
+            border: tf === t ? '1px solid rgba(99,102,241,0.4)' : '1px solid rgba(255,255,255,0.06)',
+            color: tf === t ? '#6366f1' : '#4a5068',
+            borderRadius: 8, padding: '7px 16px', fontSize: 12, fontFamily: font,
+            fontWeight: tf === t ? 700 : 400, cursor: 'pointer', letterSpacing: 0.5,
+            transition: 'all 0.2s',
+          }}>
+            {t.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {/* KPI Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12, marginBottom: 16 }}>
+        <div style={{ ...card, borderLeft: `3px solid ${(allTrades?.net_pnl || 0) >= 0 ? '#00ff87' : '#ff3366'}` }}>
+          <div style={headStyle}>NET P&L</div>
+          <div style={{ fontSize: isMobile ? 20 : 28, fontFamily: font, fontWeight: 700, color: (allTrades?.net_pnl || 0) >= 0 ? '#00ff87' : '#ff3366' }}>
+            {(allTrades?.net_pnl || 0) >= 0 ? '+' : ''}${(allTrades?.net_pnl || 0).toFixed(2)}
+          </div>
+          <div style={{ fontSize: 10, color: '#4a5068', fontFamily: font, marginTop: 4 }}>Fee-adjusted (2% PM fee)</div>
+        </div>
+        <div style={{ ...card, borderLeft: '3px solid #6366f1' }}>
+          <div style={headStyle}>WIN RATE</div>
+          <div style={{ fontSize: isMobile ? 20 : 28, fontFamily: font, fontWeight: 700, color: '#fff' }}>
+            {allTrades?.trades > 0 ? (allTrades.wins/allTrades.trades*100).toFixed(1) : '—'}%
+          </div>
+          <div style={{ fontSize: 10, color: '#4a5068', fontFamily: font, marginTop: 4 }}>{allTrades?.wins || 0}W-{(allTrades?.trades || 0)-(allTrades?.wins || 0)}L</div>
+        </div>
+        <div style={{ ...card, borderLeft: '3px solid #F7931A' }}>
+          <div style={headStyle}>BEST TRADE</div>
+          <div style={{ fontSize: isMobile ? 20 : 28, fontFamily: font, fontWeight: 700, color: '#00ff87' }}>
+            +${(allTrades?.best || 0).toFixed(2)}
+          </div>
+          <div style={{ fontSize: 10, color: '#4a5068', fontFamily: font, marginTop: 4 }}>Single trade max</div>
+        </div>
+        <div style={{ ...card, borderLeft: '3px solid #00ff87' }}>
+          <div style={headStyle}>V2 STRATEGY</div>
+          <div style={{ fontSize: isMobile ? 20 : 28, fontFamily: font, fontWeight: 700, color: v2Trades?.trades > 0 ? ((v2Trades?.net_pnl || 0) >= 0 ? '#00ff87' : '#ff3366') : '#4a5068' }}>
+            {v2Trades?.trades > 0 ? `${(v2Trades?.net_pnl || 0) >= 0 ? '+' : ''}$${(v2Trades?.net_pnl || 0).toFixed(0)}` : 'N/A'}
+          </div>
+          <div style={{ fontSize: 10, color: '#4a5068', fontFamily: font, marginTop: 4 }}>
+            {v2Trades?.trades > 0 ? `${v2Trades.wins}W-${v2Trades.trades-v2Trades.wins}L (<70c, 5M)` : 'Entry <70c, 5M only'}
+          </div>
+        </div>
+      </div>
+
+      {/* Cumulative P&L Chart */}
+      <div style={{ ...card, marginBottom: 16 }}>
+        <div style={headStyle}>CUMULATIVE P&L</div>
+        <PnlChart cumulative={data.cumulative} />
+        <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
+          <span style={{ fontSize: 9, fontFamily: font, color: '#00ff87' }}>● Win</span>
+          <span style={{ fontSize: 9, fontFamily: font, color: '#ff3366' }}>● Loss</span>
+          <span style={{ fontSize: 9, fontFamily: font, color: '#4a5068' }}>Trades: {data.cumulative?.length || 0}</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? 10 : 16 }}>
+        {/* Entry Price Buckets */}
+        <div style={card}>
+          <div style={headStyle}>P&L BY ENTRY PRICE</div>
+          <BarChart items={data.buckets} labelKey="bucket" valueKey="net_pnl" />
+          <div style={{ marginTop: 10, padding: '8px 10px', background: 'rgba(0,255,135,0.05)', borderRadius: 6, border: '1px solid rgba(0,255,135,0.1)' }}>
+            <div style={{ fontSize: 9, fontFamily: font, color: '#00ff87', letterSpacing: 1 }}>V2 ZONE: ENTRY &lt; 70c</div>
+            <div style={{ fontSize: 10, fontFamily: font, color: '#8a8fa8', marginTop: 2 }}>Only take trades in top 3 buckets</div>
+          </div>
+        </div>
+
+        {/* Hourly Heatmap */}
+        <div style={card}>
+          <div style={headStyle}>HOURLY P&L HEATMAP</div>
+          <BarChart items={data.hourly?.map(h => ({ ...h, label: `${h.hour.toString().padStart(2,'0')}:00` }))} labelKey="label" valueKey="net_pnl" />
+        </div>
+
+        {/* Confidence Tiers */}
+        <div style={card}>
+          <div style={headStyle}>CONFIDENCE vs P&L</div>
+          <BarChart items={data.confidence} labelKey="tier" valueKey="net_pnl"
+            colorFn={(item) => {
+              const entry = item.avg_entry || 0;
+              return entry < 0.5 ? '#00ff87' : entry < 0.7 ? '#ffaa00' : '#ff3366';
+            }}
+          />
+          <div style={{ marginTop: 10, padding: '8px 10px', background: 'rgba(255,51,102,0.05)', borderRadius: 6, border: '1px solid rgba(255,51,102,0.1)' }}>
+            <div style={{ fontSize: 9, fontFamily: font, color: '#ff3366', letterSpacing: 1 }}>⚠️ CONFIDENCE TRAP</div>
+            <div style={{ fontSize: 10, fontFamily: font, color: '#8a8fa8', marginTop: 2 }}>High confidence ≠ high profit. Avg entry matters more.</div>
+          </div>
+        </div>
+
+        {/* Timeframe Comparison */}
+        <div style={card}>
+          <div style={headStyle}>5M vs 15M</div>
+          {data.timeframes?.map((tf, i) => {
+            const winPct = tf.trades > 0 ? (tf.wins/tf.trades*100).toFixed(0) : 0;
+            const pnlColor = tf.net_pnl >= 0 ? '#00ff87' : '#ff3366';
+            return (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <div>
+                  <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: '#fff' }}>{tf.wl}</div>
+                  <div style={{ fontSize: 10, fontFamily: font, color: '#4a5068' }}>{tf.wins}W-{tf.trades-tf.wins}L ({winPct}%)</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 18, fontFamily: font, fontWeight: 700, color: pnlColor }}>
+                    {tf.net_pnl >= 0 ? '+' : ''}${tf.net_pnl.toFixed(0)}
+                  </div>
+                  <div style={{ fontSize: 10, fontFamily: font, color: '#4a5068' }}>Entry: {(tf.avg_entry*100).toFixed(0)}c</div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* V1 vs V2 comparison */}
+          {data.v2_compare && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ ...headStyle, marginBottom: 8 }}>STRATEGY COMPARISON</div>
+              {data.v2_compare.map((v, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                  <div style={{ fontSize: 11, fontFamily: font, color: v.strategy.includes('V2') ? '#00ff87' : '#8a8fa8' }}>{v.strategy}</div>
+                  <div style={{ fontSize: 11, fontFamily: font, fontWeight: 600, color: v.net_pnl >= 0 ? '#00ff87' : '#ff3366' }}>
+                    {v.wins}W-{v.trades-v.wins}L | {v.net_pnl >= 0 ? '+' : ''}${v.net_pnl.toFixed(0)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
