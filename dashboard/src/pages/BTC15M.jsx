@@ -475,7 +475,33 @@ export default function BTCPolymarketEngine() {
             ))}
           </div>
 
-          {/* Signal Confluence panel removed — simulated indicators, not useful for real trading */}
+          {/* Signal Panel */}
+          <div style={{
+            background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)",
+            borderRadius: 12, padding: isMobile ? 12 : 18, gridRow: isMobile ? "auto" : "span 2",
+          }}>
+            <div style={{ fontSize: 10, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 14 }}>
+              SIGNAL CONFLUENCE — {signals.filter((s) => (prediction?.direction === "UP" ? s.value > 0 : s.value < 0)).length}/{signals.length} AGREEING
+            </div>
+            {signals.map((s) => <SignalBar key={s.id} signal={s} />)}
+            <div style={{ marginTop: 14, padding: "10px 12px", background: "rgba(255,255,255,0.03)", borderRadius: 8 }}>
+              <div style={{ fontSize: 9, color: "#4a5068", fontFamily: font, letterSpacing: 1.5, marginBottom: 6 }}>WEIGHTED COMPOSITE</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 4, position: "relative", overflow: "hidden" }}>
+                  <div style={{
+                    position: "absolute", left: "50%", top: 0, height: "100%", borderRadius: 4,
+                    width: `${Math.abs((prediction?.totalScore || 0) * 200)}%`,
+                    marginLeft: (prediction?.totalScore || 0) >= 0 ? 0 : `${(prediction?.totalScore || 0) * 200}%`,
+                    background: (prediction?.totalScore || 0) > 0 ? "linear-gradient(90deg, #00ff8766, #00ff87)" : "linear-gradient(270deg, #ff336666, #ff3366)",
+                    transition: "all 0.5s",
+                  }} />
+                </div>
+                <span style={{ fontFamily: font, fontSize: 13, fontWeight: 700, color: (prediction?.totalScore || 0) > 0 ? "#00ff87" : "#ff3366" }}>
+                  {((prediction?.totalScore || 0) * 100).toFixed(1)}
+                </span>
+              </div>
+            </div>
+          </div>
 
           {/* Prediction + Market */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
