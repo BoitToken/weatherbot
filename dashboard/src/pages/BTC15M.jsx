@@ -74,22 +74,53 @@ const SignalBar = ({ signal }) => {
   );
 };
 
-const MiniChart = ({ candles }) => {
+const MiniChart = ({ candles, targetPrice, windowOpen }) => {
   if (candles.length < 2) return null;
-  const w = 320, h = 100, pad = 2;
+  const w = 320, h = 120, pad = 2;
   const prices = candles.flatMap((c) => [c.high, c.low]);
+  // Include target and window open in price range so lines are always visible
+  if (targetPrice) prices.push(targetPrice);
+  if (windowOpen) prices.push(windowOpen);
   const min = Math.min(...prices), max = Math.max(...prices);
   const range = max - min || 1;
   const barW = Math.max(2, (w - pad * 2) / candles.length - 1);
 
+  // Y position helper
+  const priceToY = (p) => pad + ((max - p) / range) * (h - pad * 2);
+
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+      {/* Window open price line (dashed white) */}
+      {windowOpen > 0 && (
+        <g>
+          <line x1={0} y1={priceToY(windowOpen)} x2={w} y2={priceToY(windowOpen)}
+            stroke="#ffffff" strokeWidth={0.8} strokeDasharray="4,3" opacity={0.25} />
+          <text x={w - 2} y={priceToY(windowOpen) - 3} fill="#ffffff" opacity={0.4}
+            fontSize={7} fontFamily="JetBrains Mono" textAnchor="end">OPEN</text>
+        </g>
+      )}
+
+      {/* Polymarket target line (bright, solid) */}
+      {targetPrice > 0 && (
+        <g>
+          <line x1={0} y1={priceToY(targetPrice)} x2={w} y2={priceToY(targetPrice)}
+            stroke="#6366f1" strokeWidth={1.2} opacity={0.8} />
+          <rect x={w - 52} y={priceToY(targetPrice) - 8} width={50} height={14} rx={3}
+            fill="#6366f1" opacity={0.9} />
+          <text x={w - 27} y={priceToY(targetPrice) + 3} fill="#fff"
+            fontSize={8} fontFamily="JetBrains Mono" textAnchor="middle" fontWeight="600">
+            PM ${targetPrice.toFixed(0)}
+          </text>
+        </g>
+      )}
+
+      {/* Candlesticks */}
       {candles.map((c, i) => {
         const x = pad + i * ((w - pad * 2) / candles.length);
-        const yH = pad + ((max - c.high) / range) * (h - pad * 2);
-        const yL = pad + ((max - c.low) / range) * (h - pad * 2);
-        const yO = pad + ((max - c.open) / range) * (h - pad * 2);
-        const yC = pad + ((max - c.close) / range) * (h - pad * 2);
+        const yH = priceToY(c.high);
+        const yL = priceToY(c.low);
+        const yO = priceToY(c.open);
+        const yC = priceToY(c.close);
         const bull = c.close >= c.open;
         const col = bull ? "#00ff87" : "#ff3366";
         return (
@@ -99,6 +130,18 @@ const MiniChart = ({ candles }) => {
           </g>
         );
       })}
+
+      {/* Current price label on right edge */}
+      {candles.length > 0 && (
+        <g>
+          <rect x={w - 58} y={priceToY(candles[candles.length-1].close) - 8} width={56} height={14} rx={3}
+            fill={candles[candles.length-1].close >= (windowOpen || candles[0].open) ? "#00ff87" : "#ff3366"} opacity={0.9} />
+          <text x={w - 30} y={priceToY(candles[candles.length-1].close) + 3} fill="#000"
+            fontSize={8} fontFamily="JetBrains Mono" textAnchor="middle" fontWeight="700">
+            ${candles[candles.length-1].close.toFixed(0)}
+          </text>
+        </g>
+      )}
     </svg>
   );
 };
@@ -536,7 +579,10 @@ export default function BTCPolymarketEngine() {
               ${btcPrice ? Number(btcPrice).toLocaleString() : (candles.length > 0 ? candles[candles.length - 1].close.toFixed(2) : "—")}
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <MiniChart candles={candles} />
+              <MiniChart candles={candles}
+                targetPrice={btcPrice || (candles.length > 0 ? candles[candles.length-1].close : 0)}
+                windowOpen={activeWindow ? (candles.length > 20 ? candles[candles.length - 20].open : candles[0]?.open || 0) : (candles[0]?.open || 0)}
+              />
             </div>
 
             {/* Recent trades mini */}
