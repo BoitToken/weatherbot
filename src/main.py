@@ -4041,6 +4041,81 @@ async def get_btc_analysis(hours: int = 1):
         return {"error": str(e)}
 
 
+@app.get("/api/btc/stats")
+async def get_btc_stats():
+    """Real-time stats using correct btc_pnl view."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as total_trades,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    COUNT(*) FILTER (WHERE NOT correct) as losses,
+                    ROUND(COUNT(*) FILTER (WHERE correct)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as win_rate,
+                    ROUND(SUM(trade_pnl)::numeric, 2) as net_pnl,
+                    ROUND(SUM(CASE WHEN trade_pnl > 0 THEN trade_pnl ELSE 0 END)::numeric, 2) as gross_profit,
+                    ROUND(SUM(CASE WHEN trade_pnl < 0 THEN ABS(trade_pnl) ELSE 0 END)::numeric, 2) as gross_loss,
+                    ROUND(SUM(stake)::numeric, 2) as total_spent,
+                    ROUND(MAX(trade_pnl)::numeric, 2) as best_trade,
+                    ROUND(SUM(CASE WHEN close_time::date = CURRENT_DATE THEN trade_pnl ELSE 0 END)::numeric, 2) as today_pnl,
+                    COUNT(*) FILTER (WHERE close_time::date = CURRENT_DATE) as today_trades
+                FROM btc_pnl
+            """)
+            return dict(row) if row else {"total_trades": 0}
+    except Exception as e:
+        logger.error(f"BTC stats error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/btc/trades-detail")
+async def get_btc_trades_detail():
+    """Last 50 resolved trades with all signal factors for drill-down."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT
+                    p.window_id, p.window_length, p.prediction, p.resolution, p.correct,
+                    p.entry_price, p.stake, ROUND(p.trade_pnl::numeric, 2) as trade_pnl,
+                    ROUND((p.trade_pnl / NULLIF(p.stake, 0) * 100)::numeric, 0) as roi_pct,
+                    w.btc_open, w.btc_close,
+                    ROUND((w.btc_close - w.btc_open)::numeric, 2) as btc_move,
+                    p.close_time,
+                    s.prob_up, s.confidence,
+                    s.f_price_delta, s.f_momentum, s.f_volume_imbalance,
+                    s.f_oracle_lead, s.f_book_imbalance, s.f_volatility, s.f_time_decay,
+                    (CASE WHEN (p.prediction='DOWN' AND s.f_price_delta < 0) OR (p.prediction='UP' AND s.f_price_delta > 0) THEN 1 ELSE 0 END +
+                     CASE WHEN (p.prediction='DOWN' AND s.f_momentum < 0) OR (p.prediction='UP' AND s.f_momentum > 0) THEN 1 ELSE 0 END +
+                     CASE WHEN (p.prediction='DOWN' AND s.f_volume_imbalance < 0) OR (p.prediction='UP' AND s.f_volume_imbalance > 0) THEN 1 ELSE 0 END +
+                     CASE WHEN (p.prediction='DOWN' AND s.f_oracle_lead < 0) OR (p.prediction='UP' AND s.f_oracle_lead > 0) THEN 1 ELSE 0 END +
+                     CASE WHEN (p.prediction='DOWN' AND s.f_book_imbalance > 0) OR (p.prediction='UP' AND s.f_book_imbalance < 0) THEN 1 ELSE 0 END +
+                     CASE WHEN s.f_volatility > 0.5 THEN 1 ELSE 0 END +
+                     CASE WHEN s.f_time_decay > 0.5 THEN 1 ELSE 0 END) as factors_agreed
+                FROM btc_pnl p
+                JOIN btc_windows w ON p.window_id = w.window_id
+                JOIN LATERAL (
+                    SELECT * FROM btc_signals WHERE window_id = p.window_id AND prediction != 'SKIP' ORDER BY confidence DESC LIMIT 1
+                ) s ON true
+                ORDER BY p.close_time DESC
+                LIMIT 50
+            """)
+            # Convert Decimal/datetime to JSON-serializable
+            trades = []
+            for r in rows:
+                trade = dict(r)
+                for k, v in trade.items():
+                    if hasattr(v, 'isoformat'):
+                        trade[k] = v.isoformat()
+                    elif hasattr(v, '__float__'):
+                        trade[k] = float(v)
+                trades.append(trade)
+            return {"trades": trades}
+    except Exception as e:
+        logger.error(f"BTC trades-detail error: {e}\n{traceback.format_exc()}")
+        return {"trades": [], "error": str(e)}
+
+
 @app.get("/api/btc/performance")
 async def get_btc_performance():
     """Full performance summary — deduplicated best signal per window."""
