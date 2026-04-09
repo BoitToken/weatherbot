@@ -430,8 +430,7 @@ async def scheduled_internal_arb_scan():
             # Broadcast ONLY executed trades to subscribers (not raw opportunities)
             executed = [o for o in opps if o.get('fee_adjusted_profit_pct', 0) > 0.5]
             if _telegram_bot and executed:
-                # Internal arb broadcasts disabled (noise)
-                # await broadcast_internal_arb_trades(executed)
+                pass  # Internal arb broadcasts disabled (noise)
         else:
             logger.info("💰 Internal arb scan: no opportunities found")
     except Exception as e:
