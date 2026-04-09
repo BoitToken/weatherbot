@@ -1448,7 +1448,7 @@ async def scheduled_btc_resolution_check():
                                 except Exception:
                                     pass
                     except Exception:
-                        pass                    except Exception:
+                        pass
                         pass
     except Exception as e:
         logger.error(f"❌ BTC resolution check failed: {e}")
