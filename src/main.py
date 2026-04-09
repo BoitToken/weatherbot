@@ -614,6 +614,89 @@ async def scheduled_btc_signal_scan():
         logger.error(f"❌ BTC signal scan failed: {e}\n{traceback.format_exc()}")
 
 
+async def scheduled_btc_hourly_summary():
+    """Send hourly performance summary to Telegram subscribers."""
+    global _btc_engine, _telegram_bot
+    if not _telegram_bot:
+        return
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            # Overall stats (best signal per window)
+            stats = await conn.fetch("""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        (s.prediction = w.resolution) as correct
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    ORDER BY s.window_id, s.confidence DESC
+                )
+                SELECT window_length,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE correct) as wins
+                FROM best GROUP BY window_length ORDER BY window_length
+            """)
+
+            # Last hour stats
+            last_hour = await conn.fetch("""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time, (s.prediction = w.resolution) as correct
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                      AND w.close_time > NOW() - INTERVAL '1 hour'
+                    ORDER BY s.window_id, s.confidence DESC
+                )
+                SELECT window_length,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE correct) as wins
+                FROM best GROUP BY window_length ORDER BY window_length
+            """)
+
+        # Build summary
+        lines = ["\U0001f4ca BTC PAPER TRADING — Hourly Summary\n"]
+
+        # Last hour
+        h_total = sum(r['total'] for r in last_hour)
+        h_wins = sum(r['wins'] for r in last_hour)
+        if h_total > 0:
+            lines.append(f"Last Hour: {h_wins}W-{h_total-h_wins}L ({h_wins/h_total*100:.0f}%)")
+            for r in last_hour:
+                wl = r['window_length']
+                lines.append(f"  {wl}m: {r['wins']}W-{r['total']-r['wins']}L")
+        else:
+            lines.append("Last Hour: No trades resolved")
+
+        lines.append("")
+
+        # All-time
+        a_total = sum(r['total'] for r in stats)
+        a_wins = sum(r['wins'] for r in stats)
+        if a_total > 0:
+            lines.append(f"All-Time: {a_wins}W-{a_total-a_wins}L ({a_wins/a_total*100:.0f}%)")
+            for r in stats:
+                wl = r['window_length']
+                acc = r['wins']/r['total']*100 if r['total'] > 0 else 0
+                lines.append(f"  {wl}m: {r['wins']}W-{r['total']-r['wins']}L ({acc:.0f}%)")
+
+        lines.append(f"\nDashboard: weatherbot.1nnercircle.club/btc15m")
+
+        msg = "\n".join(lines)
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+            except Exception:
+                pass
+        logger.info(f"\U0001f4ca BTC hourly summary sent to {len(subscribers)} subscribers")
+    except Exception as e:
+        logger.error(f"\u274c BTC hourly summary failed: {e}")
+
+
 async def scheduled_btc_resolution_check():
     """BTC Signal Engine: check closed windows, score predictions."""
     global _last_btc_resolution, _btc_engine
@@ -808,6 +891,7 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
+    scheduler.add_job(scheduled_btc_hourly_summary, 'interval', minutes=60, id='btc_hourly', replace_existing=True)
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
     
     # ═══════════════════════════════════════════════════════════════
@@ -3032,6 +3116,78 @@ async def get_btc_calibration(limit: int = 30):
         logger.error(f"BTC calibration error: {e}")
         return {"calibrations": [], "count": 0, "error": str(e)}
 # ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/btc/performance")
+async def get_btc_performance():
+    """Full performance summary — deduplicated best signal per window."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            # Per-timeframe stats
+            stats = await conn.fetch("""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, s.prob_up, s.confidence,
+                        w.resolution, w.window_length, w.btc_open, w.btc_close,
+                        w.close_time, w.up_price, w.down_price,
+                        (s.prediction = w.resolution) as correct
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    ORDER BY s.window_id, s.confidence DESC
+                )
+                SELECT window_length, 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    COUNT(*) FILTER (WHERE NOT correct) as losses,
+                    ROUND(COUNT(*) FILTER (WHERE correct)::numeric / COUNT(*)::numeric * 100, 1) as accuracy
+                FROM best GROUP BY window_length ORDER BY window_length
+            """)
+
+            # Recent trades (last 30)
+            trades = await conn.fetch("""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, ROUND(s.prob_up::numeric * 100) as prob,
+                        ROUND(s.confidence::numeric * 100) as conf,
+                        w.resolution, w.window_length, w.btc_open, w.btc_close,
+                        w.close_time, w.up_price, w.down_price,
+                        (s.prediction = w.resolution) as correct
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    ORDER BY s.window_id, s.confidence DESC
+                )
+                SELECT * FROM best ORDER BY close_time DESC LIMIT 30
+            """)
+
+            # Hourly breakdown
+            hourly = await conn.fetch("""
+                WITH best AS (
+                    SELECT DISTINCT ON (s.window_id)
+                        s.window_id, s.prediction, w.resolution, w.window_length,
+                        w.close_time, (s.prediction = w.resolution) as correct
+                    FROM btc_signals s
+                    JOIN btc_windows w ON s.window_id = w.window_id
+                    WHERE s.prediction != 'SKIP' AND w.resolution IS NOT NULL
+                    ORDER BY s.window_id, s.confidence DESC
+                )
+                SELECT date_trunc('hour', close_time AT TIME ZONE 'Asia/Kolkata') as hour,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    ROUND(COUNT(*) FILTER (WHERE correct)::numeric / COUNT(*)::numeric * 100, 1) as accuracy
+                FROM best GROUP BY 1 ORDER BY 1 DESC LIMIT 12
+            """)
+
+        return {
+            "stats": [{"window": f"{r['window_length']}m", "total": r['total'], "wins": r['wins'], "losses": r['losses'], "accuracy": float(r['accuracy'])} for r in stats],
+            "trades": [{"window_id": r['window_id'], "wl": f"{r['window_length']}m", "call": r['prediction'], "prob": int(r['prob']), "conf": int(r['conf']), "actual": r['resolution'], "correct": r['correct'], "close_time": r['close_time'].isoformat(), "btc_open": float(r['btc_open']) if r['btc_open'] else None, "btc_close": float(r['btc_close']) if r['btc_close'] else None} for r in trades],
+            "hourly": [{"hour": r['hour'].isoformat(), "total": r['total'], "wins": r['wins'], "accuracy": float(r['accuracy'])} for r in hourly],
+        }
+    except Exception as e:
+        logger.error(f"BTC performance error: {e}")
+        return {"error": str(e)}
 
 
 @app.get("/api/arb/internal")
