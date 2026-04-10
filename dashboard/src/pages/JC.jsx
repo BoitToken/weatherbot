@@ -479,18 +479,7 @@ function SignalsTab({ btcPrice, position, messages, signals }) {
       </Card>
 
       {/* Discord Signal Feed (last 5) */}
-      <Card>
-        <SectionTitle>📡 Recent Discord Signals</SectionTitle>
-        {feedItems.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "24px 0", color: C.muted, fontSize: 13, fontFamily: font }}>
-            Waiting for first signal...
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {feedItems.map((m, i) => <MessageCard key={m.id || m.message_id || i} msg={m} />)}
-          </div>
-        )}
-      </Card>
+      <SignalFeed messages={feedItems} />
     </div>
   );
 }
