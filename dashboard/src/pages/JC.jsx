@@ -459,10 +459,10 @@ function SignalsTab({ btcPrice, position, messages, signals }) {
                 { label: "SL", value: sl, color: C.loss },
                 { label: "TP1", value: tp1, color: C.win },
               ].map(({ label, value, color }) => (
-                <React.Fragment key={label}>
+                <<> key={label}>
                   <span style={{ color: C.muted, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", paddingTop: 2 }}>{label}</span>
                   <span style={{ color, fontWeight: 600 }}>{value}</span>
-                </React.Fragment>
+                </<>>
               ))}
             </div>
           );
