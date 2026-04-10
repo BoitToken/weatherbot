@@ -827,18 +827,20 @@ export default function JC() {
     }
   };
 
-  // BTC price — 3s
+  // BTC price — 1s live
   useEffect(() => {
     const load = async () => {
-      const d = await fetchJSON("/api/btc/state", null);
-      if (d?.price) setBtcPrice(d.price);
-      else {
+      try {
+        const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+        const d = await r.json();
+        if (d?.price) setBtcPrice(Number(d.price));
+      } catch {
         const g = await fetchJSON("/api/ghost/price", null);
         if (g?.price) setBtcPrice(g.price);
       }
     };
     load();
-    const t = setInterval(load, 3000);
+    const t = setInterval(load, 1000);
     return () => clearInterval(t);
   }, []);
 
