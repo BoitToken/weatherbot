@@ -16,6 +16,7 @@ import httpx
 import json
 import logging
 import math
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -47,6 +48,8 @@ class BTCSignalEngine:
         self._btc_trades_cache_ts = None
         self._oracle_price_cache = None
         self._oracle_price_cache_ts = None
+        # Token cache: epoch -> {'up_token': str, 'down_token': str, 'up_price': float, 'down_price': float}
+        self._token_cache: Dict[str, Dict] = {}
 
     # ------------------------------------------------------------------
     # Table setup
@@ -216,123 +219,226 @@ class BTCSignalEngine:
             return self._oracle_price_cache or 0.0
 
     # ------------------------------------------------------------------
+    # Epoch-based window token resolution
+    # ------------------------------------------------------------------
+    async def get_window_tokens(self, window_epoch: int, window_length: int) -> Optional[Dict]:
+        """
+        Resolve token IDs and prices for a specific BTC window.
+
+        Args:
+            window_epoch: Unix timestamp of the window END (e.g. 1775863800)
+            window_length: 5 or 15 (minutes)
+
+        Returns:
+            {'up_token': str, 'down_token': str, 'up_price': float, 'down_price': float}
+            or None if not found.
+        """
+        cache_key = f"{window_epoch}-{window_length}"
+        if cache_key in self._token_cache:
+            return self._token_cache[cache_key]
+
+        interval_label = "5m" if window_length == 5 else "15m"
+        slug = f"btc-updown-{interval_label}-{window_epoch}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{GAMMA_API}/events", params={"slug": slug})
+                events = resp.json()
+
+            if not events:
+                return None
+
+            ev = events[0]
+            markets = ev.get('markets', [])
+            if not markets:
+                return None
+
+            m = markets[0]
+
+            # Token IDs
+            token_ids_raw = m.get('clobTokenIds', [])
+            if isinstance(token_ids_raw, str):
+                token_ids_raw = json.loads(token_ids_raw)
+
+            if len(token_ids_raw) < 2:
+                return None
+
+            up_token = str(token_ids_raw[0])
+            down_token = str(token_ids_raw[1])
+
+            # Prices from Gamma
+            op_raw = m.get('outcomePrices') or '["0.5","0.5"]'
+            if isinstance(op_raw, str):
+                outcome_prices = json.loads(op_raw)
+            else:
+                outcome_prices = op_raw
+
+            up_price_gamma = float(outcome_prices[0]) if len(outcome_prices) > 0 else 0.5
+            down_price_gamma = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.5
+
+            # Verify market is LIVE by checking CLOB order book
+            up_price = up_price_gamma
+            down_price = down_price_gamma
+            is_live = False
+
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    # Check UP token order book
+                    book_resp = await client.get(
+                        "https://clob.polymarket.com/book",
+                        params={"token_id": up_token}
+                    )
+                    book = book_resp.json()
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+
+                    if bids and asks:
+                        is_live = True
+                        # Use midpoint as more accurate price
+                        mid_resp = await client.get(
+                            "https://clob.polymarket.com/midpoint",
+                            params={"token_id": up_token}
+                        )
+                        mid_data = mid_resp.json()
+                        if mid_data.get('mid'):
+                            up_price = float(mid_data['mid'])
+                            down_price = round(1.0 - up_price, 4)
+            except Exception as e:
+                logger.debug(f"CLOB check failed for {slug}: {e}")
+                # Fall back to Gamma prices
+                is_live = True  # Assume live if Gamma returned it
+
+            if not is_live:
+                logger.debug(f"Market not live (no order book): {slug}")
+                return None
+
+            result = {
+                'up_token': up_token,
+                'down_token': down_token,
+                'up_price': up_price,
+                'down_price': down_price,
+                'slug': slug,
+                'is_live': True,
+            }
+            self._token_cache[cache_key] = result
+            logger.debug(f"✅ Window tokens cached: {slug} | UP={up_price:.2f} | DOWN={down_price:.2f}")
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ get_window_tokens failed for {slug}: {e}")
+            return None
+
+    # ------------------------------------------------------------------
     # Polymarket window discovery
     # ------------------------------------------------------------------
     async def find_active_btc_windows(self) -> List[Dict]:
-        """Find active BTC 5m and 15m Up/Down markets using slug-based discovery.
+        """Find active BTC 5m and 15m Up/Down markets using epoch-based slug discovery.
         
-        Polymarket BTC Up/Down markets use predictable slugs:
-        - 5-minute: btc-updown-5m-{unix_timestamp} (timestamp = window start, rounded to 300s)
-        - 15-minute: btc-updown-15m-{unix_timestamp} (rounded to 900s)
-        
-        We check the current window and next upcoming window for both timeframes.
+        BTC Up/Down slugs: btc-updown-{5m|15m}-{epoch}
+        where epoch = END timestamp of the window (ceil of now to interval boundary).
+
+        Checks current + next 2 windows for 5m, and current window for 15m.
+        Order books on CLOB are LIVE even when Gamma says not accepting orders.
         """
         windows = []
         now = datetime.now(timezone.utc)
-        now_ts = int(now.timestamp())
+        now_ts = time.time()
 
-        # Generate slugs for current + next windows
+        # Generate slugs for current + next windows using EPOCH (END timestamp)
         slugs_to_check = []
         
-        # 5-minute windows (300s boundaries)
-        current_5m = (now_ts // 300) * 300
-        for offset in [-300, 0, 300, 600]:  # prev, current, next, next+1
-            slugs_to_check.append((f"btc-updown-5m-{current_5m + offset}", 5, current_5m + offset))
+        # 5-minute windows: epoch = ceil(now/300)*300
+        current_5m_end = math.ceil(now_ts / 300) * 300
+        for offset in [0, 300, 600]:  # current, next, next+1
+            epoch = int(current_5m_end + offset)
+            start_ts = epoch - 300  # window opens 5m before end
+            slugs_to_check.append((f"btc-updown-5m-{epoch}", 5, start_ts, epoch))
         
-        # 15-minute windows (900s boundaries)
-        current_15m = (now_ts // 900) * 900
-        for offset in [-900, 0, 900]:
-            slugs_to_check.append((f"btc-updown-15m-{current_15m + offset}", 15, current_15m + offset))
+        # 15-minute windows: epoch = ceil(now/900)*900
+        current_15m_end = math.ceil(now_ts / 900) * 900
+        for offset in [0, 900]:  # current + next
+            epoch = int(current_15m_end + offset)
+            start_ts = epoch - 900
+            slugs_to_check.append((f"btc-updown-15m-{epoch}", 15, start_ts, epoch))
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            for slug, window_length, start_ts in slugs_to_check:
-                try:
-                    resp = await client.get(f"{GAMMA_API}/events", params={"slug": slug})
-                    events = resp.json()
-                    if not events:
-                        continue
-                    
-                    ev = events[0]
-                    markets = ev.get('markets', [])
-                    if not markets:
-                        continue
-                    
-                    m = markets[0]
-                    
-                    # Parse times from the event
-                    open_time = datetime.fromtimestamp(start_ts, tz=timezone.utc)
-                    close_time = open_time + timedelta(minutes=window_length)
-                    
-                    # Skip if already closed
-                    if close_time <= now:
-                        # Still useful for resolution checking
-                        pass
-                    
-                    seconds_remaining = max(0, int((close_time - now).total_seconds()))
-
-                    # Parse outcome prices
-                    outcome_prices = []
-                    try:
-                        op_raw = m.get('outcomePrices') or '[]'
-                        if isinstance(op_raw, str):
-                            outcome_prices = json.loads(op_raw)
-                        elif isinstance(op_raw, list):
-                            outcome_prices = op_raw
-                    except Exception:
-                        outcome_prices = []
-
-                    up_price = float(outcome_prices[0]) if len(outcome_prices) > 0 else 0.5
-                    down_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.5
-
-                    condition_id = m.get('conditionId') or m.get('condition_id') or ''
-                    window_id = slug  # Use the slug as window_id (unique, predictable)
-
-                    volume = float(m.get('volume') or m.get('volumeNum') or 0)
-
-                    # Extract token IDs for CLOB orderbook access
-                    token_ids = m.get('clobTokenIds', [])
-                    if isinstance(token_ids, str):
-                        try:
-                            token_ids = json.loads(token_ids)
-                        except Exception:
-                            token_ids = []
-
-                    window_data = {
-                        'window_id': window_id,
-                        'window_length': window_length,
-                        'open_time': open_time,
-                        'close_time': close_time,
-                        'seconds_remaining': seconds_remaining,
-                        'up_price': up_price,
-                        'down_price': down_price,
-                        'volume_usd': volume,
-                        'question': m.get('question') or ev.get('title', ''),
-                        'condition_id': condition_id,
-                        'token_id_up': token_ids[0] if len(token_ids) > 0 else '',
-                        'token_id_down': token_ids[1] if len(token_ids) > 1 else '',
-                        'slug': slug,
-                    }
-                    windows.append(window_data)
-
-                    # Upsert into DB
-                    try:
-                        async with self.db_pool.acquire() as conn:
-                            await conn.execute("""
-                                INSERT INTO btc_windows (window_id, window_length, open_time, close_time,
-                                                         up_price, down_price, volume_usd)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                ON CONFLICT (window_id) DO UPDATE SET
-                                    up_price = EXCLUDED.up_price,
-                                    down_price = EXCLUDED.down_price,
-                                    volume_usd = EXCLUDED.volume_usd
-                            """, window_id, window_length, open_time, close_time,
-                                 up_price, down_price, volume)
-                    except Exception as e:
-                        logger.error(f"DB upsert failed for {window_id}: {e}")
-                
-                except Exception as e:
-                    logger.debug(f"Slug {slug} failed: {e}")
+        for slug, window_length, start_ts, end_epoch in slugs_to_check:
+            try:
+                # Use get_window_tokens which validates via CLOB order book
+                tokens = await self.get_window_tokens(end_epoch, window_length)
+                if not tokens:
+                    logger.debug(f"No live tokens for {slug}")
                     continue
+
+                open_time = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+                close_time = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
+                seconds_remaining = max(0, int((close_time - now).total_seconds()))
+
+                up_price = tokens['up_price']
+                down_price = tokens['down_price']
+
+                # Fetch volume from Gamma (non-blocking, best-effort)
+                volume = 0.0
+                condition_id = ''
+                question = ''
+                try:
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        resp = await client.get(f"{GAMMA_API}/events", params={"slug": slug})
+                        events = resp.json()
+                        if events:
+                            ev = events[0]
+                            m = ev.get('markets', [{}])[0]
+                            volume = float(m.get('volume') or m.get('volumeNum') or 0)
+                            condition_id = m.get('conditionId') or m.get('condition_id') or ''
+                            question = m.get('question') or ev.get('title', '')
+                except Exception:
+                    pass
+
+                window_id = slug  # slug is unique + predictable
+
+                window_data = {
+                    'window_id': window_id,
+                    'window_length': window_length,
+                    'open_time': open_time,
+                    'close_time': close_time,
+                    'seconds_remaining': seconds_remaining,
+                    'up_price': up_price,
+                    'down_price': down_price,
+                    'volume_usd': volume,
+                    'question': question,
+                    'condition_id': condition_id,
+                    'token_id_up': tokens['up_token'],
+                    'token_id_down': tokens['down_token'],
+                    'slug': slug,
+                    'end_epoch': end_epoch,
+                }
+                windows.append(window_data)
+                logger.info(f"📊 Live window found: {slug} | {seconds_remaining}s remaining | UP={up_price:.2f} DOWN={down_price:.2f}")
+
+                # Upsert into DB (store token IDs for maker engine)
+                tok_up = window_data.get('token_id_up', '')
+                tok_down = window_data.get('token_id_down', '')
+                try:
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO btc_windows (window_id, window_length, open_time, close_time,
+                                                     up_price, down_price, volume_usd,
+                                                     token_id_up, token_id_down)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (window_id) DO UPDATE SET
+                                up_price = EXCLUDED.up_price,
+                                down_price = EXCLUDED.down_price,
+                                volume_usd = EXCLUDED.volume_usd,
+                                token_id_up = COALESCE(EXCLUDED.token_id_up, btc_windows.token_id_up),
+                                token_id_down = COALESCE(EXCLUDED.token_id_down, btc_windows.token_id_down)
+                        """, window_id, window_length, open_time, close_time,
+                             up_price, down_price, volume,
+                             tok_up or None, tok_down or None)
+                except Exception as e:
+                    logger.error(f"DB upsert failed for {window_id}: {e}")
+
+            except Exception as e:
+                logger.debug(f"Slug {slug} failed: {e}")
+                continue
 
         logger.info(f"📊 Found {len(windows)} active BTC windows")
         return windows

@@ -3,6 +3,7 @@ WeatherBot FastAPI Server
 API endpoints for dashboard + scheduler for data/signal loops.
 All endpoints query REAL database — no stubs, no mocks.
 """
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -738,6 +739,164 @@ _btc_engine = None
 _last_btc_scan: Optional[datetime] = None
 _last_btc_resolution: Optional[datetime] = None
 
+# ═══════════════════════════════════════════════════════════════
+# MAKER ENGINE — Spread quoting for BTC 5M windows
+# ═══════════════════════════════════════════════════════════════
+_maker_engine = None
+_last_maker_quote: Optional[datetime] = None
+
+
+async def scheduled_maker_quote():
+    """
+    Maker Quote Engine: runs every 5 seconds.
+    Logic:
+      - If active 5M window AND >30s remaining: start or update quotes
+      - Check toxic flow → cancel if triggered
+      - If <10s remaining: cancel all orders
+    Only runs in live mode. Skips gracefully if engine not initialized.
+    """
+    global _maker_engine, _last_maker_quote, _btc_engine
+    try:
+        # Only run in live mode
+        _tcfg = await get_trading_mode()
+        if not is_live_mode(_tcfg):
+            return
+
+        # Lazy-init maker engine
+        if _maker_engine is None:
+            from src.execution.maker_engine import MakerEngine
+            _maker_engine = MakerEngine(get_async_pool(), dry_run=False)
+            await _maker_engine.ensure_tables()
+            logger.info("✅ MakerEngine initialized")
+
+        # Skip if paused for daily loss limit
+        if _maker_engine.is_paused:
+            return
+
+        # Find the active 5M window (from btc_signal_engine cache)
+        if _btc_engine is None:
+            return
+
+        # Get current active windows from DB
+        now = datetime.utcnow()
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            active_window = await conn.fetchrow("""
+                SELECT w.window_id, w.window_length, w.open_time, w.close_time,
+                       w.up_price, w.down_price, w.volume_usd,
+                       s.prediction, s.prob_up, s.confidence,
+                       s.f_price_delta, s.f_momentum, s.f_volume_imbalance,
+                       s.f_oracle_lead, s.f_book_imbalance
+                FROM btc_windows w
+                LEFT JOIN LATERAL (
+                    SELECT * FROM btc_signals
+                    WHERE window_id = w.window_id AND prediction != 'SKIP'
+                    ORDER BY confidence DESC LIMIT 1
+                ) s ON true
+                WHERE w.window_length = 5
+                  AND w.close_time > NOW()
+                  AND w.resolution IS NULL
+                ORDER BY w.close_time ASC
+                LIMIT 1
+            """)
+
+        if not active_window:
+            # No active 5M window — cancel any resting orders and clean up
+            if _maker_engine.is_quoting:
+                await _maker_engine.cancel_all_orders(expire_window=True)
+            return
+
+        close_time = active_window["close_time"]
+        # Ensure close_time is offset-aware
+        if close_time.tzinfo is None:
+            from datetime import timezone as _tz
+            close_time = close_time.replace(tzinfo=_tz.utc)
+        from datetime import timezone as _tz
+        now_aware = datetime.now(_tz.utc)
+        seconds_remaining = max(0, int((close_time - now_aware).total_seconds()))
+
+        window_id = active_window["window_id"]
+        up_price = float(active_window["up_price"] or 0.5)
+        down_price = float(active_window["down_price"] or 0.5)
+        fair_value = float(active_window["prob_up"] or 0.5)
+        prediction = active_window["prediction"]   # 'UP', 'DOWN', or None
+        confidence = float(active_window["confidence"] or 0.5)
+
+        # Extract token IDs from btc_windows (stored by signal engine scan)
+        up_token = ""
+        down_token = ""
+        async with pool.acquire() as conn:
+            token_row = await conn.fetchrow("""
+                SELECT token_id_up, token_id_down FROM btc_windows WHERE window_id = $1
+            """, window_id)
+        if token_row:
+            up_token = token_row["token_id_up"] or ""
+            down_token = token_row["token_id_down"] or ""
+
+        # If <10s remaining: cancel all and bail
+        if seconds_remaining < 10:
+            if _maker_engine.is_quoting:
+                logger.info(f"🔔 Window {window_id} closing in {seconds_remaining}s — cancelling all orders")
+                await _maker_engine.cancel_all_orders(expire_window=True)
+            return
+
+        # Toxic flow check (runs whether quoting or not, uses deque from engine)
+        if _maker_engine.is_quoting:
+            is_toxic = await _maker_engine.check_toxic_flow()
+            if is_toxic:
+                await _maker_engine.cancel_all_orders(expire_window=False)
+                _last_maker_quote = datetime.utcnow()
+                return
+
+        # We need token IDs to post orders. Try to get them via the scan.
+        # The btc_signal_engine stores token IDs in the signal metadata.
+        if not up_token or not down_token:
+            async with pool.acquire() as conn:
+                sig_row = await conn.fetchrow("""
+                    SELECT skip_reason FROM btc_signals
+                    WHERE window_id = $1 ORDER BY created_at DESC LIMIT 1
+                """, window_id)
+            # If token IDs unavailable, skip making for this window
+            if not up_token or not down_token:
+                logger.debug(f"Maker: no token IDs for window {window_id} — skipping")
+                return
+
+        # If >30s remaining: start or update quotes
+        if seconds_remaining > 30:
+            # Parse window epoch from window_id (format: btc-updown-5m-{epoch})
+            try:
+                window_epoch = int(window_id.split("-")[-1])
+            except Exception:
+                window_epoch = int(now_aware.timestamp())
+
+            if not _maker_engine.is_quoting:
+                await _maker_engine.start_quoting(
+                    window_epoch=window_epoch,
+                    window_length=5,
+                    fair_value=fair_value,
+                    up_token=up_token,
+                    down_token=down_token,
+                    size_per_side=_maker_engine.MAX_SIZE_PER_SIDE,
+                )
+            else:
+                await _maker_engine.update_quotes(
+                    new_fair_value=fair_value,
+                    seconds_remaining=seconds_remaining,
+                    confidence=confidence,
+                    predicted_side=prediction,
+                )
+
+        _last_maker_quote = datetime.utcnow()
+
+    except Exception as e:
+        logger.error(f"❌ scheduled_maker_quote failed: {e}")
+        # Safety: cancel all on any error
+        if _maker_engine:
+            try:
+                await _maker_engine.cancel_all_orders(expire_window=False)
+            except Exception:
+                pass
+
 
 async def scheduled_btc_signal_scan():
     """BTC Signal Engine: scan for active BTC windows, compute 7-factor signals."""
@@ -790,7 +949,22 @@ async def scheduled_btc_signal_scan():
                 MAX_ENTRY = 0.40      # Tightened from 50c — need more upside buffer
                 MIN_RR_AFTER_COSTS = 1.5  # Must clear 1.5:1 AFTER all costs
                 MIN_FACTORS = 5       # 5 of 7 factors must agree
-                LIVE_STAKE = 25       # Fixed $25 per trade (appropriate for liquidity)
+
+                # ═══ DYNAMIC BANKROLL SIZING ═══
+                # Query proxy wallet balance from CLOB (cached in signal engine)
+                try:
+                    _proxy_balance = getattr(_btc_engine, '_cached_proxy_balance', None)
+                    if _proxy_balance and _proxy_balance > 0:
+                        # Normal: 3% of bankroll, cap $25
+                        # Conviction (handled below if 4x signal): 5% of bankroll, cap $50
+                        LIVE_STAKE = min(_proxy_balance * 0.03, 25.0)
+                        if LIVE_STAKE < 5.0:
+                            logger.warning(f"⚠️ Bankroll too low (${_proxy_balance:.2f}), skipping trade")
+                            continue
+                    else:
+                        LIVE_STAKE = 25  # Fallback
+                except Exception:
+                    LIVE_STAKE = 25  # Fallback
                 
                 # RULE 1: Entry price bounds
                 if entry_price <= MIN_ENTRY or entry_price >= MAX_ENTRY:
@@ -1967,6 +2141,8 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
+    scheduler.add_job(scheduled_maker_quote, 'interval', seconds=5, id='maker_quote', replace_existing=True)
+    logger.info("✅ Maker Engine scheduled (every 5s)")
     scheduler.add_job(scheduled_btc_hourly_summary, 'cron', minute=0, timezone='Asia/Kolkata', id='btc_hourly', replace_existing=True)
     scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
     scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
