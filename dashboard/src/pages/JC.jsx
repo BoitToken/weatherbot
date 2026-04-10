@@ -437,21 +437,36 @@ function SignalsTab({ btcPrice, position, messages, signals }) {
       {/* Trade Setup Card */}
       <Card>
         <SectionTitle>📐 Trade Setup</SectionTitle>
-        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px 20px", fontSize: 13, fontFamily: font }}>
-          {[
-            { label: "Bias", value: "CAUTIOUSLY BULLISH", color: C.warning },
-            { label: "Setup", value: "LONG on SPV sweep at $71,215", color: C.text },
-            { label: "Entry", value: "$71,200 – $71,250", color: C.white },
-            { label: "SL", value: "$70,900", color: C.loss },
-            { label: "TP1", value: "$72,800 (R:R 5:1)", color: C.win },
-            { label: "TP2", value: "$73,974 (R:R 8:1)", color: C.win },
-          ].map(({ label, value, color }) => (
-            <>
-              <span key={label + "l"} style={{ color: C.muted, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", paddingTop: 2 }}>{label}</span>
-              <span key={label + "v"} style={{ color, fontWeight: 600 }}>{value}</span>
-            </>
-          ))}
-        </div>
+        {(() => {
+          const p = btcPrice || 0;
+          const nearSupport = supportLevels.find(l => l.price < p) || supportLevels[0];
+          const nearResist = resistanceLevels.find(l => l.price > p) || resistanceLevels[0];
+          const distSupport = nearSupport ? ((p - nearSupport.price) / p * 100).toFixed(2) : null;
+          const distResist = nearResist ? ((nearResist.price - p) / p * 100).toFixed(2) : null;
+          const bias = distSupport && distResist ? (Number(distSupport) < Number(distResist) ? "NEAR SUPPORT — LONG BIAS" : "NEAR RESISTANCE — SHORT BIAS") : "NEUTRAL";
+          const biasColor = bias.includes("LONG") ? C.win : bias.includes("SHORT") ? C.loss : C.warning;
+          const setup = nearSupport ? `LONG at ${nearSupport.label} ($${fmt(nearSupport.price, 0)})` : "—";
+          const sl = nearSupport ? `$${fmt(nearSupport.price * 0.995, 0)}` : "—";
+          const tp1 = nearResist ? `$${fmt(nearResist.price, 0)} (${nearResist.label})` : "—";
+          const tp2 = resistanceLevels.length > 1 ? `$${fmt(resistanceLevels[1]?.price || 0, 0)}` : "—";
+          return (
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px 20px", fontSize: 13, fontFamily: font }}>
+              {[
+                { label: "Bias", value: bias, color: biasColor },
+                { label: "Nearest Support", value: nearSupport ? `${nearSupport.label} — $${fmt(nearSupport.price, 0)} (${distSupport}% away)` : "—", color: C.win },
+                { label: "Nearest Resistance", value: nearResist ? `${nearResist.label} — $${fmt(nearResist.price, 0)} (${distResist}% away)` : "—", color: C.loss },
+                { label: "Long Setup", value: setup, color: C.text },
+                { label: "SL", value: sl, color: C.loss },
+                { label: "TP1", value: tp1, color: C.win },
+              ].map(({ label, value, color }) => (
+                <React.Fragment key={label}>
+                  <span style={{ color: C.muted, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", paddingTop: 2 }}>{label}</span>
+                  <span style={{ color, fontWeight: 600 }}>{value}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          );
+        })()}
       </Card>
 
       {/* Active Position Card */}
@@ -491,7 +506,7 @@ function TradesTab({ trades, pnlStats, isMobile }) {
   const [expandedId, setExpandedId] = useState(null);
   const rows = (trades || []).slice(0, 20);
 
-  const balance = pnlStats?.balance ?? pnlStats?.total_balance ?? null;
+  const balance = pnlStats?.balance ?? pnlStats?.total_balance ?? 10000;
   const totalPnl = pnlStats?.total_pnl ?? null;
   const winRate = pnlStats?.win_rate != null ? (pnlStats.win_rate * 100).toFixed(1) : null;
   const totalTrades = pnlStats?.total_trades ?? rows.length;
