@@ -50,6 +50,9 @@ class BTCSignalEngine:
         self._oracle_price_cache_ts = None
         # Token cache: epoch -> {'up_token': str, 'down_token': str, 'up_price': float, 'down_price': float}
         self._token_cache: Dict[str, Dict] = {}
+        # Proxy wallet balance cache (updated every 5 min)
+        self._cached_proxy_balance: Optional[float] = None
+        self._proxy_balance_ts: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Table setup
@@ -627,9 +630,41 @@ class BTCSignalEngine:
     # ------------------------------------------------------------------
     # Full scan cycle
     # ------------------------------------------------------------------
+    async def _refresh_proxy_balance(self):
+        """Refresh proxy wallet USDC balance from CLOB (every 5 min)."""
+        import time as _time
+        now = _time.time()
+        if self._proxy_balance_ts and (now - self._proxy_balance_ts) < 300:
+            return  # Cached
+        try:
+            import os
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+            host = os.getenv('CLOB_HOST', 'https://clob.polymarket.com')
+            key = os.getenv('POLYMARKET_PRIVATE_KEY', '')
+            if not key:
+                return
+            creds = ApiCreds(
+                api_key=os.getenv('CLOB_API_KEY', ''),
+                api_secret=os.getenv('CLOB_API_SECRET', ''),
+                api_passphrase=os.getenv('CLOB_PASSPHRASE', ''),
+            )
+            client = ClobClient(host=host, chain_id=137, key=key, creds=creds)
+            sig_type = int(os.getenv('SIGNATURE_TYPE', '0'))
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
+            ba = client.get_balance_allowance(params)
+            self._cached_proxy_balance = int(ba.get('balance', 0)) / 10**6
+            self._proxy_balance_ts = now
+            logger.info(f"💰 Proxy balance: ${self._cached_proxy_balance:.2f}")
+        except Exception as e:
+            logger.warning(f"Balance refresh failed: {e}")
+
     async def run_scan(self) -> List[Dict]:
         """Full scan cycle: find windows, compute factors, predict, store."""
         results = []
+
+        # Refresh bankroll
+        await self._refresh_proxy_balance()
 
         windows = await self.find_active_btc_windows()
         if not windows:

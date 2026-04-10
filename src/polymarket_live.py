@@ -56,6 +56,8 @@ class PolymarketLiveTrader:
         self.clob_passphrase = os.getenv("CLOB_PASSPHRASE", "")
         self.clob_host = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
         self.wallet_address = os.getenv("WALLET_ADDRESS", "")
+        self.proxy_wallet = os.getenv("PROXY_WALLET", "")
+        self.signature_type = int(os.getenv("SIGNATURE_TYPE", "0"))
         self.rpc_url = os.getenv("POLYGON_RPC_HTTP", "")
         self.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -84,12 +86,20 @@ class PolymarketLiveTrader:
 
             if private_key:
                 # Full L2 client — can sign and post orders
-                self._client = ClobClient(
+                # Use proxy wallet (sig_type=2) if configured, so trades
+                # show up under the Polymarket UI profile
+                client_kwargs = dict(
                     host=self.clob_host,
                     chain_id=137,
                     key=private_key,
                     creds=creds,
                 )
+                if self.proxy_wallet and self.signature_type:
+                    client_kwargs["signature_type"] = self.signature_type
+                    client_kwargs["funder"] = self.proxy_wallet
+                    logger.info(f"🔗 Using proxy wallet: {self.proxy_wallet} (sig_type={self.signature_type})")
+
+                self._client = ClobClient(**client_kwargs)
                 self._has_private_key = True
                 logger.info(f"✅ CLOB client initialized (L2) — wallet: {self.wallet_address}")
             else:
