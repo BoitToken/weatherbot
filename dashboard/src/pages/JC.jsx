@@ -139,44 +139,81 @@ function HeaderBar({ btcPrice, watcherStatus, mode }) {
    B. TradingView Chart
    ═══════════════════════════════════════════════════════════════ */
 function TVChart({ isMobile }) {
+  const containerRef = useRef(null);
+  const widgetRef = useRef(null);
+  const [showJC, setShowJC] = useState(false);
   const [imgTs, setImgTs] = useState(Date.now());
-  const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
     const iv = setInterval(() => setImgTs(Date.now()), 30000);
     return () => clearInterval(iv);
   }, []);
 
+  useEffect(() => {
+    const containerId = "tv_chart_jc_interactive";
+    const initWidget = () => {
+      if (!window.TradingView || !containerRef.current || widgetRef.current) return;
+      widgetRef.current = new window.TradingView.widget({
+        container_id: containerId, autosize: true,
+        symbol: "BINANCE:BTCUSDT.P", interval: "240",
+        timezone: "Asia/Kolkata", theme: "dark", style: "1", locale: "en",
+        toolbar_bg: C.card, enable_publishing: false,
+        hide_top_toolbar: false, hide_legend: false,
+        withdateranges: true, allow_symbol_change: true,
+        details: true, hotlist: false, calendar: false,
+        studies: ["Volume@tv-basicstudies", "VWAP@tv-basicstudies", "RSI@tv-basicstudies"],
+        backgroundColor: C.bg, gridColor: "rgba(255,255,255,0.03)",
+      });
+    };
+    if (window.TradingView) { initWidget(); return; }
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => setTimeout(initWidget, 300);
+    document.head.appendChild(script);
+    return () => { widgetRef.current = null; };
+  }, []);
+
   return (
-    <Card style={{ padding: 0, overflow: "hidden", position: "relative" }}>
-      <div style={{ position: "absolute", top: 8, left: 12, zIndex: 2, display: "flex", gap: 8, alignItems: "center" }}>
-        <span style={{ fontSize: 9, color: C.accent, fontFamily: font, letterSpacing: 1, background: "rgba(0,0,0,0.7)", padding: "3px 8px", borderRadius: 4 }}>
-          JAYSON CASPER LIVE CHART
-        </span>
-        <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: "rgba(0,0,0,0.7)", padding: "2px 6px", borderRadius: 3 }}>
-          Auto-refresh 30s
-        </span>
+    <div>
+      <div style={{ display: "flex", gap: 6, padding: "8px 12px", background: C.bg }}>
+        <button onClick={() => setShowJC(false)} style={{
+          background: !showJC ? "rgba(255,255,255,0.08)" : "transparent",
+          border: !showJC ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
+          color: !showJC ? C.white : C.muted, borderRadius: 6, padding: "5px 12px",
+          fontSize: 10, fontFamily: font, cursor: "pointer", letterSpacing: 1, minHeight: 32,
+        }}>INTERACTIVE CHART</button>
+        <button onClick={() => setShowJC(true)} style={{
+          background: showJC ? "rgba(124,58,237,0.15)" : "transparent",
+          border: showJC ? "1px solid rgba(124,58,237,0.3)" : "1px solid transparent",
+          color: showJC ? C.accent : C.muted, borderRadius: 6, padding: "5px 12px",
+          fontSize: 10, fontFamily: font, cursor: "pointer", letterSpacing: 1, minHeight: 32,
+        }}>JAYSON LIVE (CDP)</button>
       </div>
-      {!imgError ? (
-        <img
-          src={"/tv-live.png?" + imgTs}
-          alt="Jayson Casper TradingView Chart"
-          onError={() => setImgError(true)}
-          style={{ width: "100%", height: isMobile ? 350 : 500, objectFit: "cover", display: "block" }}
-        />
-      ) : (
-        <div style={{ width: "100%", height: isMobile ? 350 : 500, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>
-          <span style={{ fontSize: 32 }}>📊</span>
-          <span style={{ color: C.muted, fontFamily: font, fontSize: 11 }}>TradingView not connected</span>
-          <span style={{ color: C.muted, fontFamily: font, fontSize: 9 }}>Open TradingView Desktop + SSH tunnel</span>
-        </div>
+      <Card style={{ padding: 0, overflow: "hidden", display: showJC ? "none" : "block" }}>
+        <div id="tv_chart_jc_interactive" ref={containerRef}
+          style={{ width: "100%", height: isMobile ? 380 : 550 }} />
+      </Card>
+      {showJC && (
+        <Card style={{ padding: 0, overflow: "hidden", position: "relative" }}>
+          <div style={{ position: "absolute", top: 8, left: 12, zIndex: 2, display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 9, color: C.accent, fontFamily: font, letterSpacing: 1, background: "rgba(0,0,0,0.8)", padding: "3px 8px", borderRadius: 4 }}>
+              JAYSON CASPER LIVE CHART
+            </span>
+            <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: "rgba(0,0,0,0.7)", padding: "2px 6px", borderRadius: 3 }}>
+              Auto-refresh 30s
+            </span>
+          </div>
+          <img src={"/tv-live.png?" + imgTs} alt="Jayson Chart"
+            onError={(e) => { e.target.style.display = "none"; }}
+            style={{ width: "100%", height: isMobile ? 380 : 550, objectFit: "cover", display: "block" }} />
+        </Card>
       )}
-    </Card>
+    </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   C. Signal Feed — single message card
+/* C. Signal Feed — single message card
    ═══════════════════════════════════════════════════════════════ */
 function MessageCard({ msg, onClick }) {
   const [expanded, setExpanded] = useState(false);
