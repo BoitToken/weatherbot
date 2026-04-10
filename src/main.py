@@ -3782,10 +3782,11 @@ async def get_wallet_balance():
         return {"error": "Wallet address not configured", "usdc": 0, "matic": 0}
     
     try:
+        polygon_rpc = getattr(config, 'POLYGON_RPC_HTTP', 'https://polygon-rpc.com')
         async with httpx.AsyncClient(timeout=10) as client:
             # Get MATIC balance
             matic_resp = await client.post(
-                "https://polygon-rpc.com",
+                polygon_rpc,
                 json={
                     "jsonrpc": "2.0",
                     "method": "eth_getBalance",
@@ -3803,7 +3804,7 @@ async def get_wallet_balance():
             data_param = "0x70a08231" + wallet_address[2:].zfill(64)
             
             usdc_resp = await client.post(
-                "https://polygon-rpc.com",
+                polygon_rpc,
                 json={
                     "jsonrpc": "2.0",
                     "method": "eth_call",

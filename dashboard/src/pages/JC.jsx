@@ -146,10 +146,193 @@ function HeaderBar({ btcPrice, watcherStatus, mode }) {
 /* ═══════════════════════════════════════════════════════════════
    B. Interactive Chart — Lightweight Charts + Binance candles
    ═══════════════════════════════════════════════════════════════ */
-function TVChart({ isMobile, btcPrice }) {
+/* ═══════════════════════════════════════════════════════════════
+   Live P&L Panel — professional trading desk style
+   ═══════════════════════════════════════════════════════════════ */
+function LivePnLPanel({ trade, btcPrice, isMobile }) {
+  const [elapsed, setElapsed] = useState('');
+
+  useEffect(() => {
+    if (!trade?.opened) return;
+    const tick = () => {
+      const openTime = new Date(trade.opened).getTime();
+      const diff = Math.max(0, Math.floor((Date.now() - openTime) / 1000));
+      const h = Math.floor(diff / 3600);
+      const m = Math.floor((diff % 3600) / 60);
+      const s = diff % 60;
+      setElapsed(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
+    };
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [trade?.opened]);
+
+  if (!trade) return null;
+
+  const isShort = (trade.direction || '').toUpperCase() === 'SHORT';
+  const entry = trade.fill_price || trade.entry;
+  const sl = trade.sl;
+  const tp1 = trade.tp1;
+  const tp2 = trade.tp2;
+  const stake = trade.stake || 300;
+  const leverage = trade.leverage || 50;
+  const price = btcPrice || entry;
+
+  // P&L calculation
+  const priceMove = isShort ? (entry - price) : (price - entry);
+  const notional = stake * leverage;
+  const grossPnl = (priceMove / entry) * notional;
+  const fees = notional * 0.00055 * 2; // Bybit taker fee both ways
+  const netPnl = grossPnl - fees;
+  const pnlPct = (netPnl / stake) * 100;
+  const isProfit = netPnl >= 0;
+
+  // Distance to TP1/SL
+  const distToTp1 = tp1 ? Math.abs(price - tp1) : null;
+  const totalDistTp1 = tp1 ? Math.abs(entry - tp1) : null;
+  const tp1Pct = totalDistTp1 ? ((1 - distToTp1 / totalDistTp1) * 100) : null;
+
+  const distToSl = sl ? Math.abs(price - sl) : null;
+  const totalDistSl = sl ? Math.abs(entry - sl) : null;
+  const slBufferPct = totalDistSl ? ((distToSl / totalDistSl) * 100) : null;
+
+  // Potential P&L at SL/TP
+  const slMove = isShort ? (entry - sl) : (sl - entry);
+  const slPnl = sl ? (slMove / entry) * notional - fees : null;
+  const tp1Move = isShort ? (entry - tp1) : (tp1 - entry);
+  const tp1Pnl = tp1 ? (tp1Move / entry) * notional - fees : null;
+  const tp2Move = tp2 ? (isShort ? (entry - tp2) : (tp2 - entry)) : null;
+  const tp2Pnl = tp2 ? (tp2Move / entry) * notional - fees : null;
+
+  const pnlColor = isProfit ? '#10b981' : '#ef4444';
+  const dirEmoji = isShort ? '🔴' : '🟢';
+  const dirLabel = isShort ? 'SHORT' : 'LONG';
+
+  return (
+    <div style={{
+      background: '#0a0a0a',
+      border: '1px solid rgba(255,255,255,0.1)',
+      borderRadius: 10,
+      padding: isMobile ? '12px' : '16px 20px',
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        flexWrap: 'wrap', gap: 8,
+        paddingBottom: 12, marginBottom: 12,
+        borderBottom: '1px solid rgba(255,255,255,0.08)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 14 }}>{dirEmoji}</span>
+          <span style={{
+            fontSize: isMobile ? 11 : 13, fontWeight: 700, color: '#fff', letterSpacing: 0.5,
+          }}>
+            TRADE #{trade.id} ACTIVE — {dirLabel} from ${fmt(entry)}
+          </span>
+        </div>
+        <span style={{
+          fontSize: 10, color: '#6b7280',
+          background: 'rgba(255,255,255,0.05)',
+          padding: '3px 8px', borderRadius: 4,
+        }}>
+          ⏱ {elapsed}
+        </span>
+      </div>
+
+      {/* Main stats grid */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)',
+        gap: isMobile ? 8 : 12,
+      }}>
+        {/* Current Price */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: 6 }}>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>Current Price</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: '#F59E0B' }}>${fmt(price)}</span>
+        </div>
+
+        {/* Unrealized P&L */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: `${pnlColor}08`, borderRadius: 6, border: `1px solid ${pnlColor}22` }}>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>Unrealized P&L</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: pnlColor }}>
+            {isProfit ? '+' : ''}${fmt(netPnl)} ({isProfit ? '+' : ''}{pnlPct.toFixed(2)}%)
+          </span>
+        </div>
+
+        {/* Distance to TP1 */}
+        {tp1 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(16,185,129,0.05)', borderRadius: 6 }}>
+            <span style={{ fontSize: 11, color: '#6b7280' }}>Distance to TP1</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: '#10b981' }}>
+              ${fmt(distToTp1)} ({tp1Pct != null ? `${Math.max(0, tp1Pct).toFixed(0)}% to target` : '—'})
+            </span>
+          </div>
+        )}
+
+        {/* Distance to SL */}
+        {sl && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(239,68,68,0.05)', borderRadius: 6 }}>
+            <span style={{ fontSize: 11, color: '#6b7280' }}>Distance to SL</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: '#ef4444' }}>
+              ${fmt(distToSl)} ({slBufferPct != null ? `${slBufferPct.toFixed(0)}% buffer` : '—'})
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Potential P&L row */}
+      <div style={{
+        display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap',
+      }}>
+        {slPnl != null && (
+          <div style={{ flex: 1, minWidth: 100, padding: '6px 10px', background: 'rgba(239,68,68,0.08)', borderRadius: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#6b7280', letterSpacing: 1, marginBottom: 2 }}>IF SL HIT</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#ef4444' }}>${fmt(slPnl)}</div>
+          </div>
+        )}
+        {tp1Pnl != null && (
+          <div style={{ flex: 1, minWidth: 100, padding: '6px 10px', background: 'rgba(16,185,129,0.08)', borderRadius: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#6b7280', letterSpacing: 1, marginBottom: 2 }}>IF TP1 HIT</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981' }}>+${fmt(tp1Pnl)}</div>
+          </div>
+        )}
+        {tp2Pnl != null && (
+          <div style={{ flex: 1, minWidth: 100, padding: '6px 10px', background: 'rgba(16,185,129,0.08)', borderRadius: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#6b7280', letterSpacing: 1, marginBottom: 2 }}>IF TP2 HIT</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981' }}>+${fmt(tp2Pnl)}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Trade details footer */}
+      <div style={{
+        display: 'flex', gap: 16, marginTop: 12, paddingTop: 10,
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+        flexWrap: 'wrap',
+      }}>
+        {[
+          { label: 'Stake', value: `$${fmt(stake, 0)}` },
+          { label: 'Leverage', value: `${leverage}x` },
+          { label: 'Notional', value: `$${fmt(notional, 0)}` },
+          { label: 'R:R', value: trade.rr ? `${trade.rr}:1` : '—' },
+        ].map(({ label, value }) => (
+          <div key={label} style={{ fontSize: 10 }}>
+            <span style={{ color: '#4a5068' }}>{label}: </span>
+            <span style={{ color: '#9ca3af', fontWeight: 600 }}>{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TVChart({ isMobile, btcPrice, activeTrade }) {
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
   const candleSeriesRef = useRef(null);
+  const tradePriceLines = useRef([]);
+  const btcPriceLine = useRef(null);
   const [chartTab, setChartTab] = useState("interactive"); // "interactive" | "jayson"
   const [chartData, setChartData] = useState([]);
   const [hoveredLevel, setHoveredLevel] = useState(null);
@@ -278,18 +461,6 @@ function TVChart({ isMobile, btcPrice }) {
       });
     });
 
-    // Current BTC price marker
-    if (btcPrice) {
-      candleSeries.createPriceLine({
-        price: btcPrice,
-        color: '#f59e0b',
-        lineWidth: 1,
-        lineStyle: LineStyle.SparseDotted,
-        axisLabelVisible: true,
-        title: 'LIVE',
-      });
-    }
-
     // Fit content
     chart.timeScale().fitContent();
 
@@ -310,7 +481,100 @@ function TVChart({ isMobile, btcPrice }) {
       chartRef.current = null;
       candleSeriesRef.current = null;
     };
-  }, [chartData, chartTab, isMobile, btcPrice]);
+  }, [chartData, chartTab, isMobile]);
+
+  // Separate useEffect for BTC price line — updates in-place without chart rebuild
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    // Remove old BTC price line
+    if (btcPriceLine.current) {
+      try { series.removePriceLine(btcPriceLine.current); } catch (e) {}
+      btcPriceLine.current = null;
+    }
+
+    if (btcPrice) {
+      btcPriceLine.current = series.createPriceLine({
+        price: btcPrice,
+        color: '#f59e0b',
+        lineWidth: 1,
+        lineStyle: LineStyle.SparseDotted,
+        axisLabelVisible: true,
+        title: `BTC $${btcPrice.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+      });
+    }
+  }, [btcPrice]);
+
+  // Separate useEffect for active trade lines — updates instantly on override/revert
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    // Remove old trade price lines
+    tradePriceLines.current.forEach(line => {
+      try { series.removePriceLine(line); } catch (e) {}
+    });
+    tradePriceLines.current = [];
+
+    if (activeTrade && activeTrade.status === 'active') {
+      const t = activeTrade;
+      const entry = t.fill_price || t.entry;
+      const isShort = (t.direction || '').toUpperCase() === 'SHORT';
+      const notional = (t.stake || 300) * (t.leverage || 50);
+      const feesCost = notional * 0.00055 * 2;
+
+      if (entry) {
+        tradePriceLines.current.push(series.createPriceLine({
+          price: entry,
+          color: '#60a5fa',
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `ENTRY $${entry.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        }));
+      }
+      if (t.sl) {
+        const slMove = isShort ? (entry - t.sl) : (t.sl - entry);
+        const slPnl = (slMove / entry) * notional - feesCost;
+        const slManual = t.manual_override ? ' (MANUAL)' : '';
+        tradePriceLines.current.push(series.createPriceLine({
+          price: t.sl,
+          color: t.manual_override ? '#F59E0B' : '#ef4444',
+          lineWidth: 3,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `SL $${t.sl.toLocaleString(undefined, { minimumFractionDigits: 2 })} (${slPnl >= 0 ? '+' : ''}$${slPnl.toFixed(0)})${slManual}`,
+        }));
+      }
+      if (t.tp1) {
+        const tp1Move = isShort ? (entry - t.tp1) : (t.tp1 - entry);
+        const tp1Pnl = (tp1Move / entry) * notional - feesCost;
+        const tp1Manual = t.manual_override ? ' (MANUAL)' : '';
+        tradePriceLines.current.push(series.createPriceLine({
+          price: t.tp1,
+          color: t.manual_override ? '#F59E0B' : '#10b981',
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `TP1 $${t.tp1.toLocaleString(undefined, { minimumFractionDigits: 2 })} (+$${tp1Pnl.toFixed(0)})${tp1Manual}`,
+        }));
+      }
+      if (t.tp2) {
+        const tp2Move = isShort ? (entry - t.tp2) : (t.tp2 - entry);
+        const tp2Pnl = (tp2Move / entry) * notional - feesCost;
+        const tp2Manual = t.manual_override ? ' (MANUAL)' : '';
+        tradePriceLines.current.push(series.createPriceLine({
+          price: t.tp2,
+          color: t.manual_override ? '#F59E0B' : '#10b981',
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `TP2 $${t.tp2.toLocaleString(undefined, { minimumFractionDigits: 2 })} (+$${tp2Pnl.toFixed(0)})${tp2Manual}`,
+        }));
+      }
+    }
+  }, [activeTrade]);
 
   // Level tooltip on hover/click
   const LevelTooltip = ({ level, onClose }) => {
@@ -472,6 +736,11 @@ function TVChart({ isMobile, btcPrice }) {
             onError={(e) => { e.target.style.display = 'none'; }}
             style={{ width: '100%', height: isMobile ? 380 : 550, objectFit: 'cover', display: 'block' }} />
         </Card>
+      )}
+
+      {/* Live P&L Panel — below chart when trade is active */}
+      {activeTrade && activeTrade.status === 'active' && (
+        <LivePnLPanel trade={activeTrade} btcPrice={btcPrice} isMobile={isMobile} />
       )}
     </div>
   );
@@ -1339,6 +1608,675 @@ function StrategyTab({ config, isMobile }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   MANUAL CONTROLS — Trading Desk Control Panel
+   ═══════════════════════════════════════════════════════════════ */
+function ManualControls({ activeTrade, btcPrice, onRefresh }) {
+  const [isOpen, setIsOpen] = useState(true);
+  const [mode, setMode] = useState('paper');
+  const [isPaused, setIsPaused] = useState(false);
+  const [marginAmount, setMarginAmount] = useState('');
+  const [loading, setLoading] = useState(null); // 'pause' | 'kill' | 'margin' | 'override' | null
+  const [killConfirm, setKillConfirm] = useState(false);
+  const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
+  const [bybitStatus, setBybitStatus] = useState(null);
+  const [customSL, setCustomSL] = useState('');
+  const [customTP1, setCustomTP1] = useState('');
+  const [customTP2, setCustomTP2] = useState('');
+  const [isOverridden, setIsOverridden] = useState(false);
+
+  // Track manual override state from active trade
+  useEffect(() => {
+    if (activeTrade) {
+      setIsOverridden(activeTrade.manual_override || false);
+    } else {
+      setIsOverridden(false);
+      setCustomSL('');
+      setCustomTP1('');
+      setCustomTP2('');
+    }
+  }, [activeTrade?.id, activeTrade?.manual_override]);
+
+  // Load settings on mount
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch('/api/ghost/jc-settings');
+        const d = await r.json();
+        if (d?.settings) {
+          setMode(d.settings.mode || 'paper');
+          setIsPaused(d.settings.paused === 'true');
+        }
+      } catch {}
+    };
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Check Bybit status when in live mode
+  useEffect(() => {
+    if (mode !== 'live') { setBybitStatus(null); return; }
+    const load = async () => {
+      try {
+        const r = await fetch('/api/ghost/jc-bybit-status');
+        setBybitStatus(await r.json());
+      } catch { setBybitStatus({ api_connected: false }); }
+    };
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [mode]);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // Toggle mode
+  const toggleMode = async (newMode) => {
+    if (newMode === 'live') {
+      if (!window.confirm('⚠️ Switch to LIVE mode?\n\nReal funds will be used on Bybit.\nMake sure API keys are valid.')) return;
+    }
+    try {
+      await fetch('/api/ghost/jc-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode }),
+      });
+      setMode(newMode);
+      showToast(`Switched to ${newMode.toUpperCase()} mode`);
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'error');
+    }
+  };
+
+  // Pause/unpause
+  const handlePause = async () => {
+    setLoading('pause');
+    try {
+      const r = await fetch('/api/ghost/jc-pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle' }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setIsPaused(d.paused);
+        showToast(d.message);
+      } else {
+        showToast(d.error || 'Failed', 'error');
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+    }
+    setLoading(null);
+  };
+
+  // Kill trade
+  const handleKill = async () => {
+    setLoading('kill');
+    try {
+      const r = await fetch('/api/ghost/jc-kill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trade_id: activeTrade?.id || null }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        showToast(`Position closed @ $${Number(d.exit_price).toLocaleString()}. P&L: ${d.pnl >= 0 ? '+' : ''}$${d.pnl}`);
+        setKillConfirm(false);
+        onRefresh?.();
+      } else {
+        showToast(d.error || 'Kill failed', 'error');
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+    }
+    setLoading(null);
+  };
+
+  // Add margin
+  const handleAddMargin = async () => {
+    const amt = parseFloat(marginAmount);
+    if (!amt || amt <= 0) { showToast('Enter a valid USD amount', 'error'); return; }
+    if (mode !== 'live') { showToast('Add margin only works in LIVE mode', 'error'); return; }
+    if (!window.confirm(`Add $${amt} margin to position?`)) return;
+
+    setLoading('margin');
+    try {
+      const r = await fetch('/api/ghost/jc-add-margin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trade_id: activeTrade?.id || null, amount: amt }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        showToast(`Added $${amt}. New position: $${d.new_size}`);
+        setMarginAmount('');
+        onRefresh?.();
+      } else {
+        showToast(d.error || 'Failed', 'error');
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+    }
+    setLoading(null);
+  };
+
+  // Apply manual TP/SL override
+  const handleApplyOverride = async () => {
+    const sl = customSL ? parseFloat(customSL) : null;
+    const tp1 = customTP1 ? parseFloat(customTP1) : null;
+    const tp2 = customTP2 ? parseFloat(customTP2) : null;
+
+    if (!sl && !tp1 && !tp2) {
+      showToast('Enter at least one level to override', 'error');
+      return;
+    }
+
+    // Direction validation
+    const dir = (activeTrade.direction || activeTrade.side || '').toUpperCase();
+    const entry = Number(activeTrade.fill_price || activeTrade.entry || activeTrade.entry_price);
+    if (dir === 'SHORT') {
+      if (sl && sl <= entry) { showToast('SL must be above entry for SHORT', 'error'); return; }
+      if (tp1 && tp1 >= entry) { showToast('TP1 must be below entry for SHORT', 'error'); return; }
+      if (tp2 && tp2 >= entry) { showToast('TP2 must be below entry for SHORT', 'error'); return; }
+    } else if (dir === 'LONG') {
+      if (sl && sl >= entry) { showToast('SL must be below entry for LONG', 'error'); return; }
+      if (tp1 && tp1 <= entry) { showToast('TP1 must be above entry for LONG', 'error'); return; }
+      if (tp2 && tp2 <= entry) { showToast('TP2 must be above entry for LONG', 'error'); return; }
+    }
+
+    setLoading('override');
+    try {
+      const r = await fetch('/api/ghost/jc-override-levels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trade_id: activeTrade.id,
+          stop_loss: sl,
+          tp1: tp1,
+          tp2: tp2,
+        }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setIsOverridden(true);
+        showToast('Levels updated! Manual override active.');
+        onRefresh?.();
+      } else {
+        showToast(d.error || 'Failed to update levels', 'error');
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+    }
+    setLoading(null);
+  };
+
+  // Revert to JC's original levels
+  const handleRevertStrategy = async () => {
+    if (!window.confirm("Revert to JC's original TP/SL levels?")) return;
+
+    setLoading('override');
+    try {
+      const r = await fetch('/api/ghost/jc-revert-levels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trade_id: activeTrade.id }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setIsOverridden(false);
+        setCustomSL('');
+        setCustomTP1('');
+        setCustomTP2('');
+        showToast('Reverted to JC levels');
+        onRefresh?.();
+      } else {
+        showToast(d.error || 'Failed to revert', 'error');
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+    }
+    setLoading(null);
+  };
+
+  // Compute live P&L for kill confirm modal
+  const livePnl = activeTrade && btcPrice && activeTrade.entry_price
+    ? (() => {
+        const entry = Number(activeTrade.entry_price || activeTrade.entry || activeTrade.fill_price);
+        const stake = Number(activeTrade.stake_usd || activeTrade.stake || 300);
+        const lev = Number(activeTrade.leverage || 30);
+        const dir = (activeTrade.direction || activeTrade.side || '').toUpperCase();
+        const move = dir === 'SHORT' ? entry - btcPrice : btcPrice - entry;
+        const notional = stake * lev;
+        return ((move / entry) * notional).toFixed(2);
+      })()
+    : null;
+
+  const isLive = mode === 'live';
+
+  return (
+    <div style={{
+      background: C.card,
+      border: `1px solid ${isLive ? '#ef444466' : C.border}`,
+      borderRadius: 12,
+      overflow: 'hidden',
+      transition: 'border-color 0.3s ease',
+    }}>
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: 'fixed', top: 20, right: 20, zIndex: 9999,
+          padding: '12px 20px', borderRadius: 10,
+          background: toast.type === 'error' ? '#ef4444' : '#10b981',
+          color: '#fff', fontSize: 13, fontFamily: font, fontWeight: 600,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          animation: 'slideIn 0.3s ease',
+        }}>
+          {toast.type === 'error' ? '❌' : '✅'} {toast.message}
+        </div>
+      )}
+
+      {/* Kill confirmation modal */}
+      {killConfirm && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.8)', zIndex: 9998,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 20,
+        }} onClick={() => setKillConfirm(false)}>
+          <div style={{
+            background: '#1a1a2e', border: '1px solid #ef444466', borderRadius: 16,
+            padding: '28px 32px', maxWidth: 420, width: '100%',
+            boxShadow: '0 16px 64px rgba(0,0,0,0.6)',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontFamily: font, fontWeight: 700, color: '#ef4444', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+              ⚠️ Close Position Now?
+            </div>
+            {activeTrade && (
+              <div style={{ marginBottom: 16, padding: '12px 16px', background: '#0a0a0f', borderRadius: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: C.muted, fontFamily: font }}>Direction</span>
+                  <span style={{
+                    fontSize: 12, fontFamily: font, fontWeight: 700,
+                    color: (activeTrade.direction || '').toUpperCase() === 'LONG' ? C.win : C.loss,
+                  }}>{(activeTrade.direction || activeTrade.side || '?').toUpperCase()}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: C.muted, fontFamily: font }}>Entry</span>
+                  <span style={{ fontSize: 12, fontFamily: font, color: C.white }}>${fmt(activeTrade.entry_price || activeTrade.entry)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: C.muted, fontFamily: font }}>Current</span>
+                  <span style={{ fontSize: 12, fontFamily: font, color: C.warning }}>${fmt(btcPrice)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 12, color: C.muted, fontFamily: font }}>Est. P&L</span>
+                  <span style={{
+                    fontSize: 14, fontFamily: font, fontWeight: 700,
+                    color: livePnl && Number(livePnl) >= 0 ? C.win : C.loss,
+                  }}>{livePnl ? `${Number(livePnl) >= 0 ? '+' : ''}$${livePnl}` : '—'}</span>
+                </div>
+              </div>
+            )}
+            <div style={{ fontSize: 12, color: C.text, lineHeight: 1.6, marginBottom: 20 }}>
+              This will immediately close your position at market price{isLive ? ' on Bybit' : ' (paper)'}.
+              This action cannot be undone.
+            </div>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <button onClick={() => setKillConfirm(false)} style={{
+                flex: 1, padding: '10px 16px', borderRadius: 8, fontSize: 13, fontFamily: font,
+                fontWeight: 700, cursor: 'pointer', background: '#ffffff11', color: C.text,
+                border: `1px solid ${C.border}`,
+              }}>CANCEL</button>
+              <button onClick={handleKill} disabled={loading === 'kill'} style={{
+                flex: 1, padding: '10px 16px', borderRadius: 8, fontSize: 13, fontFamily: font,
+                fontWeight: 700, cursor: loading === 'kill' ? 'wait' : 'pointer',
+                background: '#ef444433', color: '#ef4444', border: '1px solid #ef444466',
+              }}>{loading === 'kill' ? 'CLOSING...' : '⏹ CONFIRM KILL'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header / toggle */}
+      <div
+        onClick={() => setIsOpen(!isOpen)}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '14px 20px', cursor: 'pointer',
+          borderBottom: isOpen ? `1px solid ${C.border}` : 'none',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 14 }}>⚙️</span>
+          <span style={{ fontSize: 12, fontFamily: font, fontWeight: 700, color: C.white, letterSpacing: 1.5, textTransform: 'uppercase' }}>
+            Manual Controls
+          </span>
+          {isPaused && (
+            <span style={{
+              fontSize: 9, fontFamily: font, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+              background: '#F59E0B22', color: '#F59E0B', border: '1px solid #F59E0B44',
+            }}>PAUSED</span>
+          )}
+          {isLive && (
+            <span style={{
+              fontSize: 9, fontFamily: font, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+              background: '#ef444422', color: '#ef4444', border: '1px solid #ef444444',
+              animation: 'pulse 2s infinite',
+            }}>🔴 LIVE</span>
+          )}
+        </div>
+        <span style={{
+          fontSize: 12, color: C.muted,
+          transform: isOpen ? 'rotate(180deg)' : 'none',
+          transition: 'transform 0.2s',
+        }}>▼</span>
+      </div>
+
+      {isOpen && (
+        <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Mode Toggle */}
+          <div>
+            <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1.5, marginBottom: 8 }}>TRADING MODE</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {['paper', 'live'].map(m => (
+                <button key={m} onClick={() => toggleMode(m)} style={{
+                  flex: 1, padding: '10px 16px', borderRadius: 8, fontSize: 12, fontFamily: font,
+                  fontWeight: 700, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: 1,
+                  transition: 'all 0.2s ease',
+                  background: mode === m
+                    ? (m === 'live' ? '#ef444422' : `${C.accent}22`)
+                    : '#ffffff06',
+                  color: mode === m
+                    ? (m === 'live' ? '#ef4444' : C.accent)
+                    : C.muted,
+                  border: `1px solid ${mode === m
+                    ? (m === 'live' ? '#ef444466' : `${C.accent}55`)
+                    : C.border}`,
+                }}>
+                  {m === 'live' ? '🔴 ' : '📝 '}{m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Bybit API status (live mode only) */}
+          {isLive && bybitStatus && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8,
+              background: bybitStatus.api_connected ? '#10b98111' : '#ef444411',
+              border: `1px solid ${bybitStatus.api_connected ? '#10b98133' : '#ef444433'}`,
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+            }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: bybitStatus.api_connected ? '#10b981' : '#ef4444',
+                boxShadow: bybitStatus.api_connected ? '0 0 6px #10b981' : 'none',
+              }} />
+              <span style={{ fontSize: 11, fontFamily: font, color: bybitStatus.api_connected ? '#10b981' : '#ef4444', fontWeight: 600 }}>
+                Bybit API {bybitStatus.api_connected ? 'Connected' : 'Disconnected'}
+              </span>
+              {bybitStatus.balance?.ok && (
+                <span style={{ fontSize: 11, fontFamily: font, color: C.text, marginLeft: 'auto' }}>
+                  Balance: ${Number(bybitStatus.balance.available).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {/* PAUSE */}
+            <button onClick={handlePause} disabled={loading === 'pause'} style={{
+              flex: '1 1 120px', padding: '12px 16px', borderRadius: 10, fontSize: 12, fontFamily: font,
+              fontWeight: 700, cursor: loading === 'pause' ? 'wait' : 'pointer',
+              background: isPaused ? '#F59E0B22' : '#ffffff08',
+              color: isPaused ? '#F59E0B' : C.text,
+              border: `1px solid ${isPaused ? '#F59E0B55' : C.border}`,
+              transition: 'all 0.2s ease',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            }}>
+              {isPaused ? '▶️' : '⏸'} {loading === 'pause' ? '...' : (isPaused ? 'RESUME' : 'PAUSE')}
+            </button>
+
+            {/* KILL */}
+            <button
+              onClick={() => activeTrade ? setKillConfirm(true) : showToast('No open trade to kill', 'error')}
+              disabled={loading === 'kill'}
+              style={{
+                flex: '1 1 120px', padding: '12px 16px', borderRadius: 10, fontSize: 12, fontFamily: font,
+                fontWeight: 700, cursor: !activeTrade ? 'not-allowed' : 'pointer',
+                background: '#ef444422', color: '#ef4444',
+                border: '1px solid #ef444455',
+                opacity: activeTrade ? 1 : 0.4,
+                transition: 'all 0.2s ease',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}
+            >
+              ⏹ KILL POSITION
+            </button>
+          </div>
+
+          {/* Add Margin */}
+          <div>
+            <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1.5, marginBottom: 8 }}>ADD MARGIN (LIVE ONLY)</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <span style={{
+                  position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
+                  fontSize: 13, fontFamily: font, color: C.muted,
+                }}>$</span>
+                <input
+                  type="number"
+                  value={marginAmount}
+                  onChange={e => setMarginAmount(e.target.value)}
+                  placeholder="Amount USD"
+                  disabled={mode !== 'live' || !activeTrade}
+                  style={{
+                    width: '100%', padding: '10px 12px 10px 28px', borderRadius: 8,
+                    background: '#0a0a0f', border: `1px solid ${C.border}`,
+                    color: C.white, fontSize: 13, fontFamily: font,
+                    outline: 'none', boxSizing: 'border-box',
+                    opacity: mode !== 'live' || !activeTrade ? 0.4 : 1,
+                  }}
+                  onFocus={e => e.target.style.borderColor = '#10b981'}
+                  onBlur={e => e.target.style.borderColor = C.border}
+                  onKeyDown={e => e.key === 'Enter' && handleAddMargin()}
+                />
+              </div>
+              <button
+                onClick={handleAddMargin}
+                disabled={mode !== 'live' || !activeTrade || loading === 'margin'}
+                style={{
+                  padding: '10px 20px', borderRadius: 8, fontSize: 12, fontFamily: font,
+                  fontWeight: 700, cursor: mode !== 'live' || !activeTrade ? 'not-allowed' : 'pointer',
+                  background: '#10b98122', color: '#10b981',
+                  border: '1px solid #10b98155',
+                  opacity: mode !== 'live' || !activeTrade ? 0.4 : 1,
+                  whiteSpace: 'nowrap',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {loading === 'margin' ? '...' : '+ ADD MARGIN'}
+              </button>
+            </div>
+          </div>
+
+          {/* Manual TP/SL Override */}
+          {activeTrade && (
+            <div style={{
+              marginTop: 4, padding: 16,
+              background: '#0a0a0f',
+              border: `1px solid ${isOverridden ? '#F59E0B33' : C.border}`,
+              borderRadius: 10,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1.5, textTransform: 'uppercase' }}>
+                  MANUAL TP/SL OVERRIDE
+                </div>
+                {isOverridden && (
+                  <span style={{
+                    fontSize: 9, fontFamily: font, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                    background: '#F59E0B22', color: '#F59E0B', border: '1px solid #F59E0B44',
+                  }}>⚠️ OVERRIDE ACTIVE</span>
+                )}
+              </div>
+
+              {/* SL input */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, fontFamily: font, color: '#ef4444', fontWeight: 600, minWidth: 80 }}>Stop Loss</span>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 12, fontFamily: font, color: C.muted }}>$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder={activeTrade.sl || 'N/A'}
+                      value={customSL}
+                      onChange={e => setCustomSL(e.target.value)}
+                      style={{
+                        width: '100%', padding: '8px 10px 8px 24px', borderRadius: 6,
+                        background: '#1a1a2e', border: `1px solid ${C.border}`,
+                        color: C.white, fontSize: 12, fontFamily: font,
+                        outline: 'none', boxSizing: 'border-box',
+                      }}
+                      onFocus={e => e.target.style.borderColor = '#F59E0B'}
+                      onBlur={e => e.target.style.borderColor = C.border}
+                    />
+                  </div>
+                  <span style={{ fontSize: 10, fontFamily: font, color: '#666', minWidth: 100, textAlign: 'right' }}>
+                    Orig: ${fmt(activeTrade.original_sl || activeTrade.sl)}
+                  </span>
+                </div>
+              </div>
+
+              {/* TP1 input */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, fontFamily: font, color: '#10b981', fontWeight: 600, minWidth: 80 }}>Take Profit 1</span>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 12, fontFamily: font, color: C.muted }}>$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder={activeTrade.tp1 || 'N/A'}
+                      value={customTP1}
+                      onChange={e => setCustomTP1(e.target.value)}
+                      style={{
+                        width: '100%', padding: '8px 10px 8px 24px', borderRadius: 6,
+                        background: '#1a1a2e', border: `1px solid ${C.border}`,
+                        color: C.white, fontSize: 12, fontFamily: font,
+                        outline: 'none', boxSizing: 'border-box',
+                      }}
+                      onFocus={e => e.target.style.borderColor = '#F59E0B'}
+                      onBlur={e => e.target.style.borderColor = C.border}
+                    />
+                  </div>
+                  <span style={{ fontSize: 10, fontFamily: font, color: '#666', minWidth: 100, textAlign: 'right' }}>
+                    Orig: ${fmt(activeTrade.original_tp1 || activeTrade.tp1)}
+                  </span>
+                </div>
+              </div>
+
+              {/* TP2 input */}
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, fontFamily: font, color: '#10b981', fontWeight: 600, minWidth: 80 }}>Take Profit 2</span>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 12, fontFamily: font, color: C.muted }}>$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder={activeTrade.tp2 || 'N/A'}
+                      value={customTP2}
+                      onChange={e => setCustomTP2(e.target.value)}
+                      style={{
+                        width: '100%', padding: '8px 10px 8px 24px', borderRadius: 6,
+                        background: '#1a1a2e', border: `1px solid ${C.border}`,
+                        color: C.white, fontSize: 12, fontFamily: font,
+                        outline: 'none', boxSizing: 'border-box',
+                      }}
+                      onFocus={e => e.target.style.borderColor = '#F59E0B'}
+                      onBlur={e => e.target.style.borderColor = C.border}
+                    />
+                  </div>
+                  <span style={{ fontSize: 10, fontFamily: font, color: '#666', minWidth: 100, textAlign: 'right' }}>
+                    Orig: ${fmt(activeTrade.original_tp2 || activeTrade.tp2)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  onClick={handleApplyOverride}
+                  disabled={loading === 'override'}
+                  style={{
+                    flex: 1, padding: '10px 16px', borderRadius: 8, fontSize: 12, fontFamily: font,
+                    fontWeight: 700, cursor: loading === 'override' ? 'wait' : 'pointer',
+                    background: '#F59E0B22', color: '#F59E0B',
+                    border: '1px solid #F59E0B55',
+                    transition: 'all 0.2s ease',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  }}
+                >
+                  {loading === 'override' ? '...' : '⚡ APPLY OVERRIDE'}
+                </button>
+                <button
+                  onClick={handleRevertStrategy}
+                  disabled={!isOverridden || loading === 'override'}
+                  style={{
+                    flex: 1, padding: '10px 16px', borderRadius: 8, fontSize: 12, fontFamily: font,
+                    fontWeight: 700,
+                    cursor: !isOverridden || loading === 'override' ? 'not-allowed' : 'pointer',
+                    background: isOverridden ? '#8B5CF622' : '#ffffff06',
+                    color: isOverridden ? '#8B5CF6' : C.muted,
+                    border: `1px solid ${isOverridden ? '#8B5CF655' : C.border}`,
+                    opacity: isOverridden ? 1 : 0.4,
+                    transition: 'all 0.2s ease',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  }}
+                >
+                  🔄 REVERT STRATEGY
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Warning */}
+          {isLive && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8,
+              background: '#ef444411', border: '1px solid #ef444422',
+              display: 'flex', alignItems: 'flex-start', gap: 8,
+            }}>
+              <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1 }}>⚠️</span>
+              <span style={{ fontSize: 11, fontFamily: font, color: '#ef4444', lineHeight: 1.5 }}>
+                LIVE mode is active. All actions will execute real trades on Bybit with real funds. Use with caution.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pulse animation for LIVE indicator */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+        @keyframes slideIn {
+          from { transform: translateX(100%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
    Root page
    ═══════════════════════════════════════════════════════════════ */
 export default function JC() {
@@ -1354,6 +2292,7 @@ export default function JC() {
   const [trades, setTrades] = useState([]);
   const [dailyPnl, setDailyPnl] = useState([]);
   const [config, setConfig] = useState(null);
+  const [activeTrade, setActiveTrade] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
@@ -1456,6 +2395,18 @@ export default function JC() {
     return () => clearInterval(t);
   }, []);
 
+  // Active JC trade — 3s
+  useEffect(() => {
+    const load = () => fetchJSON("/api/ghost/jc-trades", { trades: [] }).then(d => {
+      const trades = d?.trades || [];
+      const open = trades.find(t => t.status === 'active' || t.status === 'open');
+      setActiveTrade(open || null);
+    });
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, []);
+
   const mode = watcherStatus?.mode || config?.mode || "paper";
 
   return (
@@ -1468,10 +2419,23 @@ export default function JC() {
       <HeaderBar btcPrice={btcPrice} watcherStatus={watcherStatus} mode={mode} />
 
       {/* B. Chart */}
-      <TVChart isMobile={isMobile} btcPrice={btcPrice} />
+      <TVChart isMobile={isMobile} btcPrice={btcPrice} activeTrade={activeTrade} />
 
       {/* C. Signal Feed */}
       <SignalFeed messages={messages} />
+
+      {/* D. Manual Controls */}
+      <ManualControls
+        activeTrade={activeTrade}
+        btcPrice={btcPrice}
+        onRefresh={() => {
+          fetchJSON("/api/ghost/jc-trades", { trades: [] }).then(d => {
+            const tds = d?.trades || [];
+            const open = tds.find(t => t.status === 'active' || t.status === 'open');
+            setActiveTrade(open || null);
+          });
+        }}
+      />
 
       {/* ═══ TAB BAR ═══ */}
       <div style={{

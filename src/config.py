@@ -44,6 +44,14 @@ MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.5"))  
 # Debug
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
+# Polygon RPC (QuikNode dedicated node)
+POLYGON_RPC_HTTP = os.getenv("POLYGON_RPC_HTTP", "https://polygon-rpc.com")
+POLYGON_RPC_WSS = os.getenv("POLYGON_RPC_WSS", "wss://polygon-bor.publicnode.com")
+
+# Polymarket wallet (for live trading)
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")  # Needed for live trade signing only
+
 # Export all config as dict for debugging
 def get_config_dict():
     """Return all configuration as a dictionary."""
