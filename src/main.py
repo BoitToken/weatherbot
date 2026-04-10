@@ -1806,6 +1806,18 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
     scheduler.add_job(scheduled_penny_daily_report, 'cron', hour=21, minute=0, timezone='Asia/Kolkata', id='penny_daily', replace_existing=True)
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min, hourly: on-the-hour)")
+
+    # ═══════════════════════════════════════════════════════════════
+    # JC COPY TRADER — Monitor Jayson's levels every 10s
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        import sys
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from jc_copy_trader import run_jc_copy_trader
+        scheduler.add_job(run_jc_copy_trader, 'interval', seconds=10, id='jc_copy_trader', replace_existing=True)
+        logger.info("✅ JC Copy Trader scheduled (every 10s)")
+    except Exception as e:
+        logger.error(f"❌ JC Copy Trader failed to load: {e}")
     
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
