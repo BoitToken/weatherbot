@@ -33,6 +33,57 @@ _last_data_scan: Optional[datetime] = None
 _last_signal_scan: Optional[datetime] = None
 _startup_time: Optional[datetime] = None
 
+
+# ═══════════════════════════════════════════════════════════════
+# TRADING MODE GATE — checks bot_settings before any Telegram send
+# ═══════════════════════════════════════════════════════════════
+_trading_mode_cache = {'mode': None, 'paper_notif': None, 'ts': None}
+
+
+async def get_trading_mode() -> dict:
+    """Read trading_mode + paper_notifications from bot_settings.
+    Returns {'mode': 'live'|'paper', 'paper_notifications': bool}.
+    Cached for 60s to avoid DB spam.
+    """
+    import time
+    now = time.time()
+    if _trading_mode_cache['ts'] and (now - _trading_mode_cache['ts']) < 60:
+        return {'mode': _trading_mode_cache['mode'], 'paper_notifications': _trading_mode_cache['paper_notif']}
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row_mode = await conn.fetchrow(
+                "SELECT value FROM bot_settings WHERE key = 'trading_mode'"
+            )
+            row_notif = await conn.fetchrow(
+                "SELECT value FROM bot_settings WHERE key = 'paper_notifications'"
+            )
+        mode = 'live'
+        if row_mode:
+            v = str(row_mode['value']).strip().strip('"').lower()
+            mode = v if v in ('live', 'paper') else 'live'
+        paper_notif = False
+        if row_notif:
+            v = str(row_notif['value']).strip().strip('"').lower()
+            paper_notif = v in ('true', '1', 'yes')
+        _trading_mode_cache['mode'] = mode
+        _trading_mode_cache['paper_notif'] = paper_notif
+        _trading_mode_cache['ts'] = now
+        return {'mode': mode, 'paper_notifications': paper_notif}
+    except Exception as e:
+        logger.error(f"❌ get_trading_mode failed: {e}")
+        return {'mode': 'live', 'paper_notifications': False}
+
+
+def should_send_paper_telegram(trading_cfg: dict) -> bool:
+    """Return True only if paper notifications are allowed."""
+    return trading_cfg.get('paper_notifications', False)
+
+
+def is_live_mode(trading_cfg: dict) -> bool:
+    """Return True if trading mode is live."""
+    return trading_cfg.get('mode', 'paper') == 'live'
+
 # Signal loop instance (initialized on startup)
 _signal_loop = None
 _improvement_engine = None
@@ -203,7 +254,11 @@ async def daily_summary_task():
     global _telegram_bot
     if not _telegram_bot:
         return
-    
+    # Gate: this is paper/sports summary, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 Daily summary suppressed (paper_notifications=false)")
+        return
     try:
         import pytz
         IST = pytz.timezone('Asia/Calcutta')
@@ -374,28 +429,32 @@ async def scheduled_penny_scan():
 
         # Penny bet placed — silent (only HIT/DEAD broadcasts, no entry noise)
 
-        # Broadcast resolutions
+        # Broadcast resolutions — only if paper notifications are enabled
         if _telegram_bot and resolved:
-            for r in resolved:
-                won = r.get('pnl_usd', 0) > 0
-                emoji = "💰" if won else "💀"
-                bp = r.get('buy_price', 0.01)
-                msg = (
-                    f"{emoji} PENNY {'HIT!' if won else 'DEAD'}\n\n"
-                    f"{r['question'][:60]}\n"
-                    f"Bought at: {bp*100:.0f}¢\n"
-                    f"P&L: ${r['pnl_usd']:+.2f}\n"
-                    f"{'🎯 ' + str(int(1/bp)) + 'x RETURN!' if won else ''}"
-                )
-                try:
-                    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
-                    for sub in subscribers:
-                        try:
-                            await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+            _tcfg = await get_trading_mode()
+            if should_send_paper_telegram(_tcfg):
+                for r in resolved:
+                    won = r.get('pnl_usd', 0) > 0
+                    emoji = "💰" if won else "💀"
+                    bp = r.get('buy_price', 0.01)
+                    msg = (
+                        f"{emoji} PENNY {'HIT!' if won else 'DEAD'}\n\n"
+                        f"{r['question'][:60]}\n"
+                        f"Bought at: {bp*100:.0f}¢\n"
+                        f"P&L: ${r['pnl_usd']:+.2f}\n"
+                        f"{'🎯 ' + str(int(1/bp)) + 'x RETURN!' if won else ''}"
+                    )
+                    try:
+                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                        for sub in subscribers:
+                            try:
+                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            else:
+                logger.info(f"🔇 Penny resolutions suppressed (paper_notifications=false, {len(resolved)} resolved)")
 
         logger.info(
             f"🎰 Penny scan complete: {len(pennies)} found, {len(scored)} scored, "
@@ -471,7 +530,10 @@ async def pre_match_alerts():
     global _telegram_bot
     if not _telegram_bot:
         return
-    
+    # Gate: sports are paper trades, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        return
     try:
         one_hour_later = datetime.utcnow() + timedelta(hours=1)
         async_pool = get_async_pool()
@@ -858,6 +920,11 @@ async def scheduled_btc_hourly_summary():
     if not _telegram_bot:
         logger.warning("\u26a0\ufe0f BTC hourly: _telegram_bot is None, skipping")
         return
+    # Gate: suppress if paper mode + paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC hourly summary suppressed (paper mode, notifications off)")
+        return
     try:
         import psycopg2
         conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
@@ -905,7 +972,8 @@ async def scheduled_btc_hourly_summary():
         # Build message
         from datetime import datetime as dt
         now_ist = dt.now().strftime('%H:%M IST')
-        lines = [f"\U0001f4ca BTC PAPER TRADING \u2014 {now_ist}", f"Strategy: {strategy_name}", ""]
+        _mode_label = '🟢 BTC LIVE TRADING' if is_live_mode(_tcfg) else '📊 BTC PAPER TRADING'
+        lines = [f"{_mode_label} \u2014 {now_ist}", f"Strategy: {strategy_name}", ""]
 
         h_total, h_wins, h_net, h_best = last_hour if last_hour else (0, 0, 0, 0)
         if h_total and h_total > 0:
@@ -1004,6 +1072,11 @@ async def scheduled_btc_intelligence_loop():
     """
     global _telegram_bot
     if not _telegram_bot:
+        return
+    # Gate: suppress if paper mode + paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC intelligence loop suppressed (paper mode, notifications off)")
         return
     try:
         import psycopg2, json
@@ -1310,6 +1383,11 @@ async def scheduled_penny_daily_report():
     global _telegram_bot
     if not _telegram_bot:
         return
+    # Gate: penny trades are paper-only, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 Penny daily report suppressed (paper_notifications=false)")
+        return
     try:
         import psycopg2
         conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
@@ -1404,6 +1482,11 @@ async def scheduled_btc_daily_strategy_report():
     """Daily strategy analysis at 11:30 PM IST — volatility, hourly performance, adjustments."""
     global _telegram_bot
     if not _telegram_bot:
+        return
+    # Gate: suppress if paper mode + paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC daily strategy report suppressed (paper mode, notifications off)")
         return
     try:
         import psycopg2
@@ -1519,8 +1602,14 @@ async def scheduled_btc_resolution_check():
         if resolved:
             logger.info(f"📊 BTC resolved: {len(resolved)} windows")
             
+            # Check trading mode — only send Telegram if live OR paper_notifications=true
+            _tcfg = await get_trading_mode()
+            _send_telegram = is_live_mode(_tcfg) or should_send_paper_telegram(_tcfg)
+            
             # Broadcast WON/LOST for each resolved window with a signal
-            if _telegram_bot:
+            if _telegram_bot and not _send_telegram:
+                logger.info(f"🔇 BTC resolution alerts suppressed (paper mode, notifications off, {len(resolved)} resolved)")
+            if _telegram_bot and _send_telegram:
                 import psycopg2 as _pg
                 import httpx as _httpx
                 for r in resolved:
@@ -1601,16 +1690,27 @@ async def scheduled_btc_resolution_check():
                                 _br_avail = float(_br_disp.get('available', BTC_STARTING_BALANCE))
                                 _br_dd = float(_br_disp.get('max_drawdown_pct', 0))
                                 _br_pnl_pct = (_br_bal - BTC_STARTING_BALANCE) / BTC_STARTING_BALANCE * 100
-                                bankroll_line = (f"\n\u2501\u2501\u2501 BANKROLL \u2501\u2501\u2501\n"
+                                _br_label = 'WALLET' if is_live_mode(_tcfg) else 'BANKROLL'
+                                bankroll_line = (f"\n\u2501\u2501\u2501 {_br_label} \u2501\u2501\u2501\n"
                                     f"\U0001f4b0 ${_br_bal:,.0f} ({'+' if _br_pnl_pct>=0 else ''}{_br_pnl_pct:.1f}%) | Avail: ${_br_avail:,.0f}"
                                     + (f" | DD: {_br_dd:.1f}%" if _br_dd > 0.01 else ""))
                             except Exception:
                                 bankroll_line = ""
 
+                            # LIVE green theme vs paper theme
+                            if is_live_mode(_tcfg):
+                                _win_emoji = '\U0001f7e2\U0001f4b0' if was_correct else '\U0001f534\U0001f4b8'
+                                _label = 'LIVE WIN' if was_correct else 'LIVE LOSS'
+                                _section = 'REAL PROFIT' if was_correct else 'REAL LOSS'
+                            else:
+                                _win_emoji = re
+                                _label = rw
+                                _section = 'TRADE'
+
                             msg = (
-                                f"{re} BTC {rw} \u2014 {wl}M\n"
+                                f"{_win_emoji if is_live_mode(_tcfg) else re} BTC {_label if is_live_mode(_tcfg) else rw} \u2014 {wl}M\n"
                                 f"\n"
-                                f"\u2501\u2501\u2501 TRADE \u2501\u2501\u2501\n"
+                                f"\u2501\u2501\u2501 {_section} \u2501\u2501\u2501\n"
                                 f"Direction: {pred} \u2192 Actual: {actual}\n"
                                 f"Entry: {ep*100:.1f}\u00a2 | Stake: ${stake:.0f} | R:R {rr:.1f}:1\n"
                                 f"P&L: {pnl_str} | ROI: {'+' if roi>=0 else ''}{roi:.0f}%\n"
@@ -1851,8 +1951,9 @@ async def lifespan(app: FastAPI):
             engine = LearningEngine(get_async_pool())
             report = await engine.weekly_report()
             logger.info(f"📊 Weekly learning report generated: {len(report.get('recommendations', []))} recommendations")
-            # Send via Telegram if available
-            if _telegram_bot:
+            # Send via Telegram if available (gate: paper notifications)
+            _tcfg = await get_trading_mode()
+            if _telegram_bot and should_send_paper_telegram(_tcfg):
                 recs = report.get('recommendations', [])
                 perf = report.get('strategy_performance', [])
                 msg_parts = ["📊 <b>Weekly Learning Report</b>\n"]
@@ -5206,6 +5307,126 @@ async def get_analytics_sport_breakdown():
     except Exception as e:
         logger.error(f"Sport breakdown error: {e}")
         return {"sports": [], "count": 0, "error": str(e)}
+
+
+# =============================================================================
+# LIVE TRADING ENDPOINTS (wallet balance, live trades, live stats)
+# =============================================================================
+
+@app.get("/api/wallet/balance")
+async def get_wallet_balance():
+    """Get real USDC + MATIC balance from Polygon blockchain."""
+    import httpx
+    WALLET = "0xb9BEa5FDe7957709D0f8d2064188B1603b74D5Ca"
+    RPC = "https://small-cosmological-friday.matic.quiknode.pro/c6dd1696accaf8a955e09f34475deb31913c5254/"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # MATIC balance
+            r = await client.post(RPC, json={
+                "jsonrpc": "2.0", "method": "eth_getBalance",
+                "params": [WALLET, "latest"], "id": 1
+            })
+            matic = int(r.json()["result"], 16) / 1e18
+
+            # USDC balance (native USDC on Polygon)
+            USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            data = "0x70a08231000000000000000000000000" + WALLET[2:]
+            r2 = await client.post(RPC, json={
+                "jsonrpc": "2.0", "method": "eth_call",
+                "params": [{"to": USDC, "data": data}, "latest"], "id": 2
+            })
+            usdc = int(r2.json()["result"], 16) / 1e6
+
+        return {
+            "wallet": WALLET,
+            "usdc": round(usdc, 2),
+            "matic": round(matic, 4),
+            "chain": "Polygon",
+            "live": True
+        }
+    except Exception as e:
+        logger.error(f"Wallet balance error: {e}")
+        return {"wallet": WALLET, "usdc": 0, "matic": 0, "chain": "Polygon", "live": True, "error": str(e)}
+
+
+@app.get("/api/live/trades")
+async def get_live_trades():
+    """Get only LIVE trades (not paper)."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, window_id, prediction, token_id, side,
+                       entry_price, stake_usd, tx_hash, status,
+                       exit_price, pnl_usd, wallet_balance_before,
+                       wallet_balance_after, created_at, resolved_at
+                FROM live_trades
+                ORDER BY created_at DESC
+                LIMIT 50
+            """)
+            trades = []
+            for row in rows:
+                r = dict(row)
+                trades.append({
+                    "id": r["id"],
+                    "window_id": r.get("window_id"),
+                    "prediction": r.get("prediction"),
+                    "token_id": r.get("token_id"),
+                    "side": r.get("side"),
+                    "entry_price": float(r["entry_price"]) if r.get("entry_price") else None,
+                    "stake_usd": float(r["stake_usd"]) if r.get("stake_usd") else None,
+                    "tx_hash": r.get("tx_hash"),
+                    "status": r.get("status"),
+                    "exit_price": float(r["exit_price"]) if r.get("exit_price") else None,
+                    "pnl_usd": float(r["pnl_usd"]) if r.get("pnl_usd") else None,
+                    "wallet_before": float(r["wallet_balance_before"]) if r.get("wallet_balance_before") else None,
+                    "wallet_after": float(r["wallet_balance_after"]) if r.get("wallet_balance_after") else None,
+                    "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                    "resolved_at": r["resolved_at"].isoformat() if r.get("resolved_at") else None,
+                })
+            return {"trades": trades, "mode": "live"}
+    except Exception as e:
+        logger.error(f"Live trades error: {e}")
+        return {"trades": [], "mode": "live", "error": str(e)}
+
+
+@app.get("/api/live/stats")
+async def get_live_stats():
+    """Get live trading stats only."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as total,
+                    COALESCE(SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END), 0) as wins,
+                    COALESCE(SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END), 0) as losses,
+                    COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                    COALESCE(AVG(pnl_usd), 0) as avg_pnl,
+                    COALESCE(SUM(stake_usd), 0) as total_staked
+                FROM live_trades
+                WHERE status = 'resolved'
+            """)
+            total = int(row["total"])
+            wins = int(row["wins"])
+            losses = int(row["losses"])
+            total_pnl = float(row["total_pnl"])
+            avg_pnl = float(row["avg_pnl"])
+            total_staked = float(row["total_staked"])
+            win_rate = (wins / total * 100) if total > 0 else 0
+            return {
+                "total_trades": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(win_rate, 1),
+                "total_pnl": round(total_pnl, 2),
+                "avg_pnl": round(avg_pnl, 2),
+                "total_staked": round(total_staked, 2),
+                "mode": "live"
+            }
+    except Exception as e:
+        logger.error(f"Live stats error: {e}")
+        return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0, "avg_pnl": 0, "total_staked": 0, "mode": "live", "error": str(e)}
 
 
 # =============================================================================

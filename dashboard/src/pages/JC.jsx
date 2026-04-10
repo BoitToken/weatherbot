@@ -1008,30 +1008,6 @@ function SignalsTab({ btcPrice, position, messages, signals }) {
         })()}
       </Card>
 
-      {/* Active Position Card */}
-      <Card>
-        <SectionTitle>🎯 Active Position</SectionTitle>
-        {position ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12 }}>
-            {[
-              { label: "Side", value: position.side, color: position.side === "LONG" ? C.win : C.loss },
-              { label: "Entry", value: position.entry_price ? `$${fmt(position.entry_price)}` : "—", color: C.white },
-              { label: "Unrealized P&L", value: position.unrealized_pnl != null ? `${Number(position.unrealized_pnl) >= 0 ? "+" : ""}$${fmt(position.unrealized_pnl)}` : "—", color: Number(position.unrealized_pnl) >= 0 ? C.win : C.loss },
-              { label: "State", value: position.state || "OPEN", color: C.accent },
-            ].map(({ label, value, color }) => (
-              <div key={label} style={{ background: "#0f0f1a", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                <div style={{ fontSize: 9, fontFamily: font, color: C.muted, letterSpacing: 1, marginBottom: 6 }}>{label}</div>
-                <div style={{ fontSize: 16, fontFamily: font, fontWeight: 700, color }}>{value}</div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div style={{ textAlign: "center", padding: "24px 0", color: C.muted, fontSize: 13, fontFamily: font }}>
-            No open position
-          </div>
-        )}
-      </Card>
-
       {/* Discord Signal Feed (last 5) */}
       <SignalFeed messages={feedItems} />
     </div>
