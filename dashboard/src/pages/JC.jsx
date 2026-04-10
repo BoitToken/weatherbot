@@ -141,7 +141,7 @@ function HeaderBar({ btcPrice, watcherStatus, mode }) {
 function TVChart({ isMobile }) {
   const containerRef = useRef(null);
   const widgetRef = useRef(null);
-  const [showJC, setShowJC] = useState(false);
+  const [showJC, setShowJC] = useState(true);
   const [imgTs, setImgTs] = useState(Date.now());
 
   useEffect(() => {
