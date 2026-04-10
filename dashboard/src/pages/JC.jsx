@@ -259,30 +259,34 @@ function formatTimestamp(ts) {
    ═══════════════════════════════════════════════════════════════ */
 function cleanMsg(text) {
   if (!text) return '';
-  return text.replace(/<@[&!]?\d+>/g, '').replace(/<#\d+>/g, '').trim();
+  let c = text.replace(/<@[&!]?\d+>/g, '').replace(/<#\d+>/g, '').trim();
+  c = c.replace(/https?:\/\/\S+/g, '').trim();
+  return c;
 }
 
 function classifyMsg(text) {
   const t = (text || '').toLowerCase();
-  if (t.includes('full chart') || t.includes('my chart')) return { tag: 'CHART', emoji: '0001F4CA', color: C.accent };
+  if (t.includes('full chart') || t.includes('my chart')) return { tag: 'CHART', emoji: String.fromCodePoint(0x1F4CA), color: C.accent };
   if ((t.includes("i've") || t.includes("ive")) && (t.includes('long') || t.includes('short')) || t.includes('scalped') || t.includes('i shorted'))
-    return { tag: 'ENTRY', emoji: '\u26A1', color: C.warning };
+    return { tag: 'ENTRY', emoji: String.fromCodePoint(0x26A1), color: C.warning };
   if (t.includes('hit a tp') || t.includes('tp hit') || t.includes('nice move') || t.includes('take profit'))
-    return { tag: 'TP HIT', emoji: '\u2705', color: C.win };
+    return { tag: 'TP HIT', emoji: String.fromCodePoint(0x2705), color: C.win };
   if (t.includes('stopped') || t.includes('not the low') || t.includes('invalidated'))
-    return { tag: 'STOPPED', emoji: '\u274C', color: C.loss };
-  return { tag: '', emoji: '0001F4AC', color: C.muted };
+    return { tag: 'STOPPED', emoji: String.fromCodePoint(0x274C), color: C.loss };
+  if (t.includes('mcb') || t.includes('poc') || t.includes('vah') || t.includes('val') || t.includes('fib') || t.includes('cdw'))
+    return { tag: 'TA', emoji: String.fromCodePoint(0x1F9E0), color: '#60a5fa' };
+  return { tag: '', emoji: String.fromCodePoint(0x1F4AC), color: C.muted };
 }
 
 function fmtTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   const now = new Date();
-  const diff = (now - d) / 60000;
-  if (diff < 60) return Math.round(diff) + 'm ago';
-  if (diff < 1440) return Math.round(diff / 60) + 'h ago';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
-    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const diffMin = (now - d) / 60000;
+  if (diffMin < 60) return Math.round(diffMin) + 'm ago';
+  if (diffMin < 1440) return Math.round(diffMin / 60) + 'h ago';
+  if (diffMin < 10080) return Math.round(diffMin / 1440) + 'd ago';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function getTVLink(text) {
@@ -290,21 +294,26 @@ function getTVLink(text) {
   return m ? m[0] : null;
 }
 
-function SignalFeed({ messages, onSelectSignal }) {
+function SignalFeed({ messages }) {
   const sorted = [...(messages || [])].sort((a, b) => {
     return new Date(b.created_at || b.timestamp || 0) - new Date(a.created_at || a.timestamp || 0);
-  }).slice(0, 5);
+  });
+  const recent = sorted.filter(m => {
+    const t = (m.content || m.message || '').toLowerCase();
+    return t.includes('long') || t.includes('short') || t.includes('tp') || t.includes('chart') || t.includes('mcb') || t.includes('poc') || t.includes('cdw') || t.includes('fib') || t.includes('scalp');
+  }).slice(0, 3);
+  const items = recent.length > 0 ? recent : sorted.slice(0, 3);
 
   return (
     <Card>
-      <SectionTitle>{"0001F4E1"} Jayson Casper {"\u2014"} Latest</SectionTitle>
-      {sorted.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 24, color: C.muted, fontSize: 12, fontFamily: font }}>
-          {"0001F47B"} Listening... no messages yet
+      <SectionTitle>{String.fromCodePoint(0x1F4E1)} Jayson Casper</SectionTitle>
+      {items.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 20, color: C.muted, fontSize: 12, fontFamily: font }}>
+          {String.fromCodePoint(0x1F47B)} Listening for signals...
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {sorted.map((m, i) => {
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((m, i) => {
             const raw = m.content || m.message || '';
             const text = cleanMsg(raw);
             if (!text && !m.has_attachments) return null;
@@ -312,30 +321,27 @@ function SignalFeed({ messages, onSelectSignal }) {
             const tv = getTVLink(raw);
             const ch = (m.channel_type || m.channel || 'btc-ta').replace('_', '-');
             return (
-              <div key={m.id || i}
-                onClick={() => onSelectSignal && onSelectSignal(m)}
-                style={{
-                  borderLeft: `3px solid ${cls.color}`,
-                  background: '#0d0d18',
-                  padding: '8px 12px',
-                  cursor: 'pointer',
-                  borderRadius: '0 6px 6px 0',
-                }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                  <span style={{ fontSize: 11 }}>{cls.emoji}</span>
-                  {cls.tag && <span style={{ fontSize: 9, fontFamily: font, color: cls.color, fontWeight: 700, letterSpacing: 0.5 }}>{cls.tag}</span>}
+              <div key={m.id || i} style={{
+                borderLeft: `3px solid ${cls.color}`,
+                background: '#0d0d18',
+                padding: '8px 10px',
+                borderRadius: '0 6px 6px 0',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                  <span style={{ fontSize: 12 }}>{cls.emoji}</span>
+                  {cls.tag && <span style={{ fontSize: 9, fontFamily: font, color: cls.color, fontWeight: 700 }}>{cls.tag}</span>}
                   <span style={{ flex: 1 }} />
                   <span style={{ fontSize: 9, fontFamily: font, color: C.muted }}>#{ch}</span>
                   <span style={{ fontSize: 9, fontFamily: font, color: C.muted }}>{fmtTime(m.created_at || m.timestamp)}</span>
                 </div>
-                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.45, fontFamily: "'Inter', sans-serif" }}>
-                  {text.slice(0, 150)}{text.length > 150 ? '\u2026' : ''}
+                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4, fontFamily: "'Inter', sans-serif", wordBreak: 'break-word' }}>
+                  {text.slice(0, 120)}{text.length > 120 ? '...' : ''}
                 </div>
                 {tv && (
                   <a href={tv} target="_blank" rel="noopener noreferrer"
-                    style={{ fontSize: 10, color: C.accent, fontFamily: font, textDecoration: 'none', marginTop: 4, display: 'inline-block' }}
+                    style={{ fontSize: 10, color: C.accent, fontFamily: font, textDecoration: 'none', marginTop: 3, display: 'inline-block' }}
                     onClick={e => e.stopPropagation()}>
-                    {"0001F4CA"} View Chart {"\u2192"}
+                    {String.fromCodePoint(0x1F4CA)} View Chart {String.fromCodePoint(0x2192)}
                   </a>
                 )}
               </div>
@@ -969,7 +975,7 @@ export default function JC() {
 
   return (
     <div style={{
-      background: C.bg, minHeight: "100vh", padding: isMobile ? "12px" : "24px",
+      background: C.bg, minHeight: "100vh", padding: isMobile ? "12px 12px 80px" : "24px 24px 40px",
       fontFamily: font, color: C.text,
       display: "flex", flexDirection: "column", gap: 16,
     }}>
@@ -980,7 +986,7 @@ export default function JC() {
       <TVChart isMobile={isMobile} />
 
       {/* C. Signal Feed */}
-      <SignalFeed messages={messages} onSelectSignal={setSelectedSignal} />
+      <SignalFeed messages={messages} />
 
       {/* ═══ TAB BAR ═══ */}
       <div style={{
