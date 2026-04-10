@@ -257,143 +257,90 @@ function formatTimestamp(ts) {
 
 /* C. Signal Feed — single message card
    ═══════════════════════════════════════════════════════════════ */
-function MessageCard({ msg, onClick }) {
-  const rawContent = msg.content || msg.message || '';
-  const cleaned = cleanContent(rawContent);
-  const cls = classifyMessage(rawContent);
-  const tvLink = extractTVLink(rawContent);
-  const sig = msg.signal;
-
-  // Channel name: prefer real name over generic 'discord'
-  const ch = msg.channel_name || msg.channel || '';
-  const displayChannel = ch && ch !== 'discord' ? ch : 'btc-ta';
-
-  // Accent color: signal direction overrides type color
-  const accentColor =
-    sig?.direction === 'LONG' ? C.win :
-    sig?.direction === 'SHORT' ? C.loss :
-    cls.color;
-
-  const ts = formatTimestamp(msg.created_at || msg.timestamp);
-
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        background: '#0f0f1a',
-        borderLeft: `4px solid ${accentColor}`,
-        borderTop: `1px solid ${C.border}`,
-        borderRight: `1px solid ${C.border}`,
-        borderBottom: `1px solid ${C.border}`,
-        borderRadius: 6,
-        padding: '8px 12px',
-        cursor: onClick ? 'pointer' : 'default',
-      }}
-    >
-      {/* Row 1: type label + time */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-        <span style={{ fontSize: 12 }}>{cls.emoji}</span>
-        {cls.label && (
-          <span style={{
-            fontSize: 10, fontFamily: font, fontWeight: 700,
-            color: accentColor, letterSpacing: 1,
-          }}>
-            {cls.label}
-          </span>
-        )}
-        {!cls.label && (
-          <span style={{ fontSize: 10, fontFamily: font, color: C.muted }}>
-            {ts} · #{displayChannel}
-          </span>
-        )}
-        <span style={{ flex: 1 }} />
-        {cls.label && (
-          <span style={{ fontSize: 10, fontFamily: font, color: C.muted }}>{ts}</span>
-        )}
-      </div>
-
-      {/* Channel badge (labeled types only) */}
-      {cls.label && (
-        <div style={{ fontSize: 10, fontFamily: font, color: C.muted, marginBottom: 5 }}>
-          #{displayChannel}
-        </div>
-      )}
-
-      {/* Message body */}
-      {cleaned && (
-        <div style={{
-          fontSize: 12, color: C.text, lineHeight: 1.5,
-          fontFamily: "'Inter', sans-serif", wordBreak: 'break-word',
-        }}>
-          {cleaned}
-        </div>
-      )}
-
-      {/* Signal direction tag */}
-      {sig?.direction && (
-        <div style={{ marginTop: 5 }}>
-          <span style={{
-            fontSize: 10, fontFamily: font, fontWeight: 700,
-            padding: '2px 8px', borderRadius: 4,
-            background: `${accentColor}22`, color: accentColor,
-            border: `1px solid ${accentColor}44`,
-          }}>
-            {sig.direction} entry detected
-          </span>
-        </div>
-      )}
-
-      {/* TradingView button */}
-      {tvLink && (
-        <div style={{ marginTop: 6 }}>
-          <a
-            href={tvLink}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={e => e.stopPropagation()}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-              fontSize: 11, fontFamily: font, color: C.accent,
-              background: `${C.accent}15`, border: `1px solid ${C.accent}33`,
-              borderRadius: 4, padding: '3px 10px', textDecoration: 'none',
-            }}
-          >
-            📊 View on TradingView →
-          </a>
-        </div>
-      )}
-    </div>
-  );
+function cleanMsg(text) {
+  if (!text) return '';
+  return text.replace(/<@[&!]?\d+>/g, '').replace(/<#\d+>/g, '').trim();
 }
 
-function SignalFeed({ signals, messages, onSelectSignal }) {
-  const all = [...(signals || []), ...(messages || [])];
-  const seen = new Set();
-  const deduped = all.filter(m => {
-    const k = m.id || m.message_id || (m.content || m.message || "") + (m.created_at || m.timestamp || "");
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-  deduped.sort((a, b) => {
-    const ta = new Date(a.created_at || a.timestamp || 0).getTime();
-    const tb = new Date(b.created_at || b.timestamp || 0).getTime();
-    return tb - ta;
-  });
-  const items = deduped.slice(0, 15);
+function classifyMsg(text) {
+  const t = (text || '').toLowerCase();
+  if (t.includes('full chart') || t.includes('my chart')) return { tag: 'CHART', emoji: '0001F4CA', color: C.accent };
+  if ((t.includes("i've") || t.includes("ive")) && (t.includes('long') || t.includes('short')) || t.includes('scalped') || t.includes('i shorted'))
+    return { tag: 'ENTRY', emoji: '\u26A1', color: C.warning };
+  if (t.includes('hit a tp') || t.includes('tp hit') || t.includes('nice move') || t.includes('take profit'))
+    return { tag: 'TP HIT', emoji: '\u2705', color: C.win };
+  if (t.includes('stopped') || t.includes('not the low') || t.includes('invalidated'))
+    return { tag: 'STOPPED', emoji: '\u274C', color: C.loss };
+  return { tag: '', emoji: '0001F4AC', color: C.muted };
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const diff = (now - d) / 60000;
+  if (diff < 60) return Math.round(diff) + 'm ago';
+  if (diff < 1440) return Math.round(diff / 60) + 'h ago';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
+    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function getTVLink(text) {
+  const m = (text || '').match(/https?:\/\/(?:www\.)?tradingview\.com\/\S+/);
+  return m ? m[0] : null;
+}
+
+function SignalFeed({ messages, onSelectSignal }) {
+  const sorted = [...(messages || [])].sort((a, b) => {
+    return new Date(b.created_at || b.timestamp || 0) - new Date(a.created_at || a.timestamp || 0);
+  }).slice(0, 5);
 
   return (
     <Card>
-      <SectionTitle>📡 Signal Feed — Jayson Casper Discord</SectionTitle>
-      {items.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "32px 0", color: C.muted, fontSize: 13, fontFamily: font }}>
-          👻 Listening to Jayson's Discord... no messages yet
+      <SectionTitle>{"0001F4E1"} Jayson Casper {"\u2014"} Latest</SectionTitle>
+      {sorted.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 24, color: C.muted, fontSize: 12, fontFamily: font }}>
+          {"0001F47B"} Listening... no messages yet
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.map((m, i) => (
-            <MessageCard key={m.id || m.message_id || i} msg={m} onClick={() => onSelectSignal && onSelectSignal(m)} />
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {sorted.map((m, i) => {
+            const raw = m.content || m.message || '';
+            const text = cleanMsg(raw);
+            if (!text && !m.has_attachments) return null;
+            const cls = classifyMsg(raw);
+            const tv = getTVLink(raw);
+            const ch = (m.channel_type || m.channel || 'btc-ta').replace('_', '-');
+            return (
+              <div key={m.id || i}
+                onClick={() => onSelectSignal && onSelectSignal(m)}
+                style={{
+                  borderLeft: `3px solid ${cls.color}`,
+                  background: '#0d0d18',
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  borderRadius: '0 6px 6px 0',
+                }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                  <span style={{ fontSize: 11 }}>{cls.emoji}</span>
+                  {cls.tag && <span style={{ fontSize: 9, fontFamily: font, color: cls.color, fontWeight: 700, letterSpacing: 0.5 }}>{cls.tag}</span>}
+                  <span style={{ flex: 1 }} />
+                  <span style={{ fontSize: 9, fontFamily: font, color: C.muted }}>#{ch}</span>
+                  <span style={{ fontSize: 9, fontFamily: font, color: C.muted }}>{fmtTime(m.created_at || m.timestamp)}</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.45, fontFamily: "'Inter', sans-serif" }}>
+                  {text.slice(0, 150)}{text.length > 150 ? '\u2026' : ''}
+                </div>
+                {tv && (
+                  <a href={tv} target="_blank" rel="noopener noreferrer"
+                    style={{ fontSize: 10, color: C.accent, fontFamily: font, textDecoration: 'none', marginTop: 4, display: 'inline-block' }}
+                    onClick={e => e.stopPropagation()}>
+                    {"0001F4CA"} View Chart {"\u2192"}
+                  </a>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </Card>
@@ -1029,7 +976,7 @@ export default function JC() {
       <TVChart isMobile={isMobile} />
 
       {/* C. Signal Feed */}
-      <SignalFeed signals={signals} messages={messages} onSelectSignal={setSelectedSignal} />
+      <SignalFeed messages={messages} onSelectSignal={setSelectedSignal} />
 
       {/* ═══ TAB BAR ═══ */}
       <div style={{
