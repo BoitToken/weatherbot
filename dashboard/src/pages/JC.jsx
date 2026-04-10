@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
+import { createChart, ColorType, LineStyle } from "lightweight-charts";
 import SignalDrillDown from "../components/SignalDrillDown";
 import TradeAnalyzer from "../components/TradeAnalyzer";
 import StrategyPanel from "../components/StrategyPanel";
@@ -27,6 +28,13 @@ const font = "'JetBrains Mono', 'Fira Code', monospace";
 /* ═══════════════════════════════════════════════════════════════
    Hardcoded JC Key Levels (will be dynamic via CDP later)
    ═══════════════════════════════════════════════════════════════ */
+const LEVEL_LEVERAGE_MAP = {
+  'SPV?': 50, 'SPV of SPV': 50,
+  'nwPOC': 45, 'ndPOC': 45, 'KEY / SPs Filled': 45,
+  'nfPOC': 40, '0.918 Fib': 40, '0.786 Fib': 40,
+  'D Level': 35, 'W (Weekly)': 35,
+};
+
 const JC_LEVELS = [
   { price: 75905, label: "SPV?", type: "resistance", color: "#ff3366", note: "Stop sweep zone" },
   { price: 74967, label: "D Level", type: "resistance", color: "#ff3366" },
@@ -136,77 +144,333 @@ function HeaderBar({ btcPrice, watcherStatus, mode }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   B. TradingView Chart
+   B. Interactive Chart — Lightweight Charts + Binance candles
    ═══════════════════════════════════════════════════════════════ */
-function TVChart({ isMobile }) {
-  const containerRef = useRef(null);
-  const widgetRef = useRef(null);
-  const [showJC, setShowJC] = useState(true);
+function TVChart({ isMobile, btcPrice }) {
+  const chartContainerRef = useRef(null);
+  const chartRef = useRef(null);
+  const candleSeriesRef = useRef(null);
+  const [chartTab, setChartTab] = useState("interactive"); // "interactive" | "jayson"
+  const [chartData, setChartData] = useState([]);
+  const [hoveredLevel, setHoveredLevel] = useState(null);
+  const [selectedLevel, setSelectedLevel] = useState(null);
   const [imgTs, setImgTs] = useState(Date.now());
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [timeframe, setTimeframe] = useState("5m");
 
+  // Fetch candle data from Binance
+  const fetchCandles = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${timeframe}&limit=300`
+      );
+      const klines = await res.json();
+      if (!Array.isArray(klines)) return;
+      const candles = klines.map((k) => ({
+        time: Math.floor(k[0] / 1000),
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+        volume: parseFloat(k[5]),
+      }));
+      setChartData(candles);
+      setLastUpdate(new Date());
+    } catch (e) {
+      console.error("Failed to fetch candles:", e);
+    }
+  }, [timeframe]);
+
+  // Initial fetch + auto-refresh every 30s
+  useEffect(() => {
+    fetchCandles();
+    const iv = setInterval(fetchCandles, 30000);
+    return () => clearInterval(iv);
+  }, [fetchCandles]);
+
+  // Jayson tab image refresh
   useEffect(() => {
     const iv = setInterval(() => setImgTs(Date.now()), 30000);
     return () => clearInterval(iv);
   }, []);
 
+  // Create/update lightweight chart
   useEffect(() => {
-    const containerId = "tv_chart_jc_interactive";
-    const initWidget = () => {
-      if (!window.TradingView || !containerRef.current || widgetRef.current) return;
-      widgetRef.current = new window.TradingView.widget({
-        container_id: containerId, autosize: true,
-        symbol: "BINANCE:BTCUSDT.P", interval: "240",
-        timezone: "Asia/Kolkata", theme: "dark", style: "1", locale: "en",
-        toolbar_bg: C.card, enable_publishing: false,
-        hide_top_toolbar: false, hide_legend: false,
-        withdateranges: true, allow_symbol_change: true,
-        details: true, hotlist: false, calendar: false,
-        studies: ["Volume@tv-basicstudies", "VWAP@tv-basicstudies", "RSI@tv-basicstudies"],
-        backgroundColor: C.bg, gridColor: "rgba(255,255,255,0.03)",
+    if (chartTab !== "interactive" || !chartContainerRef.current || !chartData.length) return;
+
+    // Clean up previous chart
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+    }
+
+    const chartHeight = isMobile ? 400 : 560;
+    const chart = createChart(chartContainerRef.current, {
+      width: chartContainerRef.current.clientWidth,
+      height: chartHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#0a0a0f' },
+        textColor: '#8a8f9e',
+        fontFamily: font,
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: 'rgba(255,255,255,0.03)' },
+        horzLines: { color: 'rgba(255,255,255,0.03)' },
+      },
+      crosshair: {
+        mode: 0,
+        vertLine: { color: 'rgba(124,58,237,0.4)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#7c3aed' },
+        horzLine: { color: 'rgba(124,58,237,0.4)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#7c3aed' },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: 'rgba(255,255,255,0.06)',
+        rightOffset: 12,
+        barSpacing: 8,
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(255,255,255,0.06)',
+        scaleMargins: { top: 0.1, bottom: 0.1 },
+      },
+      handleScroll: { vertTouchDrag: false },
+    });
+
+    // Candlestick series
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: '#00ff87',
+      downColor: '#ff3366',
+      borderUpColor: '#00ff87',
+      borderDownColor: '#ff3366',
+      wickUpColor: 'rgba(0,255,135,0.5)',
+      wickDownColor: 'rgba(255,51,102,0.5)',
+    });
+    candleSeries.setData(chartData);
+
+    // Volume series (overlay)
+    const volumeSeries = chart.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'volume',
+    });
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.85, bottom: 0 },
+    });
+    volumeSeries.setData(
+      chartData.map((d) => ({
+        time: d.time,
+        value: d.volume,
+        color: d.close >= d.open ? 'rgba(0,255,135,0.15)' : 'rgba(255,51,102,0.15)',
+      }))
+    );
+
+    // Draw JC levels as price lines
+    JC_LEVELS.forEach((level) => {
+      const isResistance = level.type === 'resistance';
+      candleSeries.createPriceLine({
+        price: level.price,
+        color: level.color + 'cc',
+        lineWidth: isResistance ? 2 : 1,
+        lineStyle: level.label.includes('POC') ? LineStyle.Dotted : LineStyle.Solid,
+        axisLabelVisible: true,
+        title: `${level.label} $${level.price.toLocaleString()}`,
       });
+    });
+
+    // Current BTC price marker
+    if (btcPrice) {
+      candleSeries.createPriceLine({
+        price: btcPrice,
+        color: '#f59e0b',
+        lineWidth: 1,
+        lineStyle: LineStyle.SparseDotted,
+        axisLabelVisible: true,
+        title: 'LIVE',
+      });
+    }
+
+    // Fit content
+    chart.timeScale().fitContent();
+
+    // Handle resize
+    const handleResize = () => {
+      if (chartContainerRef.current) {
+        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      }
     };
-    if (window.TradingView) { initWidget(); return; }
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/tv.js";
-    script.async = true;
-    script.onload = () => setTimeout(initWidget, 300);
-    document.head.appendChild(script);
-    return () => { widgetRef.current = null; };
-  }, []);
+    window.addEventListener('resize', handleResize);
+
+    chartRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+    };
+  }, [chartData, chartTab, isMobile, btcPrice]);
+
+  // Level tooltip on hover/click
+  const LevelTooltip = ({ level, onClose }) => {
+    if (!level) return null;
+    const dist = btcPrice ? ((level.price - btcPrice) / btcPrice * 100).toFixed(2) : null;
+    const isAbove = dist > 0;
+    return (
+      <div style={{
+        position: 'absolute', top: 60, right: 16, zIndex: 10,
+        background: '#1a1a2e', border: `1px solid ${level.color}44`,
+        borderRadius: 10, padding: '16px 20px', minWidth: 240,
+        boxShadow: `0 8px 32px rgba(0,0,0,0.5)`,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: level.color }}>{level.label}</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.muted, cursor: 'pointer', fontSize: 16 }}>&times;</button>
+        </div>
+        <div style={{ fontSize: 20, fontFamily: font, fontWeight: 700, color: C.white, marginBottom: 8 }}>
+          ${level.price.toLocaleString()}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, fontFamily: font }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: C.muted }}>Type</span>
+            <span style={{ color: level.type === 'resistance' ? C.loss : C.win, fontWeight: 600, textTransform: 'uppercase' }}>{level.type}</span>
+          </div>
+          {dist && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: C.muted }}>Distance</span>
+              <span style={{ color: isAbove ? C.loss : C.win, fontWeight: 600 }}>{isAbove ? '+' : ''}{dist}%</span>
+            </div>
+          )}
+          {level.note && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: C.muted }}>Note</span>
+              <span style={{ color: C.text }}>{level.note}</span>
+            </div>
+          )}
+          <div style={{ marginTop: 8, padding: '8px 10px', background: '#0a0a0f', borderRadius: 6, borderLeft: `3px solid ${level.color}` }}>
+            <div style={{ fontSize: 10, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>TRADE IDEA</div>
+            <div style={{ fontSize: 11, color: C.text, lineHeight: 1.5 }}>
+              {level.type === 'support'
+                ? `LONG @ $${level.price.toLocaleString()} — SL below $${(level.price * 0.995).toLocaleString(undefined, { maximumFractionDigits: 0 })}, TP at next resistance`
+                : `SHORT @ $${level.price.toLocaleString()} — SL above $${(level.price * 1.005).toLocaleString(undefined, { maximumFractionDigits: 0 })}, TP at next support`
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, padding: "8px 12px", background: C.bg }}>
-        <button onClick={() => setShowJC(false)} style={{
-          background: !showJC ? "rgba(255,255,255,0.08)" : "transparent",
-          border: !showJC ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
-          color: !showJC ? C.white : C.muted, borderRadius: 6, padding: "5px 12px",
-          fontSize: 10, fontFamily: font, cursor: "pointer", letterSpacing: 1, minHeight: 32,
-        }}>INTERACTIVE CHART</button>
-        <button onClick={() => setShowJC(true)} style={{
-          background: showJC ? "rgba(124,58,237,0.15)" : "transparent",
-          border: showJC ? "1px solid rgba(124,58,237,0.3)" : "1px solid transparent",
-          color: showJC ? C.accent : C.muted, borderRadius: 6, padding: "5px 12px",
-          fontSize: 10, fontFamily: font, cursor: "pointer", letterSpacing: 1, minHeight: 32,
-        }}>JAYSON LIVE (CDP)</button>
+      {/* Tab buttons + timeframe selector */}
+      <div style={{ display: 'flex', gap: 6, padding: '8px 12px', background: C.bg, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button onClick={() => setChartTab('interactive')} style={{
+          background: chartTab === 'interactive' ? 'rgba(255,255,255,0.08)' : 'transparent',
+          border: chartTab === 'interactive' ? '1px solid rgba(255,255,255,0.12)' : '1px solid transparent',
+          color: chartTab === 'interactive' ? C.white : C.muted, borderRadius: 6, padding: '5px 12px',
+          fontSize: 10, fontFamily: font, cursor: 'pointer', letterSpacing: 1, minHeight: 32,
+        }}>⚡ INTERACTIVE CHART</button>
+        <button onClick={() => setChartTab('jayson')} style={{
+          background: chartTab === 'jayson' ? 'rgba(124,58,237,0.15)' : 'transparent',
+          border: chartTab === 'jayson' ? '1px solid rgba(124,58,237,0.3)' : '1px solid transparent',
+          color: chartTab === 'jayson' ? C.accent : C.muted, borderRadius: 6, padding: '5px 12px',
+          fontSize: 10, fontFamily: font, cursor: 'pointer', letterSpacing: 1, minHeight: 32,
+        }}>👻 JAYSON LIVE (CDP)</button>
+
+        {chartTab === 'interactive' && (
+          <>
+            <span style={{ flex: 1 }} />
+            {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
+              <button key={tf} onClick={() => setTimeframe(tf)} style={{
+                background: timeframe === tf ? `${C.accent}22` : 'transparent',
+                border: timeframe === tf ? `1px solid ${C.accent}44` : '1px solid transparent',
+                color: timeframe === tf ? C.accent : C.muted, borderRadius: 4, padding: '3px 8px',
+                fontSize: 10, fontFamily: font, cursor: 'pointer', letterSpacing: 0.5,
+              }}>{tf.toUpperCase()}</button>
+            ))}
+          </>
+        )}
       </div>
-      <Card style={{ padding: 0, overflow: "hidden", display: showJC ? "none" : "block" }}>
-        <div id="tv_chart_jc_interactive" ref={containerRef}
-          style={{ width: "100%", height: isMobile ? 380 : 550 }} />
-      </Card>
-      {showJC && (
-        <Card style={{ padding: 0, overflow: "hidden", position: "relative" }}>
-          <div style={{ position: "absolute", top: 8, left: 12, zIndex: 2, display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 9, color: C.accent, fontFamily: font, letterSpacing: 1, background: "rgba(0,0,0,0.8)", padding: "3px 8px", borderRadius: 4 }}>
+
+      {/* Interactive Chart (lightweight-charts) */}
+      {chartTab === 'interactive' && (
+        <Card style={{ padding: 0, overflow: 'hidden', position: 'relative' }}>
+          {/* Chart header overlay */}
+          <div style={{ position: 'absolute', top: 8, left: 12, zIndex: 5, display: 'flex', gap: 8, alignItems: 'center', pointerEvents: 'none' }}>
+            <span style={{ fontSize: 9, color: C.win, fontFamily: font, letterSpacing: 1, background: 'rgba(0,0,0,0.85)', padding: '3px 8px', borderRadius: 4 }}>
+              ⚡ BTC/USDT • {timeframe.toUpperCase()} • BINANCE
+            </span>
+            {lastUpdate && (
+              <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: 3 }}>
+                Updated {lastUpdate.toLocaleTimeString()}
+              </span>
+            )}
+            <span style={{ fontSize: 8, color: C.accent, fontFamily: font, background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: 3 }}>
+              {JC_LEVELS.length} JC LEVELS
+            </span>
+          </div>
+
+          {/* Chart container */}
+          <div ref={chartContainerRef} style={{ width: '100%', height: isMobile ? 400 : 560, background: '#0a0a0f' }} />
+
+          {/* Level selector panel */}
+          <div style={{
+            display: 'flex', gap: 4, padding: '8px 12px', background: '#0d0d18',
+            borderTop: `1px solid ${C.border}`, overflowX: 'auto', flexWrap: 'nowrap',
+          }}>
+            {JC_LEVELS.map((level) => {
+              const isSelected = selectedLevel?.price === level.price;
+              const dist = btcPrice ? ((level.price - btcPrice) / btcPrice * 100) : 0;
+              const isNear = Math.abs(dist) < 0.5;
+              return (
+                <button
+                  key={level.price}
+                  onClick={() => setSelectedLevel(isSelected ? null : level)}
+                  onMouseEnter={() => setHoveredLevel(level)}
+                  onMouseLeave={() => setHoveredLevel(null)}
+                  style={{
+                    background: isSelected ? `${level.color}22` : isNear ? `${C.warning}11` : 'rgba(255,255,255,0.03)',
+                    border: `1px solid ${isSelected ? level.color + '66' : isNear ? C.warning + '44' : 'rgba(255,255,255,0.06)'}`,
+                    borderRadius: 6, padding: '4px 8px', cursor: 'pointer',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                    flexShrink: 0, minWidth: 72, transition: 'all 0.15s ease',
+                  }}
+                >
+                  <span style={{ fontSize: 10, fontFamily: font, fontWeight: 700, color: level.color }}>
+                    ${(level.price / 1000).toFixed(1)}k
+                  </span>
+                  <span style={{ fontSize: 8, fontFamily: font, color: C.muted, whiteSpace: 'nowrap' }}>
+                    {level.label}
+                  </span>
+                  {isNear && (
+                    <span style={{ fontSize: 7, fontFamily: font, color: C.warning, fontWeight: 700 }}>NEAR</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Level tooltip */}
+          <LevelTooltip level={selectedLevel || hoveredLevel} onClose={() => { setSelectedLevel(null); setHoveredLevel(null); }} />
+        </Card>
+      )}
+
+      {/* Jayson CDP tab (static image fallback) */}
+      {chartTab === 'jayson' && (
+        <Card style={{ padding: 0, overflow: 'hidden', position: 'relative' }}>
+          <div style={{ position: 'absolute', top: 8, left: 12, zIndex: 2, display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: C.accent, fontFamily: font, letterSpacing: 1, background: 'rgba(0,0,0,0.8)', padding: '3px 8px', borderRadius: 4 }}>
               JAYSON CASPER LIVE CHART
             </span>
-            <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: "rgba(0,0,0,0.7)", padding: "2px 6px", borderRadius: 3 }}>
+            <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: 3 }}>
               Auto-refresh 30s
             </span>
           </div>
-          <img src={"/tv-live.png?" + imgTs} alt="Jayson Chart"
-            onError={(e) => { e.target.style.display = "none"; }}
-            style={{ width: "100%", height: isMobile ? 380 : 550, objectFit: "cover", display: "block" }} />
+          <img src={'/tv-live.png?' + imgTs} alt="Jayson Chart"
+            onError={(e) => { e.target.style.display = 'none'; }}
+            style={{ width: '100%', height: isMobile ? 380 : 550, objectFit: 'cover', display: 'block' }} />
         </Card>
       )}
     </div>
@@ -763,6 +1027,195 @@ function PerformanceTab({ pnlStats, dailyPnl, trades, isMobile }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   TAB: WWJD — What Would Jayson Do? Strategy Guide
+   ═══════════════════════════════════════════════════════════════ */
+function WWJDTab({ position, isMobile }) {
+  const [expanded, setExpanded] = useState(null);
+
+  const toggle = (key) => setExpanded(expanded === key ? null : key);
+
+  const Section = ({ id, icon, title, children }) => (
+    <Card style={{ cursor: 'pointer' }} onClick={() => toggle(id)}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 16 }}>{icon}</span>
+        <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: C.white, flex: 1 }}>{title}</span>
+        <span style={{ fontSize: 12, color: C.muted, transform: expanded === id ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+          {String.fromCodePoint(0x25BC)}
+        </span>
+      </div>
+      {expanded === id && (
+        <div style={{ marginTop: 16, fontSize: 12, fontFamily: "'Inter', sans-serif", color: C.text, lineHeight: 1.7 }} onClick={e => e.stopPropagation()}>
+          {children}
+        </div>
+      )}
+    </Card>
+  );
+
+  const CheckItem = ({ ok, text }) => (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '4px 0' }}>
+      <span style={{ color: ok ? C.win : C.loss, fontWeight: 700, fontSize: 14, lineHeight: 1 }}>{ok ? '\u2713' : '\u2717'}</span>
+      <span>{text}</span>
+    </div>
+  );
+
+  const FlowNode = ({ label, color, children }) => (
+    <div style={{ borderLeft: `3px solid ${color}`, padding: '8px 12px', marginBottom: 8, background: `${color}11`, borderRadius: '0 8px 8px 0' }}>
+      <div style={{ fontWeight: 700, color, fontSize: 12, fontFamily: font, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 11, color: C.text }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Entry Checklist */}
+      <Section id="entry" icon={String.fromCodePoint(0x2705)} title="Entry Checklist (Pre-Trade)">
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontFamily: font, color: C.warning, letterSpacing: 1, marginBottom: 8 }}>BEFORE EVERY TRADE</div>
+          <CheckItem ok={true} text="At exact JC level (within 0.2% proximity)?" />
+          <CheckItem ok={true} text="3+ confluence factors agree?" />
+          <CheckItem ok={true} text="R:R \u2265 1:1 (prefer 3:1)?" />
+          <CheckItem ok={true} text="Max 2 open positions?" />
+          <CheckItem ok={true} text="Not counter to JC's bias?" />
+          <CheckItem ok={true} text="Session active (NY/London)?" />
+        </div>
+        <div style={{ padding: '10px 14px', background: '#0d0d18', borderRadius: 8, border: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1, marginBottom: 8 }}>CONVICTION SCORING</div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: 8 }}>
+            {[
+              { label: 'HIGH', emoji: String.fromCodePoint(0x1F7E2), desc: '4+ factors, 5% risk, 50x', color: C.win },
+              { label: 'MEDIUM', emoji: String.fromCodePoint(0x1F7E1), desc: '3 factors, 3% risk, 40x', color: C.warning },
+              { label: 'SKIP', emoji: String.fromCodePoint(0x1F534), desc: '<3 factors, NO TRADE', color: C.loss },
+            ].map(c => (
+              <div key={c.label} style={{ padding: '8px 10px', background: `${c.color}11`, border: `1px solid ${c.color}33`, borderRadius: 6, textAlign: 'center' }}>
+                <div style={{ fontSize: 14 }}>{c.emoji}</div>
+                <div style={{ fontWeight: 700, color: c.color, fontSize: 12, fontFamily: font }}>{c.label}</div>
+                <div style={{ fontSize: 10, color: C.muted }}>{c.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      {/* Trade Management */}
+      <Section id="manage" icon={String.fromCodePoint(0x1F3AF)} title="Trade Management (Active Position)">
+        {[
+          { trigger: '+1.0%', action: 'Move SL to breakeven', color: C.warning },
+          { trigger: 'TP1 (opposing level)', action: 'Close 50%, SL to breakeven', color: C.win },
+          { trigger: 'TP2 or +1.5%', action: 'Close remaining 50%', color: C.win },
+          { trigger: 'Trending >1.5%', action: 'Trail SL 0.5% behind price, ride to next level', color: '#60a5fa' },
+          { trigger: 'SL Hit', action: 'Full close — no hoping, no holding', color: C.loss },
+          { trigger: 'Never', action: 'Widen SL — only tighten, never move away', color: C.loss },
+        ].map(r => (
+          <div key={r.trigger} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '8px 12px', background: '#0f0f1a', borderRadius: 8, border: `1px solid ${C.border}`, marginBottom: 6 }}>
+            <span style={{ fontSize: 12, fontFamily: font, fontWeight: 700, color: r.color, minWidth: 120, flexShrink: 0 }}>{r.trigger}</span>
+            <span style={{ fontSize: 12, fontFamily: font, color: C.text }}>{r.action}</span>
+          </div>
+        ))}
+      </Section>
+
+      {/* Stop-Out Response */}
+      <Section id="stopout" icon={String.fromCodePoint(0x274C)} title="Stop-Out Response (What JC Does)">
+        <div style={{ fontSize: 11, fontFamily: font, color: C.warning, letterSpacing: 1, marginBottom: 12 }}>DECISION FLOWCHART</div>
+        <FlowNode label="STOPPED OUT" color={C.loss}>
+          Log level + reason. Fake-out or invalidation?
+        </FlowNode>
+        <FlowNode label="Level holds on retest?" color={C.win}>
+          YES {String.fromCodePoint(0x2192)} Wait 5-15 min, re-enter SAME direction at 2% size (reduced)
+        </FlowNode>
+        <FlowNode label="Level invalidated (clean break)?" color={C.warning}>
+          Move to NEXT major level in hierarchy. Wait for price to reach it.
+        </FlowNode>
+        <FlowNode label="Momentum flipped (BOS opposite)?" color={C.accent}>
+          Consider OPPOSITE bias at next key level. Wait for JC signal.
+        </FlowNode>
+        <div style={{ padding: '10px 14px', background: `${C.loss}11`, borderRadius: 8, marginTop: 12 }}>
+          <div style={{ fontWeight: 700, color: C.loss, marginBottom: 6 }}>{String.fromCodePoint(0x274C)} NEVER DO</div>
+          <div>{String.fromCodePoint(0x2022)} Revenge trade immediately</div>
+          <div>{String.fromCodePoint(0x2022)} Double down without confirmation</div>
+          <div>{String.fromCodePoint(0x2022)} Hope and hold losers</div>
+          <div>{String.fromCodePoint(0x2022)} Enter between levels</div>
+          <div>{String.fromCodePoint(0x2022)} Increase size after a loss</div>
+        </div>
+      </Section>
+
+      {/* Level Hierarchy */}
+      <Section id="levels" icon={String.fromCodePoint(0x1F5FA)} title="Level Hierarchy (JC's Key Levels)">
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 10, fontFamily: font, color: C.loss, letterSpacing: 1, marginBottom: 8 }}>{String.fromCodePoint(0x1F534)} RESISTANCE</div>
+          {JC_LEVELS.filter(l => l.type === 'resistance').sort((a,b) => b.price - a.price).map(l => (
+            <div key={l.price} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,51,102,0.05)', borderRadius: 6, marginBottom: 4, border: '1px solid rgba(255,51,102,0.1)' }}>
+              <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: C.white, minWidth: 80 }}>${l.price.toLocaleString()}</span>
+              <span style={{ fontSize: 11, fontFamily: font, color: l.color, fontWeight: 600 }}>{l.label}</span>
+              {l.note && <span style={{ fontSize: 10, color: C.muted }}>{String.fromCodePoint(0x2014)} {l.note}</span>}
+              <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: font, color: C.muted }}>{LEVEL_LEVERAGE_MAP[l.label] || 30}x</span>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div style={{ fontSize: 10, fontFamily: font, color: C.win, letterSpacing: 1, marginBottom: 8 }}>{String.fromCodePoint(0x1F7E2)} SUPPORT</div>
+          {JC_LEVELS.filter(l => l.type === 'support').sort((a,b) => b.price - a.price).map(l => (
+            <div key={l.price} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(0,255,135,0.03)', borderRadius: 6, marginBottom: 4, border: '1px solid rgba(0,255,135,0.08)' }}>
+              <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: C.white, minWidth: 80 }}>${l.price.toLocaleString()}</span>
+              <span style={{ fontSize: 11, fontFamily: font, color: l.color, fontWeight: 600 }}>{l.label}</span>
+              {l.note && <span style={{ fontSize: 10, color: C.muted }}>{String.fromCodePoint(0x2014)} {l.note}</span>}
+              <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: font, color: C.muted }}>{LEVEL_LEVERAGE_MAP[l.label] || 30}x</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12, padding: '10px 14px', background: '#0d0d18', borderRadius: 8 }}>
+          <div style={{ fontSize: 10, fontFamily: font, color: C.accent, letterSpacing: 1, marginBottom: 6 }}>LEVEL TYPES</div>
+          <div style={{ fontSize: 11, lineHeight: 1.8 }}>
+            <b style={{ color: C.white }}>SPV</b> {String.fromCodePoint(0x2014)} Single Print Value: one-time volume nodes, tends to sweep and reverse<br/>
+            <b style={{ color: C.white }}>nPOC</b> {String.fromCodePoint(0x2014)} Naked Point of Control: untested magnet level (w/d/m)<br/>
+            <b style={{ color: C.white }}>Fib</b> {String.fromCodePoint(0x2014)} Fibonacci retracement (0.786 = Golden Pocket, highest conviction)<br/>
+            <b style={{ color: C.white }}>NY Open P&D</b> {String.fromCodePoint(0x2014)} Levels set during NY open volatility<br/>
+            <b style={{ color: C.white }}>KEY</b> {String.fromCodePoint(0x2014)} Multiple confluence points marked by Jayson
+          </div>
+        </div>
+      </Section>
+
+      {/* Bankroll Management */}
+      <Section id="bankroll" icon={String.fromCodePoint(0x1F4B0)} title="Bankroll Management">
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)', gap: 8 }}>
+          {[
+            { label: 'Standard Trade', value: '3% of bankroll', note: 'MEDIUM conviction', color: C.warning },
+            { label: 'High Conviction', value: '5% of bankroll', note: '4+ factors, SPV/CDW', color: C.win },
+            { label: 'After Stop-Out', value: '2% of bankroll', note: 'Reduced until next win', color: C.loss },
+            { label: 'Max Concurrent', value: '2 positions', note: 'Any direction', color: C.accent },
+            { label: 'Max Exposure', value: '10% total', note: 'All positions combined', color: C.accent },
+            { label: 'Max Drawdown', value: '15% pause', note: 'Auto-pause trading', color: C.loss },
+          ].map(r => (
+            <div key={r.label} style={{ padding: '10px 12px', background: '#0f0f1a', borderRadius: 8, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1 }}>{r.label}</div>
+              <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: r.color }}>{r.value}</div>
+              <div style={{ fontSize: 10, color: C.muted }}>{r.note}</div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Active Trade WWJD Status */}
+      {position && (
+        <Card>
+          <SectionTitle>{String.fromCodePoint(0x1F3AF)} Active Trade — WWJD Status</SectionTitle>
+          <div style={{ padding: '12px 16px', background: `${C.accent}11`, borderRadius: 8, border: `1px solid ${C.accent}33` }}>
+            <div style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: C.white, marginBottom: 8 }}>
+              {position.side} @ ${fmt(position.entry_price)}
+            </div>
+            <div style={{ fontSize: 11, color: C.text, lineHeight: 1.8 }}>
+              {String.fromCodePoint(0x2022)} Status: {position.state || 'OPEN'}<br/>
+              {String.fromCodePoint(0x2022)} If TP1 hit: Close 50%, move SL to breakeven<br/>
+              {String.fromCodePoint(0x2022)} If stopped: Analyze level, wait for JC signal<br/>
+              {String.fromCodePoint(0x2022)} If trending: Trail SL, let it sizzle
+            </div>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
    TAB: STRATEGY
    ═══════════════════════════════════════════════════════════════ */
 function StrategyTab({ config, isMobile }) {
@@ -1015,7 +1468,7 @@ export default function JC() {
       <HeaderBar btcPrice={btcPrice} watcherStatus={watcherStatus} mode={mode} />
 
       {/* B. Chart */}
-      <TVChart isMobile={isMobile} />
+      <TVChart isMobile={isMobile} btcPrice={btcPrice} />
 
       {/* C. Signal Feed */}
       <SignalFeed messages={messages} />
@@ -1027,7 +1480,7 @@ export default function JC() {
         display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap",
         minHeight: 52,
       }}>
-        {["signals", "trades", "performance", "strategy"].map((t) => (
+        {["signals", "trades", "performance", "wwjd", "strategy"].map((t) => (
           <button key={t} onClick={() => setActiveTab(t)} style={{
             background: activeTab === t ? "rgba(255,255,255,0.08)" : "transparent",
             border: activeTab === t ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
@@ -1053,6 +1506,9 @@ export default function JC() {
       )}
       {activeTab === "performance" && (
         <PerformanceTab pnlStats={pnlStats} dailyPnl={dailyPnl} trades={trades} isMobile={isMobile} />
+      )}
+      {activeTab === "wwjd" && (
+        <WWJDTab position={position} isMobile={isMobile} />
       )}
       {activeTab === "strategy" && (
         <StrategyTab config={config} isMobile={isMobile} />
