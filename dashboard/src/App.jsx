@@ -40,15 +40,15 @@ function Sidebar() {
   const location = useLocation()
   
   const navItems = [
-    { path: '/jc', label: 'JC Desk', icon: '👻' },
-    { path: '/btc15m', label: '₿ BTC 5M', icon: '📊' },
+    { path: '/jc', label: 'Casper', icon: '👻' },
+    { path: '/btc15m', label: 'BroBot', icon: '🤖' },
+    { path: '/pennies', label: 'Pennies', icon: '🎰' },
     { path: '/', label: 'Home', icon: '🏠' },
     { path: '/markets', label: 'Markets', icon: '📊' },
     { path: '/performance', label: 'Performance', icon: '🏆' },
     { path: '/trades', label: 'Trades', icon: '💰' },
     { path: '/polymarket', label: 'Polymarket', icon: '🔮' },
     { path: '/leader', label: 'Leader', icon: '🎯' },
-    { path: '/pennies', label: 'Pennies', icon: '🎰' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
