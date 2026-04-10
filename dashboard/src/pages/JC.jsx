@@ -149,7 +149,7 @@ function TVChart({ isMobile }) {
         />
       ) : (
         <div style={{ width: "100%", height: isMobile ? 350 : 500, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>
-          <span style={{ fontSize: 32 }}>\u{1F4CA}</span>
+          <span style={{ fontSize: 32 }}>📊</span>
           <span style={{ color: C.muted, fontFamily: font, fontSize: 11 }}>TradingView not connected</span>
           <span style={{ color: C.muted, fontFamily: font, fontSize: 9 }}>Open TradingView Desktop + SSH tunnel</span>
         </div>
