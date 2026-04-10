@@ -4,7 +4,7 @@ API endpoints for dashboard + scheduler for data/signal loops.
 All endpoints query REAL database — no stubs, no mocks.
 """
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -5704,6 +5704,232 @@ async def get_pnl_trend():
     except Exception as e:
         logger.error(f"PnL trend error: {e}")
         return []
+
+
+# =============================================================================
+# JC Copy Trading API Endpoints
+# =============================================================================
+
+@app.get("/api/jc/status")
+async def jc_status():
+    """Get JC copy trader status: mode, daily loss, open position."""
+    try:
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from jc_copy_trader import get_trading_mode
+        mode = get_trading_mode()
+        
+        result = {"mode": mode, "ok": True}
+        
+        if mode == 'live':
+            try:
+                from bybit_executor import get_executor
+                executor = get_executor()
+                conn_test = executor.test_connectivity()
+                pos = executor.get_open_positions()
+                daily = executor.get_daily_loss_state()
+                result.update({
+                    "bybit_connected": conn_test.get("ok", False),
+                    "bybit_equity": conn_test.get("equity", 0),
+                    "open_positions": pos.get("positions", []),
+                    "daily_loss": daily,
+                })
+            except Exception as e:
+                result["bybit_error"] = str(e)
+        
+        # DB stats (sync via psycopg2 since we're in JC context)
+        try:
+            import psycopg2
+            conn2 = psycopg2.connect("dbname=polyedge user=node host=localhost")
+            cur2 = conn2.cursor()
+            cur2.execute("SELECT balance, available, in_positions, total_won, total_lost, total_trades FROM jc_bankroll ORDER BY id DESC LIMIT 1")
+            bank = cur2.fetchone()
+            if bank:
+                result["bankroll"] = {
+                    "balance": float(bank[0]), "available": float(bank[1]),
+                    "in_positions": float(bank[2]), "total_won": float(bank[3]),
+                    "total_lost": float(bank[4]), "total_trades": bank[5],
+                }
+            cur2.execute("SELECT id, direction, entry_price, status FROM jc_trades WHERE status IN ('active','half_closed','breakeven')")
+            result["open_db_trades"] = [{"id": r[0], "direction": r[1], "entry_price": float(r[2]), "status": r[3]} for r in cur2.fetchall()]
+            conn2.close()
+        except Exception as db_err:
+            result["db_error"] = str(db_err)
+        
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/jc/mode")
+async def jc_set_mode(request: Request):
+    """Toggle JC trading mode between 'paper' and 'live'."""
+    try:
+        body = await request.json()
+        mode = body.get("mode", "paper").lower().strip()
+        if mode not in ("paper", "live"):
+            return {"ok": False, "error": "mode must be 'paper' or 'live'"}
+        
+        import psycopg2 as _pg2
+        _conn2 = _pg2.connect("dbname=polyedge user=node host=localhost")
+        _cur2 = _conn2.cursor()
+        _cur2.execute(
+            "INSERT INTO jc_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()",
+            ('mode', mode, mode),
+        )
+        _conn2.commit()
+        _conn2.close()
+        
+        logger.info(f"JC trading mode set to: {mode}")
+        return {"ok": True, "mode": mode, "message": f"JC trading mode switched to {mode.upper()}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/jc/test-trade")
+async def jc_test_trade(request: Request):
+    """Simulate a JC signal and trigger the copy trader (paper mode only).
+    Useful for end-to-end pipeline testing."""
+    try:
+        body = await request.json()
+        
+        # Require paper mode for test
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from jc_copy_trader import get_trading_mode, open_trade, get_btc_price
+        
+        mode = get_trading_mode()
+        if mode == 'live' and not body.get("force", False):
+            return {
+                "ok": False,
+                "error": "Cannot test in live mode. Add force=true to override, or switch to paper mode first.",
+                "current_mode": mode,
+            }
+        
+        # Get current price or use override
+        price = body.get("price") or get_btc_price() or 83000
+        
+        # Build a synthetic JC signal
+        direction = body.get("direction", "LONG")
+        if direction == "LONG":
+            sl = price * 0.98     # 2% SL
+            tp1 = price * 1.03   # 3% TP1 (1.5:1 R:R)
+            tp2 = price * 1.05   # 5% TP2
+        else:
+            sl = price * 1.02
+            tp1 = price * 0.97
+            tp2 = price * 0.95
+        
+        test_signal = {
+            "direction": direction,
+            "entry": round(price, 2),
+            "sl": round(sl, 2),
+            "tp1": round(tp1, 2),
+            "tp2": round(tp2, 2),
+            "rr": round(abs(tp1 - price) / abs(sl - price), 1) if sl != price else 0,
+            "reason": body.get("reason", "TEST nwPOC @ ${:.0f}".format(price)),
+            "leverage": body.get("leverage", 10),
+            "level": {"price": price, "label": "TEST", "type": "support" if direction == "LONG" else "resistance"},
+            "conviction": {
+                "classification": "MEDIUM",
+                "score": 65.0,
+                "factors_agreed": 3,
+                "total_factors": 7,
+                "stake_pct": 0.03,
+                "rr_ratio": 1.5,
+            },
+            "conviction_stake_pct": 0.03,
+        }
+        
+        logger.info(f"JC test trade: {direction} @ ${price:,.0f}")
+        trade_id = open_trade(test_signal, price)
+        
+        return {
+            "ok": True,
+            "trade_id": trade_id,
+            "signal": test_signal,
+            "mode": mode,
+            "message": f"Test trade #{trade_id} opened in {mode.upper()} mode",
+        }
+    except Exception as e:
+        logger.error(f"JC test trade error: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/jc/kill")
+async def jc_kill_position():
+    """Emergency kill — close Bybit position immediately."""
+    try:
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from jc_copy_trader import get_trading_mode
+        mode = get_trading_mode()
+        
+        if mode != 'live':
+            return {"ok": False, "error": "Not in live mode — no real position to close"}
+        
+        from bybit_executor import get_executor
+        executor = get_executor()
+        result = executor.close_position(reason="Dashboard kill")
+        
+        if result["ok"]:
+            # Update DB
+            import psycopg2 as _pg2
+            _conn2 = _pg2.connect("dbname=polyedge user=node host=localhost")
+            _cur2 = _conn2.cursor()
+            _cur2.execute("""
+                UPDATE jc_trades SET status = 'closed', close_reason = 'MANUAL_KILL',
+                    closed_at = NOW() WHERE status IN ('active','half_closed','breakeven')
+            """)
+            _conn2.commit()
+            _conn2.close()
+        
+        return {"ok": result["ok"], "result": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/jc/bybit/balance")
+async def jc_bybit_balance():
+    """Get live Bybit account balance."""
+    try:
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from bybit_executor import get_executor
+        executor = get_executor()
+        return executor.test_connectivity()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/jc/bybit/position")
+async def jc_bybit_position():
+    """Get live Bybit open position."""
+    try:
+        sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+        from bybit_executor import get_executor
+        executor = get_executor()
+        return executor.get_open_positions()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/jc/pause")
+async def jc_pause_trading(request: Request):
+    """Pause or resume JC copy trading."""
+    try:
+        body = await request.json()
+        paused = bool(body.get("paused", True))
+        import psycopg2 as _pg2
+        _conn2 = _pg2.connect("dbname=polyedge user=node host=localhost")
+        _cur2 = _conn2.cursor()
+        _cur2.execute(
+            "INSERT INTO jc_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()",
+            ('paused', str(paused).lower(), str(paused).lower()),
+        )
+        _conn2.commit()
+        _conn2.close()
+        return {"ok": True, "paused": paused}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # =============================================================================
