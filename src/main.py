@@ -4326,7 +4326,21 @@ async def get_btc_stats():
                     COUNT(*) FILTER (WHERE close_time::date = CURRENT_DATE) as today_trades
                 FROM btc_pnl
             """)
-            return dict(row) if row else {"total_trades": 0}
+            stats = dict(row) if row else {"total_trades": 0}
+            # Add bankroll-based P&L (source of truth)
+            br = await conn.fetchrow("SELECT balance, total_won, total_lost, total_trades, peak_balance FROM btc_bankroll ORDER BY id DESC LIMIT 1")
+            if br:
+                initial = 5000.0
+                stats["bankroll_balance"] = float(br["balance"])
+                stats["bankroll_pnl"] = float(br["balance"]) - initial
+                stats["bankroll_initial"] = initial
+                stats["bankroll_won"] = float(br["total_won"])
+                stats["bankroll_lost"] = float(br["total_lost"])
+                stats["bankroll_trades"] = int(br["total_trades"])
+                stats["peak_balance"] = float(br["peak_balance"])
+                # Override net_pnl with bankroll truth
+                stats["net_pnl"] = float(br["balance"]) - initial
+            return stats
     except Exception as e:
         logger.error(f"BTC stats error: {e}")
         return {"error": str(e)}
