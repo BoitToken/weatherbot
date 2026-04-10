@@ -2,7 +2,13 @@
 .venv/
 __pycache__/
 *.pyc
-logs/
+*.pyo
 node_modules/
 dashboard/dist/
+dashboard/node_modules/
+logs/
+*.log
+.vault/
+*.enc
+*.bak
 .DS_Store

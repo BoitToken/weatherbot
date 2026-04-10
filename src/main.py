@@ -781,42 +781,39 @@ async def scheduled_btc_signal_scan():
                 if wl == 15:
                     continue
 
-                # RULE 1: Reward must cover risk
-                # Entry must be < 50c for reward:risk >= 1:1
-                if entry_price >= 0.50:
+                # ═══ LIVE-ADJUSTED STRATEGY (V4.1) ═══
+                # Accounts for: slippage (~3%), fees (~2%), partial fills
+                # Total execution cost estimate: ~5% round-trip
+                
+                EXECUTION_COST = 0.05  # 5% total (2% fee + 3% slippage estimate)
+                MIN_ENTRY = 0.02      # Below 2c = no liquidity
+                MAX_ENTRY = 0.40      # Tightened from 50c — need more upside buffer
+                MIN_RR_AFTER_COSTS = 1.5  # Must clear 1.5:1 AFTER all costs
+                MIN_FACTORS = 5       # 5 of 7 factors must agree
+                LIVE_STAKE = 25       # Fixed $25 per trade (appropriate for liquidity)
+                
+                # RULE 1: Entry price bounds
+                if entry_price <= MIN_ENTRY or entry_price >= MAX_ENTRY:
                     continue
-                if entry_price <= 0 or entry_price >= 1:
-                    continue
-
-                # Calculate reward:risk
-                potential_per_dollar = (1.0 / entry_price - 1.0) * 0.98  # fee-adjusted
-                reward_risk = potential_per_dollar  # ratio per $1 risked
-                if reward_risk < 1.0:
-                    continue  # Hard floor: upside must exceed downside
-
-                # RULE 2: Scale stake — bankroll-proportional sizing
-                try:
-                    _br_state = await get_btc_bankroll_state()
-                    stake, _br_skip = await compute_btc_stake(entry_price, pred, _br_state)
-                    if _br_skip:
-                        logger.warning(f"⚠️ Trade skipped: {_br_skip}")
-                        continue
-                except Exception as _br_e:
-                    logger.error(f"❌ Bankroll check failed: {_br_e}, using fallback stake")
-                    # Fallback to fixed stakes
-                    if entry_price < 0.20:
-                        stake = 150
-                    elif entry_price < 0.30:
-                        stake = 100
-                    elif entry_price < 0.40:
-                        stake = 75
-                    else:
-                        stake = 50
-
+                
+                # RULE 2: Calculate REAL reward:risk after ALL costs
+                # Win payout: (1/entry - 1) minus execution costs on both sides
+                gross_rr = (1.0 / entry_price) - 1.0  # Raw R:R
+                # Deduct: buy slippage + sell slippage + fees
+                net_win_per_dollar = gross_rr - EXECUTION_COST  # What you actually keep per $1
+                net_loss_per_dollar = 1.0 + EXECUTION_COST  # What you actually lose per $1 (stake + costs)
+                
+                reward_risk = net_win_per_dollar / net_loss_per_dollar if net_loss_per_dollar > 0 else 0
+                
+                if reward_risk < MIN_RR_AFTER_COSTS:
+                    continue  # Upside doesn't justify downside after costs
+                
+                # RULE 3: Fixed stake for live (no scaled sizing — liquidity appropriate)
+                stake = LIVE_STAKE
+                
                 # RULE 4: Check factor agreement (from signal factors)
                 factors = sig.get('factors', {})
                 if factors:
-                    # Count how many factors agree with the prediction direction
                     direction_sign = 1 if pred == 'UP' else -1
                     factor_vals = [
                         factors.get('f_price_delta', 0),
@@ -828,17 +825,45 @@ async def scheduled_btc_signal_scan():
                         factors.get('f_time_decay', 0),
                     ]
                     agreeing = sum(1 for f in factor_vals if f * direction_sign > 0)
-                    if agreeing < 4:  # Need at least 4 of 7 factors aligned
-                        continue
+                    if agreeing < MIN_FACTORS:
+                        continue  # Need 5+ factors aligned
 
                 price = sig.get('btc_price', 0)
                 btc_open = sig.get('btc_open', price)
                 delta_pct = ((price - btc_open) / btc_open * 100) if btc_open > 0 else 0
-                potential = (stake / entry_price - stake) * 0.98
+                potential = (stake / entry_price - stake) * (1 - EXECUTION_COST)  # Net after all costs
                 
                 # Trade opened — log only, NO telegram broadcast
                 # WON/LOST sent on resolution with full analysis
                 logger.info(f"V4 trade: {pred} {wl}M | {entry_price*100:.0f}c | ${stake} | R:R {reward_risk:.1f}x | {agreeing}/7")
+
+                # ═══════════════════════════════════════════════════════
+                # LIVE TRADE EXECUTION — if mode is 'live' and passes V4+
+                # ═══════════════════════════════════════════════════════
+                try:
+                    _tcfg = await get_trading_mode()
+                    if is_live_mode(_tcfg) and agreeing >= 5:
+                        from src.polymarket_live import PolymarketLiveTrader
+                        _live_trader = PolymarketLiveTrader(get_async_pool())
+                        # Determine token_id: buy the side we predict wins
+                        _token_id = sig.get('token_id_up', '') if pred == 'UP' else sig.get('token_id_down', '')
+                        _live_stake = min(stake, 25.0)  # Hard cap $25 for live
+                        if _token_id:
+                            _live_trade_id = await _live_trader.execute_live_trade(
+                                window_id=sig.get('window_id', ''),
+                                prediction=pred,
+                                token_id=_token_id,
+                                entry_price=entry_price,
+                                stake_usd=_live_stake,
+                                factors_agreeing=agreeing,
+                                signal_metadata={'factors': factors, 'window_length': wl, 'reward_risk': reward_risk},
+                            )
+                            if _live_trade_id:
+                                logger.info(f"🟢 LIVE trade #{_live_trade_id} placed for {pred} {wl}M")
+                        else:
+                            logger.warning(f"⚠️ No token_id for {pred} — cannot place live trade")
+                except Exception as _live_e:
+                    logger.error(f"❌ Live trade execution error: {_live_e}")
 
                 # Store stake_used on the signal row and update bankroll
                 _window_id = sig.get('window_id', '')
@@ -922,8 +947,11 @@ async def scheduled_btc_hourly_summary():
         return
     # Gate: suppress if paper mode + paper_notifications=false
     _tcfg = await get_trading_mode()
-    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
-        logger.info("🔇 BTC hourly summary suppressed (paper mode, notifications off)")
+    if is_live_mode(_tcfg):
+        logger.info("🔇 BTC hourly summary suppressed (live mode — only live trade alerts)")
+        return
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC hourly summary suppressed (paper notifications off)")
         return
     try:
         import psycopg2
@@ -1075,8 +1103,11 @@ async def scheduled_btc_intelligence_loop():
         return
     # Gate: suppress if paper mode + paper_notifications=false
     _tcfg = await get_trading_mode()
-    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
-        logger.info("🔇 BTC intelligence loop suppressed (paper mode, notifications off)")
+    if is_live_mode(_tcfg):
+        logger.info("🔇 BTC intelligence loop suppressed (live mode)")
+        return
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC intelligence loop suppressed (paper notifications off)")
         return
     try:
         import psycopg2, json
@@ -1485,8 +1516,11 @@ async def scheduled_btc_daily_strategy_report():
         return
     # Gate: suppress if paper mode + paper_notifications=false
     _tcfg = await get_trading_mode()
-    if not is_live_mode(_tcfg) and not should_send_paper_telegram(_tcfg):
-        logger.info("🔇 BTC daily strategy report suppressed (paper mode, notifications off)")
+    if is_live_mode(_tcfg):
+        logger.info("🔇 BTC daily strategy report suppressed (live mode)")
+        return
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 BTC daily strategy report suppressed (paper notifications off)")
         return
     try:
         import psycopg2
@@ -1667,6 +1701,27 @@ async def scheduled_btc_resolution_check():
                                 await sync_btc_in_positions()
                             except Exception as _bre:
                                 logger.error(f"❌ Bankroll resolution update failed: {_bre}")
+
+                            # ✔️ Resolve matching live trade if exists
+                            try:
+                                _live_pool = get_async_pool()
+                                async with _live_pool.acquire() as _lconn:
+                                    _live_row = await _lconn.fetchrow(
+                                        "SELECT id FROM live_trades WHERE window_id = $1 AND status = 'open' LIMIT 1",
+                                        window_id
+                                    )
+                                if _live_row:
+                                    from src.polymarket_live import PolymarketLiveTrader
+                                    _live_trader = PolymarketLiveTrader(get_async_pool())
+                                    await _live_trader.resolve_trade(
+                                        trade_id=_live_row['id'],
+                                        won=was_correct,
+                                        exit_price=1.0 if was_correct else 0.0,
+                                    )
+                                    _live_emoji = '\U0001f7e2' if was_correct else '\U0001f534'
+                                    logger.info(f"{_live_emoji} Live trade #{_live_row['id']} resolved")
+                            except Exception as _lre:
+                                logger.error(f"❌ Live trade resolution failed: {_lre}")
                             crowd_pct = max(float(prob or 0.5), 1-float(prob or 0.5)) * 100
                             crowd_side = 'bullish' if float(prob or 0.5) > 0.5 else 'bearish'
                             rr = (1/ep - 1)*0.98 if ep > 0 else 0
@@ -1734,19 +1789,30 @@ async def scheduled_btc_resolution_check():
                         re = '✅' if was_correct else '❌'
                         msg = f"{re} BTC {'WON' if was_correct else 'LOST'} — {wl}M | {pred} → {actual}"
 
+                    # GATE: Only send Telegram if real live trade exists for this window OR paper notifications on
+                    _has_live_trade = False
                     try:
-                        BOT_TOKEN = _telegram_bot.bot_token
-                        subs = await _telegram_bot.get_all_subscribers(instant_only=False)
-                        async with _httpx.AsyncClient(timeout=10) as _c:
-                            for sub in subs:
-                                try:
-                                    await _c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                        json={"chat_id": sub['chat_id'], "text": msg})
-                                except Exception:
-                                    pass
+                        _lpool = get_async_pool()
+                        async with _lpool.acquire() as _lc:
+                            _lt = await _lc.fetchrow("SELECT id FROM live_trades WHERE window_id = $1 LIMIT 1", window_id)
+                            _has_live_trade = _lt is not None
                     except Exception:
                         pass
-                        pass
+
+                    _should_send = _has_live_trade or should_send_paper_telegram(_tcfg)
+                    if _should_send:
+                        try:
+                            BOT_TOKEN = _telegram_bot.bot_token
+                            subs = await _telegram_bot.get_all_subscribers(instant_only=False)
+                            async with _httpx.AsyncClient(timeout=10) as _c:
+                                for sub in subs:
+                                    try:
+                                        await _c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                            json={"chat_id": sub['chat_id'], "text": msg})
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
     except Exception as e:
         logger.error(f"❌ BTC resolution check failed: {e}")
 # ═══════════════════════════════════════════════════════════════
@@ -3875,58 +3941,33 @@ async def get_position_health():
 
 @app.get("/api/wallet/balance")
 async def get_wallet_balance():
-    """Get USDC + MATIC balance from Polygon."""
+    """Get real USDC + MATIC balance from Polygon blockchain."""
     import httpx
-    
-    wallet_address = getattr(config, 'WALLET_ADDRESS', None)
-    if not wallet_address:
-        return {"error": "Wallet address not configured", "usdc": 0, "matic": 0}
-    
+    WALLET = "0xb9BEa5FDe7957709D0f8d2064188B1603b74D5Ca"
+    RPC = "https://small-cosmological-friday.matic.quiknode.pro/c6dd1696accaf8a955e09f34475deb31913c5254/"
     try:
-        polygon_rpc = getattr(config, 'POLYGON_RPC_HTTP', 'https://polygon-rpc.com')
         async with httpx.AsyncClient(timeout=10) as client:
-            # Get MATIC balance
-            matic_resp = await client.post(
-                polygon_rpc,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_getBalance",
-                    "params": [wallet_address, "latest"],
-                    "id": 1
-                }
-            )
-            matic_data = matic_resp.json()
-            matic_wei = int(matic_data.get("result", "0x0"), 16)
-            matic_balance = matic_wei / 1e18
-            
-            # Get USDC balance (ERC-20)
-            usdc_contract = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-            # balanceOf(address) = 0x70a08231 + padded address
-            data_param = "0x70a08231" + wallet_address[2:].zfill(64)
-            
-            usdc_resp = await client.post(
-                polygon_rpc,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_call",
-                    "params": [{"to": usdc_contract, "data": data_param}, "latest"],
-                    "id": 2
-                }
-            )
-            usdc_data = usdc_resp.json()
-            usdc_raw = int(usdc_data.get("result", "0x0"), 16)
-            usdc_balance = usdc_raw / 1e6  # USDC has 6 decimals
-        
+            # MATIC balance
+            r = await client.post(RPC, json={
+                "jsonrpc": "2.0", "method": "eth_getBalance",
+                "params": [WALLET, "latest"], "id": 1
+            })
+            matic = int(r.json()["result"], 16) / 1e18
+            # USDC balance (native USDC on Polygon)
+            USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            data = "0x70a08231000000000000000000000000" + WALLET[2:]
+            r2 = await client.post(RPC, json={
+                "jsonrpc": "2.0", "method": "eth_call",
+                "params": [{"to": USDC, "data": data}, "latest"], "id": 2
+            })
+            usdc = int(r2.json()["result"], 16) / 1e6
         return {
-            "usdc": round(usdc_balance, 2),
-            "matic": round(matic_balance, 4),
-            "wallet": wallet_address,
-            "network": "Polygon Mainnet",
-            "timestamp": datetime.utcnow().isoformat()
+            "wallet": WALLET, "usdc": round(usdc, 2), "matic": round(matic, 4),
+            "chain": "Polygon", "live": True
         }
     except Exception as e:
         logger.error(f"Wallet balance error: {e}")
-        return {"error": str(e), "usdc": 0, "matic": 0}
+        return {"wallet": WALLET, "usdc": 0, "matic": 0, "chain": "Polygon", "live": True, "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -5310,44 +5351,8 @@ async def get_analytics_sport_breakdown():
 
 
 # =============================================================================
-# LIVE TRADING ENDPOINTS (wallet balance, live trades, live stats)
+# LIVE TRADING ENDPOINTS (live trades, live stats)
 # =============================================================================
-
-@app.get("/api/wallet/balance")
-async def get_wallet_balance():
-    """Get real USDC + MATIC balance from Polygon blockchain."""
-    import httpx
-    WALLET = "0xb9BEa5FDe7957709D0f8d2064188B1603b74D5Ca"
-    RPC = "https://small-cosmological-friday.matic.quiknode.pro/c6dd1696accaf8a955e09f34475deb31913c5254/"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            # MATIC balance
-            r = await client.post(RPC, json={
-                "jsonrpc": "2.0", "method": "eth_getBalance",
-                "params": [WALLET, "latest"], "id": 1
-            })
-            matic = int(r.json()["result"], 16) / 1e18
-
-            # USDC balance (native USDC on Polygon)
-            USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-            data = "0x70a08231000000000000000000000000" + WALLET[2:]
-            r2 = await client.post(RPC, json={
-                "jsonrpc": "2.0", "method": "eth_call",
-                "params": [{"to": USDC, "data": data}, "latest"], "id": 2
-            })
-            usdc = int(r2.json()["result"], 16) / 1e6
-
-        return {
-            "wallet": WALLET,
-            "usdc": round(usdc, 2),
-            "matic": round(matic, 4),
-            "chain": "Polygon",
-            "live": True
-        }
-    except Exception as e:
-        logger.error(f"Wallet balance error: {e}")
-        return {"wallet": WALLET, "usdc": 0, "matic": 0, "chain": "Polygon", "live": True, "error": str(e)}
-
 
 @app.get("/api/live/trades")
 async def get_live_trades():
@@ -5427,6 +5432,102 @@ async def get_live_stats():
     except Exception as e:
         logger.error(f"Live stats error: {e}")
         return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0, "avg_pnl": 0, "total_staked": 0, "mode": "live", "error": str(e)}
+
+
+# =============================================================================
+# HOME COMMAND CENTER ENDPOINTS
+# =============================================================================
+
+@app.get("/api/live/today")
+async def get_today_pnl():
+    """Today's P&L from live_trades resolved today."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as trades,
+                    COALESCE(SUM(pnl_usd), 0) as pnl,
+                    SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                FROM live_trades
+                WHERE resolved_at >= CURRENT_DATE
+                AND status = 'resolved'
+            """)
+        pnl = float(row['pnl'])
+        return {
+            "trades": row['trades'],
+            "pnl": round(pnl, 2),
+            "wins": row['wins'] or 0,
+            "profitable": pnl >= 0
+        }
+    except Exception as e:
+        logger.error(f"Today PnL error: {e}")
+        return {"trades": 0, "pnl": 0, "wins": 0, "profitable": True}
+
+
+@app.get("/api/live/positions")
+async def get_active_positions():
+    """Active open positions count and deployed capital."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT COUNT(*) as count, COALESCE(SUM(stake_usd), 0) as deployed
+                FROM live_trades WHERE status = 'open'
+            """)
+        return {
+            "count": row['count'],
+            "deployed": round(float(row['deployed']), 2)
+        }
+    except Exception as e:
+        logger.error(f"Active positions error: {e}")
+        return {"count": 0, "deployed": 0}
+
+
+@app.get("/api/live/weekly")
+async def get_weekly_pnl():
+    """7-day P&L from live_trades."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as trades,
+                    COALESCE(SUM(pnl_usd), 0) as pnl
+                FROM live_trades
+                WHERE resolved_at >= CURRENT_DATE - INTERVAL '7 days'
+                AND status = 'resolved'
+            """)
+        return {
+            "trades": row['trades'],
+            "pnl": round(float(row['pnl']), 2)
+        }
+    except Exception as e:
+        logger.error(f"Weekly PnL error: {e}")
+        return {"trades": 0, "pnl": 0}
+
+
+@app.get("/api/live/trend")
+async def get_pnl_trend():
+    """7-day daily P&L trend for sparkline chart."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT
+                    DATE(resolved_at) as day,
+                    COALESCE(SUM(pnl_usd), 0) as pnl,
+                    COUNT(*) as trades
+                FROM live_trades
+                WHERE resolved_at >= CURRENT_DATE - INTERVAL '7 days'
+                AND status = 'resolved'
+                GROUP BY DATE(resolved_at)
+                ORDER BY day
+            """)
+        return [{"day": str(r['day']), "pnl": round(float(r['pnl']), 2), "trades": r['trades']} for r in rows]
+    except Exception as e:
+        logger.error(f"PnL trend error: {e}")
+        return []
 
 
 # =============================================================================

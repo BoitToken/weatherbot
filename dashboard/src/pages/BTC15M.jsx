@@ -18,7 +18,7 @@ const font = "'JetBrains Mono', 'Fira Code', 'SF Mono', monospace";
 const fontSans = "'Inter', 'SF Pro', -apple-system, sans-serif";
 
 /* ═══════════════════════════════════════════════════════════════
-   Old signal config kept for Analysis tab compatibility
+   Signal config for Analysis tab
    ═══════════════════════════════════════════════════════════════ */
 const SIGNALS = {
   RSI: { name: "RSI (14)", weight: 0.15, description: "Relative Strength Index" },
@@ -127,185 +127,7 @@ const MiniChart = ({ candles, targetPrice, windowOpen }) => {
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   Factor interpretation helpers
-   ═══════════════════════════════════════════════════════════════ */
-const FACTOR_META = [
-  { key: "f_price_delta", label: "Price Delta", interpretDown: "Strong bearish momentum", interpretUp: "Strong bullish momentum", interpretNeutral: "Flat price action" },
-  { key: "f_momentum", label: "Momentum", interpretDown: "Early downtrend forming", interpretUp: "Early uptrend forming", interpretNeutral: "No momentum" },
-  { key: "f_volume_imbalance", label: "Volume Imbalance", interpretDown: "Heavy sell pressure", interpretUp: "Heavy buy pressure", interpretNeutral: "Balanced volume" },
-  { key: "f_oracle_lead", label: "Oracle Lead", interpretDown: "Oracle confirming drop", interpretUp: "Oracle confirming rise", interpretNeutral: "Oracle neutral" },
-  { key: "f_book_imbalance", label: "Book Imbalance", isContrarian: true, interpretDown: "Crowd bearish (contrarian bullish)", interpretUp: "Crowd bullish (contrarian bearish)", interpretNeutral: "Balanced book" },
-  { key: "f_volatility", label: "Volatility", isThreshold: true, interpretHigh: "High volatility = big payout", interpretLow: "Low volatility" },
-  { key: "f_time_decay", label: "Time Decay", isThreshold: true, interpretHigh: "Fresh window, full value", interpretLow: "Late entry, decayed value" },
-];
-
-function getFactorDisplay(factor, value, prediction) {
-  const v = Number(value);
-  if (factor.isThreshold) {
-    const active = v > 0.5;
-    return {
-      value: v.toFixed(3),
-      direction: active ? "✅ Active" : "⚠️ Low",
-      interpretation: active ? factor.interpretHigh : factor.interpretLow,
-      color: active ? C.win : C.muted,
-    };
-  }
-  if (factor.isContrarian) {
-    const crowd = v > 0 ? "bullish" : v < 0 ? "bearish" : "neutral";
-    const pct = Math.abs(v) > 0 ? Math.round(50 + Math.abs(v) * 50) : 50;
-    return {
-      value: (v > 0 ? "+" : "") + v.toFixed(3),
-      direction: "🔄 Contrarian",
-      interpretation: `Crowd was ${pct}% ${crowd}`,
-      color: "#ffaa00",
-    };
-  }
-  const dir = v < -0.01 ? "DOWN" : v > 0.01 ? "UP" : "NEUTRAL";
-  return {
-    value: (v > 0 ? "+" : "") + v.toFixed(3),
-    direction: dir === "DOWN" ? "⬇️ DOWN" : dir === "UP" ? "⬆️ UP" : "➡️ FLAT",
-    interpretation: dir === "DOWN" ? factor.interpretDown : dir === "UP" ? factor.interpretUp : factor.interpretNeutral,
-    color: dir === "DOWN" ? C.loss : dir === "UP" ? C.win : C.muted,
-  };
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   Trade Drill-Down Card
-   ═══════════════════════════════════════════════════════════════ */
-function TradeCard({ trade, isMobile }) {
-  const [expanded, setExpanded] = useState(false);
-  const isWin = trade.correct;
-  const pnl = Number(trade.trade_pnl);
-  const roi = Number(trade.roi_pct);
-  const entryPriceCents = (Number(trade.entry_price) * 100).toFixed(1);
-  const stake = Number(trade.stake);
-  const btcOpen = Number(trade.btc_open);
-  const btcClose = Number(trade.btc_close);
-  const btcMove = Number(trade.btc_move);
-  const closeTime = trade.close_time ? new Date(trade.close_time) : null;
-  const timeStr = closeTime ? closeTime.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—";
-  const probUp = Number(trade.prob_up || 0);
-  const confidence = Number(trade.confidence || 0);
-  const factorsAgreed = Number(trade.factors_agreed || 0);
-
-  return (
-    <div
-      onClick={() => setExpanded(!expanded)}
-      style={{
-        background: C.card,
-        border: `1px solid ${isWin ? "rgba(0,255,135,0.15)" : "rgba(255,51,102,0.15)"}`,
-        borderRadius: 12,
-        padding: isMobile ? 12 : 16,
-        cursor: "pointer",
-        transition: "all 0.2s",
-        minHeight: 44,
-      }}
-    >
-      {/* Row 1: Time | Timeframe | Direction */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontFamily: font, color: C.muted }}>{timeStr}</span>
-        <span style={{ fontSize: 10, fontFamily: font, background: "rgba(124,58,237,0.15)", color: C.accent, padding: "2px 8px", borderRadius: 4, fontWeight: 600 }}>
-          {trade.window_length}M
-        </span>
-        <span style={{
-          fontSize: 10, fontFamily: font, fontWeight: 700, padding: "2px 10px", borderRadius: 4,
-          background: trade.prediction === "UP" ? "rgba(0,255,135,0.15)" : "rgba(255,51,102,0.15)",
-          color: trade.prediction === "UP" ? C.win : C.loss,
-        }}>
-          {trade.prediction}
-        </span>
-        <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: font, fontWeight: 700, color: isWin ? C.win : C.loss }}>
-          {isWin ? "✅ WIN" : "❌ LOSS"}
-        </span>
-      </div>
-
-      {/* Row 2: Entry | Stake | P&L | ROI */}
-      <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 10 : 16, marginBottom: 8, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1 }}>ENTRY</div>
-          <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: C.white }}>{entryPriceCents}¢</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1 }}>STAKE</div>
-          <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: C.white }}>${stake}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1 }}>P&L</div>
-          <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: pnl >= 0 ? C.win : C.loss }}>
-            {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1 }}>ROI</div>
-          <div style={{ fontSize: 14, fontFamily: font, fontWeight: 700, color: pnl >= 0 ? C.win : C.loss }}>
-            {roi >= 0 ? "+" : ""}{roi}%
-          </div>
-        </div>
-      </div>
-
-      {/* Row 3: BTC Move */}
-      <div style={{ fontSize: 11, fontFamily: font, color: C.text, marginBottom: expanded ? 12 : 0 }}>
-        <span style={{ color: C.muted }}>BTC </span>
-        ${btcOpen.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-        <span style={{ color: C.muted }}> → </span>
-        ${btcClose.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-        <span style={{ color: btcMove >= 0 ? C.win : C.loss, fontWeight: 600 }}>
-          {" "}{btcMove >= 0 ? "↑" : "↓"} ${btcMove >= 0 ? "+" : ""}${btcMove.toFixed(0)}
-        </span>
-      </div>
-
-      {/* Expandable section */}
-      <div style={{
-        maxHeight: expanded ? 500 : 0,
-        overflow: "hidden",
-        transition: "max-height 0.3s ease",
-      }}>
-        {/* Confluence badge */}
-        <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-          <span style={{
-            fontSize: 11, fontFamily: font, fontWeight: 600, padding: "3px 10px", borderRadius: 6,
-            background: factorsAgreed >= 5 ? "rgba(0,255,135,0.12)" : factorsAgreed >= 3 ? "rgba(255,170,0,0.12)" : "rgba(255,51,102,0.12)",
-            color: factorsAgreed >= 5 ? C.win : factorsAgreed >= 3 ? "#ffaa00" : C.loss,
-          }}>
-            {factorsAgreed}/7 factors agreed
-          </span>
-          <span style={{ fontSize: 11, fontFamily: font, color: C.muted }}>
-            prob_up: {(probUp * 100).toFixed(1)}%
-          </span>
-          <span style={{ fontSize: 11, fontFamily: font, color: C.accent }}>
-            conf: {(confidence * 100).toFixed(0)}%
-          </span>
-        </div>
-
-        {/* Factor table */}
-        <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 65px 70px 1fr" : "120px 80px 90px 1fr", padding: "8px 10px", borderBottom: `1px solid ${C.border}`, fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1 }}>
-            <span>FACTOR</span><span>VALUE</span><span>DIR</span><span>ANALYSIS</span>
-          </div>
-          {FACTOR_META.map((fm) => {
-            const d = getFactorDisplay(fm, trade[fm.key], trade.prediction);
-            return (
-              <div key={fm.key} style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 65px 70px 1fr" : "120px 80px 90px 1fr", padding: "6px 10px", borderBottom: `1px solid ${C.border}`, fontSize: 11, fontFamily: font }}>
-                <span style={{ color: "#8892a4" }}>{fm.label}</span>
-                <span style={{ color: d.color, fontWeight: 600 }}>{d.value}</span>
-                <span style={{ fontSize: 10 }}>{d.direction}</span>
-                <span style={{ color: C.muted, fontSize: 10 }}>{d.interpretation}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Expand hint */}
-      <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: C.muted, fontFamily: font }}>
-        {expanded ? "▲ collapse" : "▼ tap to expand signal analysis"}
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   Main Component
+   Main Component — LIVE ONLY
    ═══════════════════════════════════════════════════════════════ */
 export default function BTCPolymarketEngine() {
   const [signals, setSignals] = useState([]);
@@ -319,24 +141,16 @@ export default function BTCPolymarketEngine() {
   const [activeWindow, setActiveWindow] = useState(null);
   const [priceFlash, setPriceFlash] = useState(null);
   const prevPriceRef = useRef(null);
-  const [countdown, setCountdown] = useState(300);
-  const [config, setConfig] = useState({ minConfidence: 0.65, minEdge: 0.05, kellyFraction: 0.25, maxBet: 500, bankroll: 10000, autoTrade: false });
+  const [config, setConfig] = useState({ minConfidence: 0.65, minEdge: 0.05, kellyFraction: 0.25, maxBet: 25, bankroll: 998, autoTrade: false });
   const [tab, setTab] = useState("dashboard");
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const trendRef = useRef("neutral");
   const intervalRef = useRef(null);
 
-  // Real stats from /api/btc/stats
-  const [realStats, setRealStats] = useState(null);
-
-  // Bankroll state
-  const [bankrollData, setBankrollData] = useState(null);
-  const BTC_STARTING_BALANCE = 5000;
-
-  // Trade drill-down
-  const [detailTrades, setDetailTrades] = useState([]);
-  const [tradeSort, setTradeSort] = useState("recent");
-  const [tradeLimit, setTradeLimit] = useState(20);
+  // LIVE data state
+  const [wallet, setWallet] = useState({ usdc: 0, matic: 0, wallet: "" });
+  const [liveStats, setLiveStats] = useState({ total_trades: 0, wins: 0, losses: 0, win_rate: 0, total_pnl: 0, avg_pnl: 0, total_staked: 0 });
+  const [liveTrades, setLiveTrades] = useState([]);
 
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
@@ -344,13 +158,27 @@ export default function BTCPolymarketEngine() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Fetch real stats every 10s
+  // Fetch LIVE wallet balance every 30s
+  useEffect(() => {
+    const fetchWallet = async () => {
+      try {
+        const res = await fetch("/api/wallet/balance");
+        const data = await res.json();
+        if (!data.error) setWallet(data);
+      } catch (e) { /* silent */ }
+    };
+    fetchWallet();
+    const iv = setInterval(fetchWallet, 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Fetch LIVE stats every 10s
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch("/api/btc/stats");
+        const res = await fetch("/api/live/stats");
         const data = await res.json();
-        if (!data.error) setRealStats(data);
+        if (!data.error) setLiveStats(data);
       } catch (e) { /* silent */ }
     };
     fetchStats();
@@ -358,27 +186,13 @@ export default function BTCPolymarketEngine() {
     return () => clearInterval(iv);
   }, []);
 
-  // Fetch bankroll every 10s
-  useEffect(() => {
-    const fetchBankroll = async () => {
-      try {
-        const res = await fetch("/api/btc/bankroll");
-        const data = await res.json();
-        if (!data.error) setBankrollData(data);
-      } catch (e) { /* silent */ }
-    };
-    fetchBankroll();
-    const iv = setInterval(fetchBankroll, 10000);
-    return () => clearInterval(iv);
-  }, []);
-
-  // Fetch trade details
+  // Fetch LIVE trades every 15s
   useEffect(() => {
     const fetchTrades = async () => {
       try {
-        const res = await fetch("/api/btc/trades-detail");
+        const res = await fetch("/api/live/trades");
         const data = await res.json();
-        if (data.trades) setDetailTrades(data.trades);
+        if (data.trades) setLiveTrades(data.trades);
       } catch (e) { /* silent */ }
     };
     fetchTrades();
@@ -427,7 +241,6 @@ export default function BTCPolymarketEngine() {
     setPrediction(pred);
     const upBias = 0.5 + (Math.random() - 0.5) * 0.15 + (trendRef.current === "up" ? 0.03 : trendRef.current === "down" ? -0.03 : 0);
     setPolymarketOdds({ up: Math.round(upBias * 100) / 100, down: Math.round((1 - upBias) * 100) / 100 });
-    setCountdown((c) => (c <= 0 ? 300 : c - 1));
   }, [config, computePrediction, computeEdge, kellyBet]);
 
   useEffect(() => {
@@ -475,23 +288,6 @@ export default function BTCPolymarketEngine() {
 
   const edgeInfo = prediction ? computeEdge(prediction, polymarketOdds) : { edge: 0, side: null };
 
-  // Sort trades
-  const sortedTrades = [...detailTrades].sort((a, b) => {
-    if (tradeSort === "best") return Number(b.trade_pnl) - Number(a.trade_pnl);
-    if (tradeSort === "worst") return Number(a.trade_pnl) - Number(b.trade_pnl);
-    if (tradeSort === "confidence") return Number(b.confidence || 0) - Number(a.confidence || 0);
-    // recent (default) — already sorted by close_time DESC from API
-    return 0;
-  });
-
-  const visibleTrades = sortedTrades.slice(0, tradeLimit);
-
-  // Stat card values from real API
-  const winRate = realStats ? Number(realStats.win_rate || 0).toFixed(1) : "—";
-  const netPnl = realStats ? Number(realStats.net_pnl || 0) : 0;
-  const totalTrades = realStats ? Number(realStats.total_trades || 0) : 0;
-  const bestTrade = realStats ? Number(realStats.best_trade || 0) : 0;
-
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100vh", fontFamily: fontSans, padding: 0, position: "relative", overflow: "hidden" }}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -507,8 +303,15 @@ export default function BTCPolymarketEngine() {
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: running ? C.win : C.loss, boxShadow: running ? `0 0 12px ${C.win}66` : `0 0 12px ${C.loss}66`, animation: running ? "pulse 2s infinite" : "none" }} />
           <span style={{ fontFamily: font, fontWeight: 700, fontSize: 14, letterSpacing: 1.5, color: C.white }}>POLYMARKET EDGE ENGINE</span>
           <span style={{ fontSize: 10, color: C.muted, fontFamily: font }}>BTC/USD 5m</span>
+          {/* LIVE BADGE */}
+          <div style={{
+            background: '#10b981', color: '#000', padding: '4px 12px', borderRadius: '4px',
+            fontWeight: 'bold', fontSize: '12px', display: 'inline-flex', alignItems: 'center',
+            gap: '4px', animation: 'pulse 2s infinite', fontFamily: font,
+          }}>
+            🟢 LIVE TRADING
+          </div>
         </div>
-        {/* Tabs + stop button — single wrapping row on mobile */}
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           {["dashboard", "analysis", "strategy", "trades"].map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
@@ -601,16 +404,16 @@ export default function BTCPolymarketEngine() {
         </div>
       </div>
 
-      {/* ═══ DASHBOARD TAB ═══ */}
+      {/* ═══ DASHBOARD TAB — LIVE DATA ONLY ═══ */}
       {tab === "dashboard" && (
         <div style={{ padding: isMobile ? "12px" : "20px 24px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr", gap: isMobile ? 10 : 16 }}>
-          {/* Top stat cards — REAL DATA */}
+          {/* LIVE Stats Cards */}
           <div style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 8 : 12 }}>
             {[
-              { label: "WIN RATE", value: realStats ? `${winRate}%` : "—", sub: realStats ? `${realStats.wins}W / ${realStats.losses}L` : "", color: Number(winRate) > 55 ? C.win : Number(winRate) > 45 ? "#ffaa00" : C.loss },
-              { label: "NET P&L", value: realStats ? `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)}` : "—", sub: realStats ? `Today: ${Number(realStats.today_pnl) >= 0 ? "+" : ""}$${Number(realStats.today_pnl).toFixed(2)}` : "", color: netPnl >= 0 ? C.win : C.loss },
-              { label: "TRADES", value: realStats ? totalTrades : "—", sub: realStats ? `Today: ${realStats.today_trades}` : "", color: C.accent },
-              { label: "BEST TRADE", value: realStats ? `+$${bestTrade.toFixed(2)}` : "—", sub: realStats ? `Spent: $${Number(realStats.total_spent).toFixed(0)}` : "", color: C.win },
+              { label: "WIN RATE", value: `${liveStats.win_rate}%`, sub: `${liveStats.wins}W / ${liveStats.losses}L`, color: liveStats.win_rate > 55 ? C.win : liveStats.win_rate > 45 ? "#ffaa00" : liveStats.total_trades === 0 ? C.muted : C.loss },
+              { label: "NET P&L", value: `${liveStats.total_pnl >= 0 ? "+" : ""}$${liveStats.total_pnl.toFixed(2)}`, sub: `Avg: $${liveStats.avg_pnl.toFixed(2)}`, color: liveStats.total_pnl >= 0 ? C.win : C.loss },
+              { label: "TRADES", value: liveStats.total_trades, sub: `Staked: $${liveStats.total_staked.toFixed(0)}`, color: C.accent },
+              { label: "WALLET", value: `$${wallet.usdc.toFixed(2)}`, sub: `${wallet.matic.toFixed(4)} MATIC`, color: C.win },
             ].map((s, i) => (
               <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center", minWidth: 0, overflow: "hidden" }}>
                 <div style={{ fontSize: isMobile ? 8 : 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.label}</div>
@@ -620,73 +423,44 @@ export default function BTCPolymarketEngine() {
             ))}
           </div>
 
-          {/* BANKROLL CARD ROW */}
-          {bankrollData && (
-            <div style={{ gridColumn: "1 / -1" }}>
-              <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1.5, marginBottom: 8 }}>BANKROLL</div>
-              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: isMobile ? 8 : 12 }}>
-                {/* Balance */}
-                <div style={{ background: C.card, border: `1px solid ${bankrollData.balance >= BTC_STARTING_BALANCE ? "rgba(0,255,135,0.2)" : "rgba(255,51,102,0.2)"}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>BALANCE</div>
-                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: bankrollData.balance >= BTC_STARTING_BALANCE ? C.win : C.loss }}>
-                    ${Number(bankrollData.balance).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                  </div>
-                  <div style={{ fontSize: 10, color: bankrollData.pnl_pct >= 0 ? C.win : C.loss, fontFamily: font, marginTop: 3 }}>
-                    {bankrollData.pnl_pct >= 0 ? "+" : ""}{Number(bankrollData.pnl_pct).toFixed(1)}% from ${BTC_STARTING_BALANCE.toLocaleString()}
-                  </div>
+          {/* LIVE WALLET CARD */}
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1.5, marginBottom: 8 }}>💰 LIVE WALLET — POLYGON</div>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 8 : 12 }}>
+              <div style={{ background: C.card, border: "1px solid rgba(0,255,135,0.2)", borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>USDC BALANCE</div>
+                <div style={{ fontSize: isMobile ? 18 : 24, fontFamily: font, fontWeight: 700, color: C.win }}>
+                  ${wallet.usdc.toFixed(2)}
                 </div>
-                {/* Available */}
-                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>AVAILABLE</div>
-                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: C.white }}>
-                    ${Number(bankrollData.available).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                  </div>
-                  <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>ready to deploy</div>
+                <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>Native USDC</div>
+              </div>
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>MATIC BALANCE</div>
+                <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: "#7c3aed" }}>
+                  {wallet.matic.toFixed(4)}
                 </div>
-                {/* In Positions */}
-                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>IN POSITIONS</div>
-                  <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: "#ffaa00" }}>
-                    ${Number(bankrollData.in_positions).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                  </div>
-                  <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>currently deployed</div>
+                <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>Gas token</div>
+              </div>
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>LIVE P&L</div>
+                <div style={{ fontSize: isMobile ? 16 : 20, fontFamily: font, fontWeight: 700, color: liveStats.total_pnl >= 0 ? C.win : C.loss }}>
+                  {liveStats.total_pnl >= 0 ? "+" : ""}${liveStats.total_pnl.toFixed(2)}
                 </div>
-                {/* Peak / Drawdown */}
-                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>PEAK / DRAWDOWN</div>
-                  <div style={{ fontSize: isMobile ? 14 : 18, fontFamily: font, fontWeight: 700, color: C.win }}>
-                    ${Number(bankrollData.peak_balance).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                  </div>
-                  <div style={{ fontSize: 10, color: bankrollData.max_drawdown_pct > 5 ? C.loss : C.muted, fontFamily: font, marginTop: 3 }}>
-                    DD: {Number(bankrollData.max_drawdown_pct).toFixed(1)}%
-                  </div>
+                <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>Realized</div>
+              </div>
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px", textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 4 }}>WALLET</div>
+                <div style={{ fontSize: isMobile ? 11 : 12, fontFamily: font, fontWeight: 600, color: C.text, wordBreak: "break-all" }}>
+                  {wallet.wallet ? `${wallet.wallet.slice(0, 6)}...${wallet.wallet.slice(-4)}` : "—"}
                 </div>
-                {/* Capacity bar */}
-                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: isMobile ? "10px 8px" : "14px 16px" }}>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1, marginBottom: 8 }}>EXPOSURE CAPACITY</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.muted, fontFamily: font, marginBottom: 4 }}>
-                    <span>Used ${Number(bankrollData.in_positions).toFixed(0)}</span>
-                    <span>Max ${Number(bankrollData.max_exposure).toFixed(0)}</span>
-                  </div>
-                  <div style={{ height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
-                    <div style={{
-                      height: "100%", borderRadius: 4,
-                      width: `${Math.min(100, (bankrollData.in_positions / Math.max(bankrollData.max_exposure, 1)) * 100)}%`,
-                      background: bankrollData.in_positions / bankrollData.max_exposure > 0.8
-                        ? `linear-gradient(90deg, ${C.loss}99, ${C.loss})`
-                        : bankrollData.in_positions / bankrollData.max_exposure > 0.5
-                        ? `linear-gradient(90deg, #ffaa0099, #ffaa00)`
-                        : `linear-gradient(90deg, ${C.win}99, ${C.win})`,
-                      transition: "width 0.5s",
-                    }} />
-                  </div>
-                  <div style={{ fontSize: 9, color: C.muted, fontFamily: font, marginTop: 6 }}>
-                    {bankrollData.max_exposure > 0 ? ((1 - bankrollData.in_positions / bankrollData.max_exposure) * 100).toFixed(0) : 100}% capacity remaining
-                  </div>
+                <div style={{ fontSize: 10, color: C.muted, fontFamily: font, marginTop: 3 }}>
+                  <a href={`https://polygonscan.com/address/${wallet.wallet}`} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, textDecoration: "none" }}>
+                    View on PolygonScan ↗
+                  </a>
                 </div>
               </div>
             </div>
-          )}
+          </div>
 
           {/* Signal Panel */}
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isMobile ? 12 : 18, gridRow: isMobile ? "auto" : "span 2" }}>
@@ -767,64 +541,99 @@ export default function BTCPolymarketEngine() {
         </div>
       )}
 
-      {/* ═══ TRADES TAB — Drill-Down Board ═══ */}
+      {/* ═══ TRADES TAB — LIVE TRADES ONLY ═══ */}
       {tab === "trades" && (
         <div style={{ padding: isMobile ? "12px" : "20px 24px" }}>
-          {/* Header + Sort */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
             <div style={{ fontSize: 10, color: C.muted, fontFamily: font, letterSpacing: 1.5 }}>
-              TRADE DRILL-DOWN — {detailTrades.length} TRADES
+              🟢 LIVE TRADES — {liveTrades.length} TOTAL
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {[
-                { key: "recent", label: "Most Recent" },
-                { key: "best", label: "Best P&L" },
-                { key: "worst", label: "Worst P&L" },
-                { key: "confidence", label: "Highest Conf" },
-              ].map((s) => (
-                <button key={s.key} onClick={() => { setTradeSort(s.key); setTradeLimit(20); }} style={{
-                  background: tradeSort === s.key ? `${C.accent}22` : "rgba(255,255,255,0.03)",
-                  border: `1px solid ${tradeSort === s.key ? C.accent + "44" : C.border}`,
-                  color: tradeSort === s.key ? C.accent : C.muted,
-                  borderRadius: 6, padding: "6px 12px", fontSize: 10, fontFamily: font,
-                  cursor: "pointer", letterSpacing: 0.5, minHeight: 44,
-                }}>{s.label}</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Summary bar */}
-          {realStats && (
-            <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.win, fontWeight: 600 }}>W: {realStats.wins}</span>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.loss, fontWeight: 600 }}>L: {realStats.losses}</span>
-              <span style={{ fontSize: 12, fontFamily: font, color: netPnl >= 0 ? C.win : C.loss, fontWeight: 700 }}>
-                P&L: {netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 12, fontFamily: font, color: C.win, fontWeight: 600 }}>W: {liveStats.wins}</span>
+              <span style={{ fontSize: 12, fontFamily: font, color: C.loss, fontWeight: 600 }}>L: {liveStats.losses}</span>
+              <span style={{ fontSize: 12, fontFamily: font, color: liveStats.total_pnl >= 0 ? C.win : C.loss, fontWeight: 700 }}>
+                P&L: {liveStats.total_pnl >= 0 ? "+" : ""}${liveStats.total_pnl.toFixed(2)}
               </span>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.white }}>Win Rate: {winRate}%</span>
+              <span style={{ fontSize: 12, fontFamily: font, color: C.white }}>Win Rate: {liveStats.win_rate}%</span>
             </div>
-          )}
-
-          {/* Card grid */}
-          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: isMobile ? 10 : 14 }}>
-            {visibleTrades.map((trade) => (
-              <TradeCard key={trade.window_id} trade={trade} isMobile={isMobile} />
-            ))}
           </div>
 
-          {visibleTrades.length === 0 && (
-            <div style={{ padding: 40, textAlign: "center", color: C.muted, fontFamily: font }}>No trades yet.</div>
-          )}
-
-          {tradeLimit < sortedTrades.length && (
-            <div style={{ textAlign: "center", marginTop: 16 }}>
-              <button onClick={() => setTradeLimit((l) => l + 20)} style={{
-                background: `${C.accent}15`, border: `1px solid ${C.accent}33`, color: C.accent,
-                borderRadius: 8, padding: "12px 32px", fontFamily: font, fontSize: 12,
-                fontWeight: 600, cursor: "pointer", letterSpacing: 0.5, minHeight: 44,
-              }}>
-                Load more ({sortedTrades.length - tradeLimit} remaining)
-              </button>
+          {liveTrades.length === 0 ? (
+            <div style={{
+              padding: 60, textAlign: "center", background: C.card, borderRadius: 16,
+              border: `1px solid rgba(16,185,129,0.2)`,
+            }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🟢</div>
+              <h3 style={{ fontFamily: font, fontSize: 18, color: C.win, fontWeight: 700, marginBottom: 8 }}>Live Trading Active</h3>
+              <p style={{ fontFamily: font, fontSize: 13, color: C.muted, marginBottom: 12 }}>Waiting for first live trade...</p>
+              <p style={{ fontFamily: font, fontSize: 16, color: C.white, fontWeight: 600 }}>
+                Wallet: ${wallet.usdc.toFixed(2)} USDC ready
+              </p>
+              <p style={{ fontFamily: font, fontSize: 11, color: C.muted, marginTop: 8 }}>
+                {wallet.wallet ? `${wallet.wallet.slice(0, 6)}...${wallet.wallet.slice(-4)}` : ""} · Polygon
+              </p>
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font, fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: `2px solid ${C.border}` }}>
+                    <th style={{ padding: "10px 8px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1 }}>PREDICTION</th>
+                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>STAKE</th>
+                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>ENTRY</th>
+                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>P&L</th>
+                    <th style={{ padding: "10px 8px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1 }}>TX</th>
+                    <th style={{ padding: "10px 8px", textAlign: "center", color: C.muted, fontSize: 10, letterSpacing: 1 }}>STATUS</th>
+                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>TIME</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liveTrades.map((trade) => (
+                    <tr key={trade.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td style={{ padding: "10px 8px" }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 4,
+                          background: trade.prediction === "UP" ? "rgba(0,255,135,0.15)" : "rgba(255,51,102,0.15)",
+                          color: trade.prediction === "UP" ? C.win : C.loss,
+                        }}>
+                          {trade.prediction || trade.side || "—"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.white }}>
+                        ${trade.stake_usd?.toFixed(2) || "—"}
+                      </td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.white }}>
+                        {trade.entry_price ? `${(trade.entry_price * 100).toFixed(1)}¢` : "—"}
+                      </td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 700, color: trade.pnl_usd != null ? (trade.pnl_usd >= 0 ? C.win : C.loss) : C.muted }}>
+                        {trade.pnl_usd != null ? `${trade.pnl_usd >= 0 ? "+" : ""}$${trade.pnl_usd.toFixed(2)}` : "Open"}
+                      </td>
+                      <td style={{ padding: "10px 8px" }}>
+                        {trade.tx_hash ? (
+                          <a href={`https://polygonscan.com/tx/${trade.tx_hash}`} target="_blank" rel="noopener noreferrer"
+                            style={{ color: C.accent, textDecoration: "none", fontSize: 11 }}>
+                            {trade.tx_hash.slice(0, 8)}...
+                          </a>
+                        ) : (
+                          <span style={{ color: C.muted }}>Pending</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "10px 8px", textAlign: "center" }}>
+                        <span style={{
+                          fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 600,
+                          background: trade.status === "resolved" ? "rgba(0,255,135,0.1)" : trade.status === "pending" ? "rgba(255,170,0,0.1)" : "rgba(255,255,255,0.05)",
+                          color: trade.status === "resolved" ? C.win : trade.status === "pending" ? "#ffaa00" : C.muted,
+                        }}>
+                          {trade.status || "—"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10 }}>
+                        {trade.created_at ? new Date(trade.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
@@ -841,7 +650,7 @@ export default function BTCPolymarketEngine() {
               { key: "minEdge", label: "Min Edge", min: 0.01, max: 0.2, step: 0.01, fmt: (v) => `${(v * 100).toFixed(0)}%` },
               { key: "kellyFraction", label: "Kelly Fraction", min: 0.05, max: 0.5, step: 0.05, fmt: (v) => `${(v * 100).toFixed(0)}%` },
               { key: "maxBet", label: "Max Bet Size", min: 50, max: 2000, step: 50, fmt: (v) => `$${v}` },
-              { key: "bankroll", label: "Bankroll", min: 1000, max: 100000, step: 1000, fmt: (v) => `$${v.toLocaleString()}` },
+              { key: "bankroll", label: "Live Wallet (USDC)", min: 100, max: 10000, step: 100, fmt: (v) => `$${v.toLocaleString()}` },
             ].map((s) => (
               <div key={s.key} style={{ marginBottom: 18 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
@@ -860,10 +669,10 @@ export default function BTCPolymarketEngine() {
               {config.autoTrade ? "✓ AUTO-TRADE ENABLED" : "ENABLE AUTO-TRADE"}
             </button>
           </div>
-          <div style={{ background: "rgba(255,170,0,0.04)", border: "1px solid rgba(255,170,0,0.15)", borderRadius: 12, padding: 18 }}>
-            <div style={{ fontSize: 11, color: "#ffaa00", fontFamily: font, fontWeight: 600, marginBottom: 8 }}>⚠ IMPORTANT DISCLAIMER</div>
+          <div style={{ background: "rgba(16,185,129,0.04)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 12, padding: 18 }}>
+            <div style={{ fontSize: 11, color: "#10b981", fontFamily: font, fontWeight: 600, marginBottom: 8 }}>🟢 LIVE TRADING MODE</div>
             <div style={{ fontSize: 11, color: "#8892a4", lineHeight: 1.7 }}>
-              This is a <strong style={{ color: "#ffaa00" }}>simulation/demo dashboard</strong>. No real trades are being placed. Near-100% accuracy on 5-minute crypto predictions is not achievable — markets are adversarial and efficient.
+              This dashboard shows <strong style={{ color: "#10b981" }}>real live trades</strong> with actual USDC from your Polygon wallet. All P&L is real. Wallet balance is fetched directly from the blockchain.
             </div>
           </div>
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginTop: 16 }}>

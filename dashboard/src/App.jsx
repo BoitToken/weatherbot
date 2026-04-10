@@ -55,7 +55,8 @@ function Sidebar() {
   return (
     <div className="sidebar">
       <div className="sidebar-logo">
-        WeatherBot
+        <img src="/brobot-logo.png" alt="BroBot" style={{ width: 32, height: 32, borderRadius: 4 }} />
+        <span>BroBot</span>
       </div>
       <ul className="sidebar-nav">
         {navItems.map(item => (

@@ -582,6 +582,9 @@ class BTCSignalEngine:
                     'confidence': confidence,
                     'skip_reason': skip_reason,
                     'question': window.get('question', ''),
+                    'token_id_up': window.get('token_id_up', ''),
+                    'token_id_down': window.get('token_id_down', ''),
+                    'condition_id': window.get('condition_id', ''),
                 }
 
                 # Store signal in DB
