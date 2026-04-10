@@ -772,7 +772,7 @@ function StrategyTab({ config, isMobile }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const load = () => fetchJSON('/api/ghost/jc-settings', null).then(d => d?.settings && setSettings(d.settings));
+    const load = () => fetch('/api/ghost/jc-settings').then(r => r.json()).then(d => d?.settings && setSettings(d.settings)).catch(() => {});
     load();
     const t = setInterval(load, 10000);
     return () => clearInterval(t);
