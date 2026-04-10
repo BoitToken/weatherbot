@@ -766,89 +766,121 @@ function PerformanceTab({ pnlStats, dailyPnl, trades, isMobile }) {
    TAB: STRATEGY
    ═══════════════════════════════════════════════════════════════ */
 function StrategyTab({ config, isMobile }) {
-  const mode = config?.mode || "paper";
+  const [settings, setSettings] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [editVal, setEditVal] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const load = () => fetchJSON('/api/ghost/jc-settings', null).then(d => d?.settings && setSettings(d.settings));
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  const s = settings || {};
+  const mode = s.mode || config?.mode || 'paper';
+
+  const saveSetting = async (key, value) => {
+    setSaving(true);
+    try {
+      await fetch('/api/ghost/jc-settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: value }),
+      });
+      setSettings(prev => ({ ...prev, [key]: value }));
+    } catch (e) { console.error(e); }
+    setSaving(false);
+    setEditing(null);
+  };
+
+  const editableCard = (key, icon, label, displayFn, suffix) => {
+    const isEdit = editing === key;
+    const rawVal = s[key] || '0';
+    return (
+      <div key={key} style={{ background: '#0f0f1a', borderRadius: 10, padding: '14px 16px', border: `1px solid ${isEdit ? C.accent : C.border}`, cursor: 'pointer', transition: 'border-color 0.2s' }}
+        onClick={() => { if (!isEdit) { setEditing(key); setEditVal(rawVal); } }}>
+        <div style={{ fontSize: 10, fontFamily: font, color: C.muted, marginBottom: 6, letterSpacing: 1 }}>{icon} {label.toUpperCase()}</div>
+        {isEdit ? (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input value={editVal} onChange={e => setEditVal(e.target.value)} autoFocus
+              style={{ background: '#1a1a2e', border: `1px solid ${C.accent}`, borderRadius: 6, padding: '6px 10px', color: C.white, fontSize: 15, fontFamily: font, fontWeight: 700, width: '100%', outline: 'none' }}
+              onKeyDown={e => { if (e.key === 'Enter') saveSetting(key, editVal); if (e.key === 'Escape') setEditing(null); }} />
+            <button onClick={(e) => { e.stopPropagation(); saveSetting(key, editVal); }}
+              style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: 6, padding: '6px 12px', fontSize: 11, fontFamily: font, cursor: 'pointer', fontWeight: 700, flexShrink: 0 }}>
+              {saving ? '...' : 'Save'}
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 15, fontFamily: font, fontWeight: 700, color: C.white }}>{displayFn ? displayFn(rawVal) : rawVal}{suffix || ''}</span>
+            <span style={{ fontSize: 10, color: C.muted, marginLeft: 'auto' }}>tap to edit</span>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* Mode + Overview */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Mode Toggle */}
       <Card>
-        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
-          <SectionTitle style={{ marginBottom: 0 }}>🧠 Copy Trade Strategy</SectionTitle>
-          <span style={{
-            padding: "5px 14px", borderRadius: 6, fontSize: 12, fontFamily: font, fontWeight: 700,
-            background: mode === "live" ? `${C.loss}22` : `${C.accent}22`,
-            color: mode === "live" ? C.loss : C.accent,
-            border: `1px solid ${mode === "live" ? C.loss : C.accent}55`,
-            textTransform: "uppercase", letterSpacing: 1,
-          }}>
-            {mode === "live" ? "🔴 LIVE" : "🟣 PAPER"}
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
+          <SectionTitle style={{ marginBottom: 0 }}>Settings</SectionTitle>
+          <button onClick={() => saveSetting('mode', mode === 'paper' ? 'live' : 'paper')}
+            style={{
+              padding: '5px 14px', borderRadius: 6, fontSize: 12, fontFamily: font, fontWeight: 700, cursor: 'pointer',
+              background: mode === 'live' ? `${C.loss}22` : `${C.accent}22`,
+              color: mode === 'live' ? C.loss : C.accent,
+              border: `1px solid ${mode === 'live' ? C.loss : C.accent}55`,
+              textTransform: 'uppercase', letterSpacing: 1,
+            }}>
+            {mode === 'live' ? 'LIVE' : 'PAPER'}
+          </button>
         </div>
 
-        {/* Methodology */}
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ fontSize: 10, fontFamily: font, color: C.muted, letterSpacing: 1.5, marginBottom: 10, textTransform: "uppercase" }}>Jayson's Methodology</div>
-          <div style={{ fontSize: 13, fontFamily: "'Inter', sans-serif", color: C.text, lineHeight: 1.8 }}>
-            Jayson Casper trades BTC using multi-timeframe structure analysis — identifying key levels (POCs, SPVs, Fib retracements) and waiting for price to sweep liquidity before entering. Bias is determined by market structure, not indicators. The system mirrors his signals in near-real-time via Discord monitoring.
-          </div>
-        </div>
-
-        {/* Risk Rules */}
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)", gap: 12 }}>
-          {[
-            { icon: "⚖️", label: "Leverage", value: "30x Perpetuals" },
-            { icon: "💰", label: "Risk / Trade", value: "45% of balance" },
-            { icon: "📊", label: "Max Concurrent", value: "2 positions" },
-            { icon: "🏦", label: "Max Exposure", value: "$50,000 USD" },
-          ].map(({ icon, label, value }) => (
-            <div key={label} style={{ background: "#0f0f1a", borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 10, fontFamily: font, color: C.muted, marginBottom: 6, letterSpacing: 1 }}>{icon} {label.toUpperCase()}</div>
-              <div style={{ fontSize: 15, fontFamily: font, fontWeight: 700, color: C.white }}>{value}</div>
-            </div>
-          ))}
+        {/* Editable Settings Grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)', gap: 12 }}>
+          {editableCard('stake_pct', String.fromCodePoint(0x1F4B0), 'Risk / Trade', v => `${(Number(v) * 100).toFixed(0)}% of balance`)}
+          {editableCard('max_leverage', String.fromCodePoint(0x2696), 'Max Leverage', v => `${v}x`)}
+          {editableCard('min_leverage', String.fromCodePoint(0x1F4C9), 'Min Leverage', v => `${v}x`)}
+          {editableCard('max_concurrent', String.fromCodePoint(0x1F4CA), 'Max Concurrent', v => `${v} positions`)}
+          {editableCard('proximity_pct', String.fromCodePoint(0x1F3AF), 'Level Proximity', v => `${(Number(v) * 100).toFixed(1)}%`)}
+          {editableCard('half_close_pct', String.fromCodePoint(0x2702), 'Partial Close At', v => `+${v}%`)}
+          {editableCard('full_close_pct', String.fromCodePoint(0x2705), 'Full Close At', v => `+${v}%`)}
+          {editableCard('breakeven_pct', String.fromCodePoint(0x1F6E1), 'Breakeven SL At', v => `+${v}%`)}
         </div>
       </Card>
 
-      {/* Position Management */}
+      {/* Position Management — dynamic from settings */}
       <Card>
-        <SectionTitle>🎛 Position Management Rules</SectionTitle>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <SectionTitle>Position Management</SectionTitle>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {[
-            { trigger: "+1.0%", action: "Half close position + move SL to breakeven", color: C.warning },
-            { trigger: "+1.5%", action: "Full close remaining position", color: C.win },
-            { trigger: "SL hit", action: "Full close at stop loss price", color: C.loss },
-            { trigger: "Manual JC signal", action: "Override and close immediately", color: C.accent },
+            { trigger: `+${s.half_close_pct || '1.0'}%`, action: 'Half close + move SL to breakeven', color: C.warning },
+            { trigger: `+${s.full_close_pct || '1.5'}%`, action: 'Full close remaining position', color: C.win },
+            { trigger: 'Opposing JC level', action: 'Partial exit at next resistance/support', color: C.accent },
+            { trigger: 'Trending >1.5%', action: 'Hold remainder, ride to next level', color: '#60a5fa' },
+            { trigger: 'SL hit', action: 'Full close at stop loss', color: C.loss },
           ].map(({ trigger, action, color }) => (
-            <div key={trigger} style={{ display: "flex", gap: 16, alignItems: "flex-start", padding: "10px 14px", background: "#0f0f1a", borderRadius: 8, border: `1px solid ${C.border}` }}>
-              <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color, minWidth: 80, flexShrink: 0 }}>{trigger}</span>
-              <span style={{ fontSize: 13, fontFamily: font, color: C.text }}>{action}</span>
+            <div key={trigger} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '8px 12px', background: '#0f0f1a', borderRadius: 8, border: `1px solid ${C.border}` }}>
+              <span style={{ fontSize: 12, fontFamily: font, fontWeight: 700, color, minWidth: 90, flexShrink: 0 }}>{trigger}</span>
+              <span style={{ fontSize: 12, fontFamily: font, color: C.text }}>{action}</span>
             </div>
           ))}
         </div>
       </Card>
 
-      {/* AI Signal Brain */}
+      {/* Level-Based Strategy Info */}
       <Card>
-        <SectionTitle>🤖 AI Signal Brain — 3-Pass System</SectionTitle>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {[
-            { pass: "Pass 1", name: "Instant Parse", desc: "Real-time Discord message ingestion. Extract direction, levels, and conviction keywords within seconds.", color: C.win },
-            { pass: "Pass 2", name: "Burst Review", desc: "5-message burst window analysis. Cross-reference with recent context, confirm signal strength vs noise.", color: C.warning },
-            { pass: "Pass 3", name: "Safety Check", desc: "Final validation gate. Check against active position, risk limits, duplicate detection, and market structure.", color: C.accent },
-          ].map(({ pass, name, desc, color }) => (
-            <div key={pass} style={{ padding: "14px 16px", background: "#0f0f1a", borderRadius: 10, border: `1px solid ${color}22` }}>
-              <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 6 }}>
-                <span style={{ fontSize: 10, fontFamily: font, color, background: `${color}22`, padding: "3px 10px", borderRadius: 5, fontWeight: 700, letterSpacing: 1 }}>{pass}</span>
-                <span style={{ fontSize: 13, fontFamily: font, fontWeight: 700, color: C.white }}>{name}</span>
-              </div>
-              <div style={{ fontSize: 12, fontFamily: "'Inter', sans-serif", color: C.muted, lineHeight: 1.6 }}>{desc}</div>
-            </div>
-          ))}
+        <SectionTitle>V1 Strategy</SectionTitle>
+        <div style={{ fontSize: 12, fontFamily: "'Inter', sans-serif", color: C.text, lineHeight: 1.7 }}>
+          <div style={{ marginBottom: 8 }}><b style={{ color: C.white }}>Entry:</b> LONG at support levels, SHORT at resistance. Price must be within {((Number(s.proximity_pct || 0.002)) * 100).toFixed(1)}% of a JC level.</div>
+          <div style={{ marginBottom: 8 }}><b style={{ color: C.white }}>Leverage:</b> {s.min_leverage || 30}x{String.fromCodePoint(0x2013)}{s.max_leverage || 50}x auto-scaled by level type (SPV 50x, POC 45x, Fib 40x, D/W 35x).</div>
+          <div style={{ marginBottom: 8 }}><b style={{ color: C.white }}>Sizing:</b> {((Number(s.stake_pct || 0.03)) * 100).toFixed(0)}% of bankroll per trade.</div>
+          <div><b style={{ color: C.white }}>Exits:</b> Level-based partial closes + trending hold. Not fixed %. Mirrors Jayson's "let it sizzle" approach.</div>
         </div>
       </Card>
-
-      {/* StrategyPanel component */}
-      <StrategyPanel compact={false} />
     </div>
   );
 }
