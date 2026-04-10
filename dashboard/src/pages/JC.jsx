@@ -213,52 +213,155 @@ function TVChart({ isMobile }) {
   );
 }
 
+/* ─── Signal Feed helpers ───────────────────────────────────── */
+function cleanContent(text) {
+  if (!text) return '';
+  let cleaned = text.replace(/<@[&!]?\d+>/g, '').trim();
+  cleaned = cleaned.replace(/<#\d+>/g, '').trim();
+  // Strip bare URLs from display text (shown as buttons instead)
+  cleaned = cleaned.replace(/https?:\/\/(?:www\.)?tradingview\.com\/\S+/g, '').trim();
+  return cleaned;
+}
+
+function classifyMessage(text) {
+  const t = (text || '').toLowerCase();
+  const hasTV = /tradingview\.com/.test(t);
+  if (hasTV || t.includes('full chart') || t.includes('my chart'))
+    return { type: 'chart', emoji: '📊', label: 'FULL CHART', color: '#7c3aed' };
+  if (t.includes('tp') || t.includes('take profit') || t.includes('hit a tp'))
+    return { type: 'tp', emoji: '✅', label: 'TP HIT', color: '#00ff87' };
+  if (t.includes('stopped') || t.includes('stop loss') || t.includes('not the low'))
+    return { type: 'loss', emoji: '❌', label: 'STOPPED', color: '#ff3366' };
+  if (t.includes('long') || t.includes('short') || t.includes('scalp'))
+    return { type: 'signal', emoji: '⚡', label: 'TRADE SIGNAL', color: '#f59e0b' };
+  return { type: 'message', emoji: '💬', label: null, color: '#4a5068' };
+}
+
+function extractTVLink(text) {
+  const match = (text || '').match(/https?:\/\/(?:www\.)?tradingview\.com\/\S+/);
+  return match ? match[0] : null;
+}
+
+function formatTimestamp(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const diffMin = (now - d) / 60000;
+  if (diffMin < 60) return `${Math.round(diffMin)}m ago`;
+  if (diffMin < 1440) return `${Math.round(diffMin / 60)}h ago`;
+  return (
+    d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
+    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+  );
+}
+
 /* C. Signal Feed — single message card
    ═══════════════════════════════════════════════════════════════ */
 function MessageCard({ msg, onClick }) {
-  const [expanded, setExpanded] = useState(false);
+  const rawContent = msg.content || msg.message || '';
+  const cleaned = cleanContent(rawContent);
+  const cls = classifyMessage(rawContent);
+  const tvLink = extractTVLink(rawContent);
   const sig = msg.signal;
-  const dirColor = sig?.direction === "LONG" ? C.win : sig?.direction === "SHORT" ? C.loss : C.warning;
+
+  // Channel name: prefer real name over generic 'discord'
+  const ch = msg.channel_name || msg.channel || '';
+  const displayChannel = ch && ch !== 'discord' ? ch : 'btc-ta';
+
+  // Accent color: signal direction overrides type color
+  const accentColor =
+    sig?.direction === 'LONG' ? C.win :
+    sig?.direction === 'SHORT' ? C.loss :
+    cls.color;
+
+  const ts = formatTimestamp(msg.created_at || msg.timestamp);
 
   return (
     <div
-      onClick={() => { setExpanded(e => !e); if (onClick) onClick(); }}
+      onClick={onClick}
       style={{
-        background: "#0f0f1a",
-        border: `1px solid ${C.border}`,
-        borderRadius: 10,
-        padding: "12px 16px",
-        cursor: "pointer",
-        transition: "border-color 0.2s",
-        borderColor: expanded ? C.accent + "66" : C.border,
+        background: '#0f0f1a',
+        borderLeft: `4px solid ${accentColor}`,
+        borderTop: `1px solid ${C.border}`,
+        borderRight: `1px solid ${C.border}`,
+        borderBottom: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: '8px 12px',
+        cursor: onClick ? 'pointer' : 'default',
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 6 }}>
-        <span style={{
-          fontSize: 10, fontFamily: font, padding: "2px 7px", borderRadius: 4,
-          background: `${channelColor(msg.channel)}22`, color: channelColor(msg.channel),
-          border: `1px solid ${channelColor(msg.channel)}44`, flexShrink: 0, marginTop: 1,
-        }}>
-          #{msg.channel || "discord"}
-        </span>
-        {sig && (
+      {/* Row 1: type label + time */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+        <span style={{ fontSize: 12 }}>{cls.emoji}</span>
+        {cls.label && (
           <span style={{
-            fontSize: 10, fontFamily: font, padding: "2px 8px", borderRadius: 4,
-            background: `${dirColor}22`, color: dirColor,
-            border: `1px solid ${dirColor}44`, flexShrink: 0, marginTop: 1, fontWeight: 700,
+            fontSize: 10, fontFamily: font, fontWeight: 700,
+            color: accentColor, letterSpacing: 1,
           }}>
-            ⚡ {sig.direction} {sig.conviction ? `· ${sig.conviction}` : ""}
+            {cls.label}
           </span>
         )}
-        {msg.has_attachments && <span style={{ fontSize: 11, marginTop: 1 }}>📷</span>}
+        {!cls.label && (
+          <span style={{ fontSize: 10, fontFamily: font, color: C.muted }}>
+            {ts} · #{displayChannel}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
-        <span style={{ fontSize: 10, fontFamily: font, color: C.muted, flexShrink: 0 }}>
-          {timeAgo(msg.created_at || msg.timestamp)}
-        </span>
+        {cls.label && (
+          <span style={{ fontSize: 10, fontFamily: font, color: C.muted }}>{ts}</span>
+        )}
       </div>
-      <div style={{ fontSize: 13, color: C.text, lineHeight: 1.55, fontFamily: "'Inter', sans-serif", wordBreak: "break-word" }}>
-        {expanded ? (msg.content || msg.message || "—") : (msg.content || msg.message || "—").slice(0, 180) + ((msg.content || msg.message || "").length > 180 ? "…" : "")}
-      </div>
+
+      {/* Channel badge (labeled types only) */}
+      {cls.label && (
+        <div style={{ fontSize: 10, fontFamily: font, color: C.muted, marginBottom: 5 }}>
+          #{displayChannel}
+        </div>
+      )}
+
+      {/* Message body */}
+      {cleaned && (
+        <div style={{
+          fontSize: 12, color: C.text, lineHeight: 1.5,
+          fontFamily: "'Inter', sans-serif", wordBreak: 'break-word',
+        }}>
+          {cleaned}
+        </div>
+      )}
+
+      {/* Signal direction tag */}
+      {sig?.direction && (
+        <div style={{ marginTop: 5 }}>
+          <span style={{
+            fontSize: 10, fontFamily: font, fontWeight: 700,
+            padding: '2px 8px', borderRadius: 4,
+            background: `${accentColor}22`, color: accentColor,
+            border: `1px solid ${accentColor}44`,
+          }}>
+            {sig.direction} entry detected
+          </span>
+        </div>
+      )}
+
+      {/* TradingView button */}
+      {tvLink && (
+        <div style={{ marginTop: 6 }}>
+          <a
+            href={tvLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={e => e.stopPropagation()}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 11, fontFamily: font, color: C.accent,
+              background: `${C.accent}15`, border: `1px solid ${C.accent}33`,
+              borderRadius: 4, padding: '3px 10px', textDecoration: 'none',
+            }}
+          >
+            📊 View on TradingView →
+          </a>
+        </div>
+      )}
     </div>
   );
 }
@@ -277,7 +380,7 @@ function SignalFeed({ signals, messages, onSelectSignal }) {
     const tb = new Date(b.created_at || b.timestamp || 0).getTime();
     return tb - ta;
   });
-  const items = deduped.slice(0, 20);
+  const items = deduped.slice(0, 15);
 
   return (
     <Card>
