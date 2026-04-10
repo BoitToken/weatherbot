@@ -1813,9 +1813,11 @@ async def lifespan(app: FastAPI):
     try:
         import sys
         sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
-        from jc_copy_trader import run_jc_copy_trader
+        from jc_copy_trader import run_jc_copy_trader, send_jc_hourly_report, send_jc_daily_report
         scheduler.add_job(run_jc_copy_trader, 'interval', seconds=10, id='jc_copy_trader', replace_existing=True)
-        logger.info("✅ JC Copy Trader scheduled (every 10s)")
+        scheduler.add_job(send_jc_hourly_report, 'cron', minute=0, timezone='Asia/Kolkata', id='jc_hourly', replace_existing=True)
+        scheduler.add_job(send_jc_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='jc_daily', replace_existing=True)
+        logger.info("✅ JC Copy Trader scheduled (trade: 10s, hourly report, daily at 11PM)")
     except Exception as e:
         logger.error(f"❌ JC Copy Trader failed to load: {e}")
     
