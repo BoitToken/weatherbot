@@ -121,64 +121,39 @@ function HeaderBar({ btcPrice, watcherStatus, mode }) {
    B. TradingView Chart
    ═══════════════════════════════════════════════════════════════ */
 function TVChart({ isMobile }) {
-  const containerRef = useRef(null);
-  const widgetRef = useRef(null);
+  const [imgTs, setImgTs] = useState(Date.now());
+  const [imgError, setImgError] = useState(false);
 
+  // Refresh screenshot every 30s
   useEffect(() => {
-    const containerId = "tv_chart_jc";
-
-    const initWidget = () => {
-      if (!window.TradingView || !containerRef.current) return;
-      if (widgetRef.current) return; // already inited
-
-      widgetRef.current = new window.TradingView.widget({
-        container_id: containerId,
-        autosize: true,
-        symbol: "BINANCE:BTCUSDT",
-        interval: "240",
-        timezone: "Asia/Kolkata",
-        theme: "dark",
-        style: "1",
-        locale: "en",
-        toolbar_bg: C.card,
-        enable_publishing: false,
-        hide_top_toolbar: false,
-        hide_legend: false,
-        withdateranges: true,
-        allow_symbol_change: true,
-        studies: ["Volume@tv-basicstudies", "VWAP@tv-basicstudies", "RSI@tv-basicstudies"],
-        backgroundColor: C.bg,
-        gridColor: "rgba(255,255,255,0.03)",
-      });
-    };
-
-    if (window.TradingView) {
-      initWidget();
-      return;
-    }
-
-    // Dynamically load tv.js
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/tv.js";
-    script.async = true;
-    script.onload = () => {
-      // Small delay to ensure TradingView global is ready
-      setTimeout(initWidget, 200);
-    };
-    document.head.appendChild(script);
-
-    return () => {
-      widgetRef.current = null;
-    };
+    const iv = setInterval(() => setImgTs(Date.now()), 30000);
+    return () => clearInterval(iv);
   }, []);
 
   return (
-    <Card style={{ padding: 0, overflow: "hidden" }}>
-      <div
-        id="tv_chart_jc"
-        ref={containerRef}
-        style={{ width: "100%", height: isMobile ? 350 : 500 }}
-      />
+    <Card style={{ padding: 0, overflow: "hidden", position: "relative" }}>
+      <div style={{ position: "absolute", top: 8, left: 12, zIndex: 2, display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 9, color: C.accent, fontFamily: font, letterSpacing: 1, background: "rgba(0,0,0,0.7)", padding: "3px 8px", borderRadius: 4 }}>
+          JAYSON CASPER LIVE CHART
+        </span>
+        <span style={{ fontSize: 8, color: C.muted, fontFamily: font, background: "rgba(0,0,0,0.7)", padding: "2px 6px", borderRadius: 3 }}>
+          Auto-refresh 30s
+        </span>
+      </div>
+      {!imgError ? (
+        <img
+          src={"/tv-live.png?" + imgTs}
+          alt="Jayson Casper TradingView Chart"
+          onError={() => setImgError(true)}
+          style={{ width: "100%", height: isMobile ? 350 : 500, objectFit: "cover", display: "block" }}
+        />
+      ) : (
+        <div style={{ width: "100%", height: isMobile ? 350 : 500, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>
+          <span style={{ fontSize: 32 }}>\u{1F4CA}</span>
+          <span style={{ color: C.muted, fontFamily: font, fontSize: 11 }}>TradingView not connected</span>
+          <span style={{ color: C.muted, fontFamily: font, fontSize: 9 }}>Open TradingView Desktop + SSH tunnel</span>
+        </div>
+      )}
     </Card>
   );
 }
