@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from "react";
+import SignalDrillDown from "../components/SignalDrillDown";
+import TradeAnalyzer from "../components/TradeAnalyzer";
+import StrategyPanel from "../components/StrategyPanel";
 
 /* ═══════════════════════════════════════════════════════════════
    Design tokens — matches BTC15M.jsx exactly
@@ -245,6 +248,25 @@ function MessageCard({ msg }) {
           {typeof msg.raw === "string" ? msg.raw : JSON.stringify(msg.raw, null, 2)}
         </pre>
       )}
+
+      {/* Strategy Panel Button */}
+      <div style={{ padding: "0 24px 16px", display: "flex", justifyContent: "center" }}>
+        <button onClick={() => setShowStrategy(s => !s)} style={{
+          background: showStrategy ? C.accent + "33" : "rgba(255,255,255,0.05)",
+          border: "1px solid " + (showStrategy ? C.accent : C.border),
+          color: showStrategy ? C.accent : C.muted,
+          borderRadius: 8, padding: "10px 24px", fontFamily: font,
+          fontSize: 12, cursor: "pointer", letterSpacing: 1,
+        }}>
+          {showStrategy ? "▼ HIDE STRATEGY" : "▶ SHOW V4 STRATEGY INTELLIGENCE"}
+        </button>
+      </div>
+      {showStrategy && <div style={{ padding: "0 24px 24px" }}><StrategyPanel compact={false} /></div>}
+
+      {/* Drill-down panels */}
+      <SignalDrillDown signal={selectedSignal} isOpen={!!selectedSignal} onClose={() => setSelectedSignal(null)} />
+      <TradeAnalyzer trade={selectedTrade} isOpen={!!selectedTrade} onClose={() => setSelectedTrade(null)} />
+
     </div>
   );
 }
@@ -275,7 +297,7 @@ function SignalFeed({ signals, messages }) {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.map((m, i) => <MessageCard key={m.id || m.message_id || i} msg={m} />)}
+          {items.map((m, i) => <div key={m.id || m.message_id || i} onClick={() => setSelectedSignal(m)} style={{cursor:"pointer"}}><MessageCard msg={m} /></div>)}
         </div>
       )}
     </Card>
@@ -361,7 +383,7 @@ function TradeHistory({ trades }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((t, i) => {
+              {rows.map((t, i) => { const handleTradeClick = () => setSelectedTrade(t);
                 const pnl = Number(t.pnl ?? t.realized_pnl ?? 0);
                 const isLong = (t.side || "").toUpperCase() === "LONG";
                 const dur = t.duration_sec != null ? `${Math.floor(t.duration_sec / 60)}m` : "—";
@@ -395,6 +417,9 @@ function TradeHistory({ trades }) {
    Root page
    ═══════════════════════════════════════════════════════════════ */
 export default function JC() {
+  const [selectedSignal, setSelectedSignal] = useState(null);
+  const [selectedTrade, setSelectedTrade] = useState(null);
+  const [showStrategy, setShowStrategy] = useState(false);
   const [btcPrice, setBtcPrice] = useState(null);
   const [watcherStatus, setWatcherStatus] = useState(null);
   const [signals, setSignals] = useState([]);
