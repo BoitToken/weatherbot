@@ -84,7 +84,7 @@ Ready for:
 
 System is production-ready for smoke testing phase.
 
-Full report: /data/.openclaw/workspace/projects/weatherbot/SMOKE-TEST-REPORT.md
+Full report: /data/.openclaw/workspace/projects/brobot/SMOKE-TEST-REPORT.md
 
 ================================================================================
                               END OF SUMMARY

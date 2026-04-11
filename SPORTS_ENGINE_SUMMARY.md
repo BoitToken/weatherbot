@@ -154,7 +154,7 @@ Group-normalized fair value is 5.00%, current price is 50.00%. Edge: -90.0%.
 
 ### PM2 Status
 ```bash
-$ pm2 restart weatherbot && sleep 5 && pm2 logs weatherbot --lines 30 --nostream
+$ pm2 restart brobot && sleep 5 && pm2 logs brobot --lines 30 --nostream
 
 ✅ Scheduler started (data: 30min, signals: 5min, sports: 3min)
 ✅ WeatherBot ready
@@ -162,8 +162,8 @@ $ pm2 restart weatherbot && sleep 5 && pm2 logs weatherbot --lines 30 --nostream
 
 ### Next Steps (When ODDS_API_KEY is Set)
 
-1. Set `ODDS_API_KEY` in `/data/.openclaw/workspace/projects/weatherbot/.env`
-2. Restart weatherbot: `pm2 restart weatherbot`
+1. Set `ODDS_API_KEY` in `/data/.openclaw/workspace/projects/brobot/.env`
+2. Restart brobot: `pm2 restart brobot`
 3. Wait 3 minutes for first sports scan
 4. Verify sportsbook_odds table populates
 5. Check for cross-odds signals with sportsbook comparison

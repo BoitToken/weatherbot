@@ -63,7 +63,7 @@ TELEGRAM_ADMIN_CHAT_ID=""     # Your Telegram chat ID for admin commands
 2. `/newbot`
 3. Follow prompts to get your token
 4. Add token to `.env`
-5. Restart weatherbot: `pm2 restart weatherbot`
+5. Restart brobot: `pm2 restart brobot`
 
 **To get your chat ID:**
 1. Message @userinfobot on Telegram
@@ -72,7 +72,7 @@ TELEGRAM_ADMIN_CHAT_ID=""     # Your Telegram chat ID for admin commands
 
 ## Current Status
 
-✅ **Bot is running** — Check logs: `pm2 logs weatherbot --lines 30 --nostream`
+✅ **Bot is running** — Check logs: `pm2 logs brobot --lines 30 --nostream`
 ✅ **Database table created** — `telegram_subscribers` exists
 ✅ **API endpoints working** — Try `curl http://localhost:6010/api/telegram/subscribers`
 ✅ **Scheduled jobs registered** — Signal broadcasts every 3 minutes, daily summary at 9 AM IST
@@ -135,22 +135,22 @@ curl -X POST http://localhost:6010/api/telegram/broadcast \
 ## Next Steps
 
 1. **Add token to .env** — Get from @BotFather
-2. **Restart bot** — `pm2 restart weatherbot`
+2. **Restart bot** — `pm2 restart brobot`
 3. **Test subscribe** — `/start` on Telegram
-4. **Monitor logs** — `pm2 logs weatherbot --nostream`
+4. **Monitor logs** — `pm2 logs brobot --nostream`
 5. **Generate test signal** — Wait for next sports scan (every 3 minutes) or manually insert high-edge signal into `sports_signals` table
 
 ## Troubleshooting
 
 ### Bot not responding
 ```bash
-pm2 logs weatherbot --lines 50 --nostream | grep -i telegram
+pm2 logs brobot --lines 50 --nostream | grep -i telegram
 ```
 Look for "Telegram subscriber bot initialized" or error messages.
 
 ### Database error
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 .venv/bin/python -c "
 import asyncio
 from src.db_async import get_async_pool
@@ -166,7 +166,7 @@ asyncio.run(check())
 ### Conflict error
 "terminated by other getUpdates request" — Multiple bot instances running. This is harmless and resolves itself in 1-2 minutes. If persistent:
 ```bash
-pm2 restart weatherbot
+pm2 restart brobot
 ```
 
 ## Performance

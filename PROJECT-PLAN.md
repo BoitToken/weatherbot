@@ -1,6 +1,6 @@
 # WeatherBot — Project Plan (Master Document)
 **Status:** In Development  
-**Domain:** weatherbot.1nnercircle.club  
+**Domain:** brobot.1nnercircle.club  
 **Updated:** 2026-04-06 16:19 IST  
 
 ## Quick Links
@@ -11,8 +11,8 @@
 ## Infrastructure
 - **VPS:** 187.77.189.126 (existing Hostinger)
 - **Database:** PostgreSQL localhost:5432, database: polyedge
-- **Process:** PM2 `weatherbot` service
-- **Dashboard:** weatherbot.1nnercircle.club (React + Vite)
+- **Process:** PM2 `brobot` service
+- **Dashboard:** brobot.1nnercircle.club (React + Vite)
 - **Alerts:** Telegram bot
 - **Mode:** Paper trading first → live after 2-week validation
 

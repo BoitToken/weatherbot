@@ -2,7 +2,7 @@
 
 **Date:** 2025-04-07  
 **Build:** ✅ Success (0 errors)  
-**Deployment:** https://weatherbot.1nnercircle.club
+**Deployment:** https://brobot.1nnercircle.club
 
 ---
 
@@ -19,7 +19,7 @@
 
 **Example:**
 ```bash
-curl "https://weatherbot.1nnercircle.club/api/leaderboard?category=SPORTS&timePeriod=WEEK&limit=5"
+curl "https://brobot.1nnercircle.club/api/leaderboard?category=SPORTS&timePeriod=WEEK&limit=5"
 ```
 
 **Response:**
@@ -141,14 +141,14 @@ curl "https://weatherbot.1nnercircle.club/api/leaderboard?category=SPORTS&timePe
 
 ```bash
 # API Test
-curl https://weatherbot.1nnercircle.club/api/leaderboard
+curl https://brobot.1nnercircle.club/api/leaderboard
 # ✅ 200 OK, 10 traders returned
 
 # Page Access
-curl https://weatherbot.1nnercircle.club/
+curl https://brobot.1nnercircle.club/
 # ✅ 200 OK
 
-curl https://weatherbot.1nnercircle.club/polymarket
+curl https://brobot.1nnercircle.club/polymarket
 # ✅ 200 OK
 
 # Build
@@ -160,8 +160,8 @@ npm run build
 
 ## 🚀 Deployment
 
-- **PM2:** `weatherbot` (restarted)
-- **HTTPS:** Cloudflare → weatherbot.1nnercircle.club
+- **PM2:** `brobot` (restarted)
+- **HTTPS:** Cloudflare → brobot.1nnercircle.club
 - **Git:** Committed + pushed to `main`
 
 **Commit:**

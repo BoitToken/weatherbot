@@ -1,4 +1,4 @@
-weatherbot/
+brobot/
 │
 ├── 📄 Configuration & Documentation
 │   ├── .env                        # Environment configuration (DB, API keys, intervals)

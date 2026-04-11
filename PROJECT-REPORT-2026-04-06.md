@@ -113,7 +113,7 @@ The dashboard LOOKS complete (7 pages, charts, tables). But it's displaying empt
 | `SELECT COUNT(*) FROM sportsbook_odds` | > 0 |
 | `SELECT COUNT(*) FROM sports_signals` | > 0 |
 | `SELECT COUNT(*) FROM noaa_forecasts` | > 0 |
-| Signal loop produces output in PM2 logs | Visible in `pm2 logs weatherbot` |
+| Signal loop produces output in PM2 logs | Visible in `pm2 logs brobot` |
 | At least 1 paper trade executed with P&L | Verifiable in trades table |
 | Dashboard shows REAL non-zero data | Not empty cards |
 

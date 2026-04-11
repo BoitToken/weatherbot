@@ -1,8 +1,8 @@
 module.exports = {
   apps: [{
-    name: 'weatherbot',
+    name: 'brobot',
     script: './start.sh',
-    cwd: '/data/.openclaw/workspace/projects/weatherbot',
+    cwd: '/data/.openclaw/workspace/projects/brobot',
     instances: 1,
     autorestart: true,
     watch: false,

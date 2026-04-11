@@ -68,7 +68,7 @@ async def main():
         print("1. Message @BotFather on Telegram")
         print("2. Create a new bot and get your token")
         print("3. Add TELEGRAM_BOT_TOKEN to .env")
-        print("4. pm2 restart weatherbot")
+        print("4. pm2 restart brobot")
     print("="*50)
 
 

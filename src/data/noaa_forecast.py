@@ -120,7 +120,7 @@ async def fetch_noaa_forecast(city: str) -> Optional[Dict]:
             
             # Set User-Agent (required by api.weather.gov)
             headers = {
-                "User-Agent": "WeatherBot/1.0 (weatherbot@polyedge.ai)",
+                "User-Agent": "WeatherBot/1.0 (brobot@polyedge.ai)",
                 "Accept": "application/json"
             }
             

@@ -25,14 +25,14 @@ info() {
 
 # 1. Check PM2 process
 echo "1. Checking PM2 process..."
-if pm2 list | grep -q weatherbot; then
-    if pm2 list | grep weatherbot | grep -q online; then
-        success "PM2 process 'weatherbot' is online"
+if pm2 list | grep -q brobot; then
+    if pm2 list | grep brobot | grep -q online; then
+        success "PM2 process 'brobot' is online"
     else
-        fail "PM2 process 'weatherbot' is not online"
+        fail "PM2 process 'brobot' is not online"
     fi
 else
-    fail "PM2 process 'weatherbot' not found"
+    fail "PM2 process 'brobot' not found"
 fi
 echo ""
 
@@ -57,7 +57,7 @@ echo ""
 
 # 4. Check DNS
 echo "4. Checking DNS resolution..."
-DNS_IP=$(curl -s "https://dns.google/resolve?name=weatherbot.1nnercircle.club&type=A" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['Answer'][0]['data'] if 'Answer' in data else 'NXDOMAIN')")
+DNS_IP=$(curl -s "https://dns.google/resolve?name=brobot.1nnercircle.club&type=A" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['Answer'][0]['data'] if 'Answer' in data else 'NXDOMAIN')")
 if [ "$DNS_IP" == "187.77.189.126" ]; then
     success "DNS resolves to $DNS_IP"
 else
@@ -67,7 +67,7 @@ echo ""
 
 # 5. Check HTTPS
 echo "5. Checking HTTPS..."
-if curl -sI https://weatherbot.1nnercircle.club/ | head -1 | grep -q "200"; then
+if curl -sI https://brobot.1nnercircle.club/ | head -1 | grep -q "200"; then
     success "HTTPS returns 200 OK"
 else
     fail "HTTPS not working"
@@ -76,8 +76,8 @@ echo ""
 
 # 6. Check HTTPS API
 echo "6. Checking HTTPS API endpoint..."
-if curl -sf https://weatherbot.1nnercircle.club/api/health > /dev/null; then
-    API_HEALTH=$(curl -s https://weatherbot.1nnercircle.club/api/health | python3 -c "import sys, json; print(json.load(sys.stdin)['status'])")
+if curl -sf https://brobot.1nnercircle.club/api/health > /dev/null; then
+    API_HEALTH=$(curl -s https://brobot.1nnercircle.club/api/health | python3 -c "import sys, json; print(json.load(sys.stdin)['status'])")
     success "HTTPS API health: $API_HEALTH"
 else
     fail "HTTPS API not responding"
@@ -106,8 +106,8 @@ echo ""
 
 # 9. Check SSL certificate
 echo "9. Checking SSL certificate..."
-if ssh root@172.18.0.1 "certbot certificates 2>/dev/null | grep -q weatherbot"; then
-    EXPIRY=$(ssh root@172.18.0.1 "certbot certificates 2>/dev/null" | grep -A 10 weatherbot | grep "Expiry Date" | head -1 | cut -d':' -f2- | xargs)
+if ssh root@172.18.0.1 "certbot certificates 2>/dev/null | grep -q brobot"; then
+    EXPIRY=$(ssh root@172.18.0.1 "certbot certificates 2>/dev/null" | grep -A 10 brobot | grep "Expiry Date" | head -1 | cut -d':' -f2- | xargs)
     success "SSL certificate installed (expires $EXPIRY)"
 else
     fail "SSL certificate not found"
@@ -120,16 +120,16 @@ echo "📊 Deployment Summary"
 echo "======================================"
 echo ""
 echo "Live URLs:"
-echo "  Dashboard: https://weatherbot.1nnercircle.club/"
-echo "  API Health: https://weatherbot.1nnercircle.club/api/health"
-echo "  API Docs: https://weatherbot.1nnercircle.club/docs"
+echo "  Dashboard: https://brobot.1nnercircle.club/"
+echo "  API Health: https://brobot.1nnercircle.club/api/health"
+echo "  API Docs: https://brobot.1nnercircle.club/docs"
 echo ""
 echo "Local endpoints:"
 echo "  API: http://localhost:6010/api/health"
 echo "  Dashboard dev: http://localhost:6011 (when running npm run dev)"
 echo ""
 echo "Management:"
-echo "  PM2 logs: pm2 logs weatherbot"
-echo "  PM2 restart: pm2 restart weatherbot"
-echo "  PM2 status: pm2 info weatherbot"
+echo "  PM2 logs: pm2 logs brobot"
+echo "  PM2 restart: pm2 restart brobot"
+echo "  PM2 status: pm2 info brobot"
 echo ""

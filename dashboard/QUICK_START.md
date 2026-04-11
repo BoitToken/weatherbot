@@ -243,7 +243,7 @@ Each trade shows:
 
 **Check logs:**
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot/dashboard
+cd /data/.openclaw/workspace/projects/brobot/dashboard
 npm run dev
 ```
 

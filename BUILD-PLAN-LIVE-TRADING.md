@@ -168,7 +168,7 @@ Now: wire the automated signal loop → live execution so the bot trades autonom
 ## Shared Rules (ALL AGENTS)
 
 1. **Read `.env` for ALL secrets** — never hardcode keys
-2. **Use `load_dotenv('/data/.openclaw/workspace/projects/weatherbot/.env', override=True)`**
+2. **Use `load_dotenv('/data/.openclaw/workspace/projects/brobot/.env', override=True)`**
 3. **Proxy wallet for Polymarket:** `PROXY_WALLET=0x8A110d95c48662147f8772C48d73A87ec23909d8`, `SIGNATURE_TYPE=2`
 4. **Telegram bot:** token `8610642342:AAE...`, chat_id `1656605843`
 5. **All trades must be logged to DB** — no silent execution

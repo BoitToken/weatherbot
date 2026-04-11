@@ -2,8 +2,8 @@
 
 **Date:** 2026-04-06 16:40 IST  
 **Tester:** smoke-test agent  
-**Project:** /data/.openclaw/workspace/projects/weatherbot/  
-**Live URL:** https://weatherbot.1nnercircle.club
+**Project:** /data/.openclaw/workspace/projects/brobot/  
+**Live URL:** https://brobot.1nnercircle.club
 
 ---
 
@@ -151,13 +151,13 @@ This is a valid design choice and not a bug.
 Internet (HTTPS 443)
   ↓
 Host nginx (187.77.189.126)
-  ssl_certificate: /etc/letsencrypt/live/weatherbot.1nnercircle.club/fullchain.pem
+  ssl_certificate: /etc/letsencrypt/live/brobot.1nnercircle.club/fullchain.pem
   ↓
 Container nginx (172.18.0.2:80)
-  ├─ / → /data/.openclaw/workspace/projects/weatherbot/dashboard/dist (static)
+  ├─ / → /data/.openclaw/workspace/projects/brobot/dashboard/dist (static)
   └─ /api → http://localhost:6010 (FastAPI)
        ↓
-       PM2: weatherbot (Python/uvicorn)
+       PM2: brobot (Python/uvicorn)
          ↓
          PostgreSQL localhost:5432 (polyedge DB)
 ```

@@ -125,8 +125,8 @@ async def main():
     logger.info("="*70)
     logger.info("\nNext steps:")
     logger.info("1. Check dashboard at http://localhost:6010")
-    logger.info("2. Restart weatherbot: pm2 restart weatherbot")
-    logger.info("3. Watch logs: pm2 logs weatherbot")
+    logger.info("2. Restart brobot: pm2 restart brobot")
+    logger.info("3. Watch logs: pm2 logs brobot")
     logger.info("")
 
 

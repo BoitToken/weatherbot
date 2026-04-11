@@ -1267,7 +1267,7 @@ async def scheduled_btc_hourly_summary():
         except Exception as _bre:
             logger.error(f"Bankroll section failed: {_bre}")
 
-        lines.append(f"Dashboard: weatherbot.1nnercircle.club/btc15m")
+        lines.append(f"Dashboard: brobot.1nnercircle.club/btc15m")
 
         msg = "\n".join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
@@ -1591,7 +1591,7 @@ async def scheduled_btc_intelligence_loop():
         if adjustment_note:
             lines.append(f'\U0001f527 {adjustment_note}')
 
-        lines.append(f'\nDashboard: weatherbot.1nnercircle.club/btc15m')
+        lines.append(f'\nDashboard: brobot.1nnercircle.club/btc15m')
 
         msg = '\n'.join(lines)
         subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
@@ -1806,7 +1806,7 @@ async def scheduled_btc_daily_strategy_report():
         if strat:
             lines.append(f"Active: {strat[0]} | Entry <{float(strat[1])*100:.0f}c | {strat[2]}/7 factors | Min R:R {float(strat[3]):.1f}x")
         lines.append("Hourly slots tracked for weekly review")
-        lines.append("\nDashboard: weatherbot.1nnercircle.club/btc15m")
+        lines.append("\nDashboard: brobot.1nnercircle.club/btc15m")
         conn.close()
 
         msg = "\n".join(lines)

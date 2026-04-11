@@ -55,7 +55,7 @@ The WeatherBot data layer is a production-ready system that:
 ## Project Structure
 
 ```
-weatherbot/
+brobot/
 ├── src/
 │   ├── __init__.py
 │   ├── config.py              # Configuration loader (.env → settings)
@@ -283,7 +283,7 @@ Target stations: 50
 
 ### 1. Install Dependencies
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 python3.11 -m venv .venv
 source .venv/bin/activate  # or: .venv/bin/activate (sh)
 pip install -r requirements.txt

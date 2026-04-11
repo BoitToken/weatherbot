@@ -226,7 +226,7 @@ curl localhost:6010/api/noaa/forecast/NYC
 
 ### 1. Check Database Tables
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 .venv/bin/python3 << 'EOF'
 import asyncio
 from src.db import fetch_all
@@ -241,13 +241,13 @@ EOF
 
 ### 2. Test NOAA Forecast
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 .venv/bin/python3 src/data/noaa_forecast.py
 ```
 
 ### 3. Test Strategy A (Dry Run)
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 .venv/bin/python3 src/signals/strategy_a.py
 ```
 
@@ -264,12 +264,12 @@ curl localhost:6010/api/strategy/b/signals
 ### 5. Check PM2 Status
 ```bash
 pm2 list
-pm2 logs weatherbot --lines 50
+pm2 logs brobot --lines 50
 ```
 
 ### 6. Verify Signal Loop Running
 ```bash
-pm2 logs weatherbot | grep "Strategy"
+pm2 logs brobot | grep "Strategy"
 # Should show:
 # "✅ Strategy A (Forecast Edge) initialized"
 # "Running Strategy A (Forecast Edge)..."

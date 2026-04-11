@@ -366,13 +366,13 @@ From `STRATEGY.md`:
 
 ### To activate changes:
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 
 # Restart backend
-pm2 restart weatherbot
+pm2 restart brobot
 
 # Check logs
-pm2 logs weatherbot --lines 50
+pm2 logs brobot --lines 50
 ```
 
 ### Verify intelligence layer:
@@ -385,7 +385,7 @@ curl http://localhost:6010/api/intelligence/weekly
 ### Monitor signal loop:
 ```bash
 # Watch logs for gate results
-pm2 logs weatherbot | grep "🧠 Intelligence check"
+pm2 logs brobot | grep "🧠 Intelligence check"
 ```
 
 ---

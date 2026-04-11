@@ -25,17 +25,17 @@
 
 ### 5. PM2 Process Manager
 - **Config:** `ecosystem.config.cjs`
-- **Process name:** `weatherbot`
+- **Process name:** `brobot`
 - **Logs:** `logs/out.log`, `logs/error.log`
 - **Auto-restart:** Yes
 
 ### 6. Nginx Configuration
-- **Container:** `/home/linuxbrew/.linuxbrew/etc/nginx/servers/weatherbot.conf`
-- **Host:** `/etc/nginx/conf.d/weatherbot.conf`
+- **Container:** `/home/linuxbrew/.linuxbrew/etc/nginx/servers/brobot.conf`
+- **Host:** `/etc/nginx/conf.d/brobot.conf`
 - **Features:** Static serving + API proxy
 
 ### 7. DNS & SSL
-- **Domain:** weatherbot.1nnercircle.club
+- **Domain:** brobot.1nnercircle.club
 - **DNS:** 187.77.189.126 (Cloudflare proxied)
 - **SSL:** Let's Encrypt (expires 2026-07-05)
 - **Redirect:** HTTP → HTTPS
@@ -65,9 +65,9 @@ KELLY_FRACTION=0.25
 
 ### Start Backend
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 pm2 start ecosystem.config.cjs
-pm2 logs weatherbot
+pm2 logs brobot
 ```
 
 ### Start Dashboard (Dev)
@@ -95,15 +95,15 @@ curl http://localhost:6010/api/bankroll
 
 ### Frontend
 ```bash
-curl https://weatherbot.1nnercircle.club/
-curl https://weatherbot.1nnercircle.club/api/health
+curl https://brobot.1nnercircle.club/
+curl https://brobot.1nnercircle.club/api/health
 ```
 
 ### PM2 Status
 ```bash
 pm2 list
-pm2 info weatherbot
-pm2 logs weatherbot --lines 50
+pm2 info brobot
+pm2 logs brobot --lines 50
 ```
 
 ## 📡 API Endpoints
@@ -168,12 +168,12 @@ pm2 logs weatherbot --lines 50
 ```bash
 git pull
 cd dashboard && npm run build
-pm2 restart weatherbot
+pm2 restart brobot
 ```
 
 ### View Logs
 ```bash
-pm2 logs weatherbot
+pm2 logs brobot
 tail -f logs/out.log
 tail -f logs/error.log
 ```
@@ -193,8 +193,8 @@ ssh root@172.18.0.1 "certbot renew"
 
 ### API not responding
 ```bash
-pm2 restart weatherbot
-pm2 logs weatherbot --lines 100
+pm2 restart brobot
+pm2 logs brobot --lines 100
 ```
 
 ### Dashboard not loading
@@ -213,13 +213,13 @@ cd dashboard && npm run build
 psql -U node -d polyedge -c "SELECT 1"
 
 # Check environment
-pm2 env weatherbot
+pm2 env brobot
 ```
 
 ### HTTPS not working
 ```bash
 # Check SSL cert
-ssh root@172.18.0.1 "certbot certificates | grep weatherbot"
+ssh root@172.18.0.1 "certbot certificates | grep brobot"
 
 # Test nginx
 ssh root@172.18.0.1 "nginx -t"
@@ -276,18 +276,18 @@ Container nginx (172.18.0.2:80)
 - [x] PM2 ecosystem config
 - [x] Container nginx config (installed)
 - [x] Host nginx config with SSL (installed)
-- [x] DNS record (weatherbot.1nnercircle.club → VPS)
+- [x] DNS record (brobot.1nnercircle.club → VPS)
 - [x] SSL certificate (Let's Encrypt)
 - [x] Database schema initialized
 - [x] Health check: `curl http://localhost:6010/api/health` ✅
-- [x] HTTPS check: `curl https://weatherbot.1nnercircle.club/` ✅
-- [x] API check: `curl https://weatherbot.1nnercircle.club/api/health` ✅
+- [x] HTTPS check: `curl https://brobot.1nnercircle.club/` ✅
+- [x] API check: `curl https://brobot.1nnercircle.club/api/health` ✅
 
 ## 🌐 Live URLs
 
-- **Dashboard:** https://weatherbot.1nnercircle.club/
-- **API Health:** https://weatherbot.1nnercircle.club/api/health
-- **API Docs:** https://weatherbot.1nnercircle.club/docs (FastAPI auto-docs)
+- **Dashboard:** https://brobot.1nnercircle.club/
+- **API Health:** https://brobot.1nnercircle.club/api/health
+- **API Docs:** https://brobot.1nnercircle.club/docs (FastAPI auto-docs)
 
 ---
 

@@ -10,7 +10,7 @@ echo ""
 
 # Check PM2 status
 echo "1️⃣ Checking PM2 process..."
-if pm2 list | grep -q "weatherbot.*online"; then
+if pm2 list | grep -q "brobot.*online"; then
     echo "   ✅ WeatherBot is running"
 else
     echo "   ❌ WeatherBot is NOT running"
@@ -20,7 +20,7 @@ echo ""
 
 # Check database tables
 echo "2️⃣ Checking database tables..."
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 TABLES=$(.venv/bin/python3 << 'EOF'
 import asyncio
 from src.db import fetch_all
@@ -75,13 +75,13 @@ echo ""
 
 # Check signal loop logs
 echo "6️⃣ Checking signal loop initialization..."
-if pm2 logs weatherbot --lines 100 --nostream 2>/dev/null | grep -q "Strategy A.*initialized"; then
+if pm2 logs brobot --lines 100 --nostream 2>/dev/null | grep -q "Strategy A.*initialized"; then
     echo "   ✅ Strategy A (Forecast Edge) initialized"
 else
     echo "   ⚠️  Strategy A not found in logs (may be too old)"
 fi
 
-if pm2 logs weatherbot --lines 100 --nostream 2>/dev/null | grep -q "Intelligence layer.*initialized"; then
+if pm2 logs brobot --lines 100 --nostream 2>/dev/null | grep -q "Intelligence layer.*initialized"; then
     echo "   ✅ Strategy B (Intelligence Layer) initialized"
 else
     echo "   ⚠️  Strategy B not found in logs (may be too old)"

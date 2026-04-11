@@ -69,7 +69,7 @@ Full trade history with analytics:
 ## TECHNICAL IMPLEMENTATION
 
 ### Frontend (React + Vite)
-**File:** `/data/.openclaw/workspace/projects/weatherbot/dashboard/src/pages/Trades.jsx`
+**File:** `/data/.openclaw/workspace/projects/brobot/dashboard/src/pages/Trades.jsx`
 
 - **Tab Bar:** Purple (#7c3aed) active indicator
 - **Dark Theme:**
@@ -88,7 +88,7 @@ Full trade history with analytics:
   - Handles `/api/strategy/comparison` dict → array conversion
 
 ### Backend (FastAPI)
-**File:** `/data/.openclaw/workspace/projects/weatherbot/src/main.py`
+**File:** `/data/.openclaw/workspace/projects/brobot/src/main.py`
 
 **Added:**
 - Static file serving for React dashboard (`/dashboard/dist`)
@@ -113,7 +113,7 @@ async def serve_spa(full_path: str):
 ## BUILD VERIFICATION
 
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot/dashboard
+cd /data/.openclaw/workspace/projects/brobot/dashboard
 npm run build
 ```
 
@@ -184,10 +184,10 @@ dist/assets/index-DyXsBvjk.js   772.94 kB │ gzip: 223.14 kB
 
 ## FILES MODIFIED
 
-1. `/data/.openclaw/workspace/projects/weatherbot/dashboard/src/pages/Trades.jsx`  
+1. `/data/.openclaw/workspace/projects/brobot/dashboard/src/pages/Trades.jsx`  
    → Complete redesign with Scanner + Trades tabs
 
-2. `/data/.openclaw/workspace/projects/weatherbot/src/main.py`  
+2. `/data/.openclaw/workspace/projects/brobot/src/main.py`  
    → Added static file serving for React dashboard
 
 ---

@@ -2,7 +2,7 @@
 WeatherBot Agent 1: Data Layer — COMPLETION SUMMARY
 ================================================================================
 
-PROJECT: /data/.openclaw/workspace/projects/weatherbot/
+PROJECT: /data/.openclaw/workspace/projects/brobot/
 DATE: 2026-04-06
 AGENT: WeatherBot Data Layer Builder (Subagent)
 
@@ -63,7 +63,7 @@ QUICK START
 ================================================================================
 
 # 1. Activate virtual environment
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 source .venv/bin/activate  # or: .venv/bin/activate
 
 # 2. Run comprehensive tests

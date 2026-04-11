@@ -169,7 +169,7 @@ Scan 50+ cities every 30 minutes. Claude flags mismatches. Human (or auto) place
 **Deliverable:** Bot places trades automatically. Dashboard shows live P&L.
 
 ### Phase 4 — Dashboard (Week 3-4)
-- [ ] React dashboard at weatherbot.produsa.dev (or subdomain)
+- [ ] React dashboard at brobot.produsa.dev (or subdomain)
 - [ ] Live P&L chart
 - [ ] Active positions table
 - [ ] METAR readings per city with trend arrows

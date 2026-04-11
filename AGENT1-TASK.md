@@ -3,7 +3,7 @@
 You are fixing a trading bot that was reported as complete but has ZERO trades, ZERO signals, and empty data tables. The dashboard looks nice but the engine behind it is hollow. Your job is to make it actually work end-to-end.
 
 ## Current State
-- PM2 process 'weatherbot' running (FastAPI + APScheduler)
+- PM2 process 'brobot' running (FastAPI + APScheduler)
 - DB: polyedge (PostgreSQL, localhost:5432, user: node)
 - METAR data: 1,178 readings (this works)
 - noaa_forecasts table: 0 rows (NOAA not integrated)
@@ -80,7 +80,7 @@ You are fixing a trading bot that was reported as complete but has ZERO trades, 
 
 ## VERIFICATION (run AFTER you're done)
 ```bash
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 source .venv/bin/activate
 python3 -c "
 import psycopg2
@@ -103,9 +103,9 @@ conn.close()
 
 ## After changes, restart:
 ```bash
-pm2 restart weatherbot
+pm2 restart brobot
 sleep 5
-pm2 logs weatherbot --lines 30 --nostream
+pm2 logs brobot --lines 30 --nostream
 ```
 
 When finished: `openclaw system event --text "Done: Agent 1 Weather Engine — NOAA integrated, pipeline verified" --mode now`

@@ -232,10 +232,10 @@ pm2 start ecosystem.config.cjs
 pm2 monit
 
 # Logs
-pm2 logs weatherbot
+pm2 logs brobot
 
 # Restart
-pm2 restart weatherbot
+pm2 restart brobot
 
 # Save for auto-recovery
 pm2 save

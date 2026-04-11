@@ -13,7 +13,7 @@
 - ✅ Dashboard scaffolding (React + Vite, 8 pages)
 - ✅ FastAPI backend (16 endpoints, port 6010)
 - ✅ APScheduler: data loop every 30 min, signal loop every 5 min
-- ✅ DNS + SSL + nginx for weatherbot.1nnercircle.club
+- ✅ DNS + SSL + nginx for brobot.1nnercircle.club
 
 ### Phase 2: Intelligence Layer (2026-04-06)
 - ✅ Polymarket scanner rewrite: CLOB API pagination + text filtering (1,691 markets found)
@@ -88,10 +88,10 @@ PORT=6010
 pm2 start ecosystem.config.cjs
 
 # Logs
-pm2 logs weatherbot
+pm2 logs brobot
 
 # Restart
-pm2 restart weatherbot
+pm2 restart brobot
 
 # Dashboard rebuild
 cd dashboard && npm run build

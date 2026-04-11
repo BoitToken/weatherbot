@@ -87,9 +87,9 @@
    - API status indicators
 
 ### 5. PM2 Configuration (`ecosystem.config.cjs`) ✅
-- **Process name:** weatherbot
+- **Process name:** brobot
 - **Command:** `.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 6010`
-- **Working dir:** `/data/.openclaw/workspace/projects/weatherbot`
+- **Working dir:** `/data/.openclaw/workspace/projects/brobot`
 - **Auto-restart:** Yes
 - **Memory limit:** 500MB
 - **Logs:** `logs/out.log`, `logs/error.log`
@@ -97,33 +97,33 @@
 
 ### 6. Nginx Configuration ✅
 
-#### Container nginx (`/home/linuxbrew/.linuxbrew/etc/nginx/servers/weatherbot.conf`)
+#### Container nginx (`/home/linuxbrew/.linuxbrew/etc/nginx/servers/brobot.conf`)
 - **Static serving:** `/` → `dashboard/dist/` with `try_files` fallback
 - **API proxy:** `/api` → `http://localhost:6010` with WebSocket upgrade support
 - **Headers:** X-Real-IP, X-Forwarded-For, X-Forwarded-Proto
 
-#### Host nginx (`/etc/nginx/conf.d/weatherbot.conf`)
+#### Host nginx (`/etc/nginx/conf.d/brobot.conf`)
 - **HTTP → HTTPS redirect:** Port 80 → 301 redirect
 - **HTTPS:** Port 443 with SSL/TLS
 - **Proxy:** `http://172.18.0.2:80` (container nginx)
-- **SSL certs:** `/etc/letsencrypt/live/weatherbot.1nnercircle.club/`
+- **SSL certs:** `/etc/letsencrypt/live/brobot.1nnercircle.club/`
 
 ### 7. DNS Record ✅
-- **Domain:** weatherbot.1nnercircle.club
+- **Domain:** brobot.1nnercircle.club
 - **Type:** A record
 - **Target:** 187.77.189.126
 - **Cloudflare:** Proxied (orange cloud)
-- **Verification:** `curl -s "https://dns.google/resolve?name=weatherbot.1nnercircle.club"` → 187.77.189.126
+- **Verification:** `curl -s "https://dns.google/resolve?name=brobot.1nnercircle.club"` → 187.77.189.126
 
 ### 8. SSL Certificate ✅
 - **Provider:** Let's Encrypt
-- **Domain:** weatherbot.1nnercircle.club
+- **Domain:** brobot.1nnercircle.club
 - **Issued:** 2026-04-06
 - **Expires:** 2026-07-05 (89 days remaining)
 - **Auto-renewal:** Configured via certbot
 - **Files:**
-  - `/etc/letsencrypt/live/weatherbot.1nnercircle.club/fullchain.pem`
-  - `/etc/letsencrypt/live/weatherbot.1nnercircle.club/privkey.pem`
+  - `/etc/letsencrypt/live/brobot.1nnercircle.club/fullchain.pem`
+  - `/etc/letsencrypt/live/brobot.1nnercircle.club/privkey.pem`
 
 ### 9. Database Schema (`src/schema.sql`) ✅
 - **Tables created:**
@@ -137,7 +137,7 @@
 
 ### 10. Full Deployment Verification ✅
 All 9 checks passed:
-1. ✅ PM2 process 'weatherbot' is online
+1. ✅ PM2 process 'brobot' is online
 2. ✅ API health check: healthy
 3. ✅ Container nginx config valid
 4. ✅ DNS resolves to 187.77.189.126
@@ -149,27 +149,27 @@ All 9 checks passed:
 
 ## 🌐 Live URLs
 
-- **Dashboard:** https://weatherbot.1nnercircle.club/
-- **API Health:** https://weatherbot.1nnercircle.club/api/health
-- **API Docs:** https://weatherbot.1nnercircle.club/docs (FastAPI auto-generated)
+- **Dashboard:** https://brobot.1nnercircle.club/
+- **API Health:** https://brobot.1nnercircle.club/api/health
+- **API Docs:** https://brobot.1nnercircle.club/docs (FastAPI auto-generated)
 
 ## 📊 Verification Commands
 
 ```bash
 # Check PM2 status
-pm2 list | grep weatherbot
+pm2 list | grep brobot
 
 # Check API health
 curl http://localhost:6010/api/health
 
 # Check HTTPS
-curl https://weatherbot.1nnercircle.club/
+curl https://brobot.1nnercircle.club/
 
 # Check API via HTTPS
-curl https://weatherbot.1nnercircle.club/api/health
+curl https://brobot.1nnercircle.club/api/health
 
 # View logs
-pm2 logs weatherbot --lines 50
+pm2 logs brobot --lines 50
 
 # Run full verification
 ./verify-deployment.sh
@@ -180,14 +180,14 @@ pm2 logs weatherbot --lines 50
 ### Start/Stop
 ```bash
 pm2 start ecosystem.config.cjs
-pm2 stop weatherbot
-pm2 restart weatherbot
-pm2 delete weatherbot
+pm2 stop brobot
+pm2 restart brobot
+pm2 delete brobot
 ```
 
 ### Logs
 ```bash
-pm2 logs weatherbot
+pm2 logs brobot
 tail -f logs/out.log
 tail -f logs/error.log
 ```
@@ -202,7 +202,7 @@ npm run build
 ## 📦 File Structure
 
 ```
-/data/.openclaw/workspace/projects/weatherbot/
+/data/.openclaw/workspace/projects/brobot/
 ├── src/
 │   ├── main.py                    # FastAPI server
 │   ├── config.py                  # Configuration
@@ -291,7 +291,7 @@ npm run build
 - [x] SSL certificate obtained
 - [x] Full deployment verified (9/9 checks)
 - [x] API health check: `curl http://localhost:6010/api/health` → 200 OK
-- [x] HTTPS health check: `curl https://weatherbot.1nnercircle.club/api/health` → 200 OK
+- [x] HTTPS health check: `curl https://brobot.1nnercircle.club/api/health` → 200 OK
 
 ## 💡 Notes
 
@@ -304,6 +304,6 @@ npm run build
 
 ---
 
-**Agent 3 mission complete.** All infrastructure, APIs, dashboard, and deployment verified working at https://weatherbot.1nnercircle.club/
+**Agent 3 mission complete.** All infrastructure, APIs, dashboard, and deployment verified working at https://brobot.1nnercircle.club/
 
 **Handoff:** Ready for Agent 1 (data collection) and Agent 2 (signal generation) to wire their modules into the scheduler.

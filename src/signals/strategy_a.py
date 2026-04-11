@@ -362,7 +362,7 @@ class StrategyA:
 if __name__ == "__main__":
     # Test Strategy A
     import sys
-    sys.path.insert(0, '/data/.openclaw/workspace/projects/weatherbot')
+    sys.path.insert(0, '/data/.openclaw/workspace/projects/brobot')
     from src.db_async import get_async_pool
     from src.data import noaa_forecast, openmeteo
     from src.markets.polymarket_scanner import PolymarketScanner

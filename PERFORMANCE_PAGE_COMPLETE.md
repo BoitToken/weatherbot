@@ -142,7 +142,7 @@ cd dashboard && npm run build
 
 ### Backend Status
 ```bash
-pm2 restart weatherbot
+pm2 restart brobot
 ✓ Restarted successfully
 ✓ All new endpoints responding
 ```
@@ -236,15 +236,15 @@ Signal feed updates every 15 seconds automatically
 ## Files Modified
 
 ### Created:
-- `/data/.openclaw/workspace/projects/weatherbot/dashboard/src/pages/Performance.jsx` (17KB)
-- `/data/.openclaw/workspace/projects/weatherbot/dashboard/src/pages/Performance.css` (9KB)
+- `/data/.openclaw/workspace/projects/brobot/dashboard/src/pages/Performance.jsx` (17KB)
+- `/data/.openclaw/workspace/projects/brobot/dashboard/src/pages/Performance.css` (9KB)
 
 ### Modified:
-- `/data/.openclaw/workspace/projects/weatherbot/src/main.py` (added 6 endpoints in PERFORMANCE section)
-- `/data/.openclaw/workspace/projects/weatherbot/dashboard/src/App.jsx` (added Performance route & nav)
+- `/data/.openclaw/workspace/projects/brobot/src/main.py` (added 6 endpoints in PERFORMANCE section)
+- `/data/.openclaw/workspace/projects/brobot/dashboard/src/App.jsx` (added Performance route & nav)
 
 ### Built:
-- `/data/.openclaw/workspace/projects/weatherbot/dashboard/dist/` (production build)
+- `/data/.openclaw/workspace/projects/brobot/dashboard/dist/` (production build)
 
 ---
 

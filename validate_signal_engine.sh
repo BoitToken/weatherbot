@@ -3,7 +3,7 @@
 
 set -e
 
-cd /data/.openclaw/workspace/projects/weatherbot
+cd /data/.openclaw/workspace/projects/brobot
 
 echo "================================================"
 echo "WeatherBot Signal Engine — Validation"

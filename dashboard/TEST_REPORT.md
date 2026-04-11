@@ -425,9 +425,9 @@ npx serve dist
 # (Copy dist/ to web root or CDN)
 
 # 4. Verify production URLs
-# - https://weatherbot.example.com/
-# - https://weatherbot.example.com/markets
-# - https://weatherbot.example.com/trades
+# - https://brobot.example.com/
+# - https://brobot.example.com/markets
+# - https://brobot.example.com/trades
 ```
 
 ### Post-Deployment

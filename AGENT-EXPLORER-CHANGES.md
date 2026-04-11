@@ -139,7 +139,7 @@ dist/assets/index-CpMLxoKo.js   633.66 kB
 
 **Backend Restart:**
 ```bash
-pm2 restart weatherbot
+pm2 restart brobot
 ✅ Process online (PID 7834)
 ```
 
@@ -157,13 +157,13 @@ curl http://localhost:6010/api/explorer/markets?limit=5
 ✅ Returns 1000 markets (pagination working)
 
 # HTTPS
-curl https://weatherbot.1nnercircle.club/api/explorer/markets?limit=5
+curl https://brobot.1nnercircle.club/api/explorer/markets?limit=5
 ✅ Returns 1000 markets (proxy working)
 ```
 
 **Dashboard Verification:**
 ```bash
-curl -sI https://weatherbot.1nnercircle.club/
+curl -sI https://brobot.1nnercircle.club/
 ✅ HTTP/2 200 OK
 ✅ content-type: text/html
 ```
@@ -202,7 +202,7 @@ curl -sI https://weatherbot.1nnercircle.club/
 
 ## 🚀 DEPLOYMENT STATUS
 
-**Live URL:** https://weatherbot.1nnercircle.club/explorer
+**Live URL:** https://brobot.1nnercircle.club/explorer
 
 **Access:**
 1. Navigate to WeatherBot dashboard
@@ -211,7 +211,7 @@ curl -sI https://weatherbot.1nnercircle.club/
 4. Search for weather markets
 5. Click any card for detailed view
 
-**Backend:** PM2 process `weatherbot` running on port 6010  
+**Backend:** PM2 process `brobot` running on port 6010  
 **Frontend:** Vite production build served via nginx  
 **Proxy:** All `/api/explorer/*` requests bypass ISP blocks  
 
