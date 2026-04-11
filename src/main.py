@@ -388,6 +388,24 @@ _last_internal_arb_scan: Optional[datetime] = None
 
 
 # ═══════════════════════════════════════════════════════════════
+# LATE WINDOW SCALPER — Global instance
+# ═══════════════════════════════════════════════════════════════
+_late_window_scalper = None
+
+async def scheduled_late_window_scan():
+    """Late Window Scalper: buy near-certain BTC contracts in final 15-20s of 5M windows."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        await _late_window_scalper.scan_and_scalp()
+    except Exception as e:
+        logger.error(f"❌ Late window scan failed: {e}\n{traceback.format_exc()}")
+
+
+# ═══════════════════════════════════════════════════════════════
 # PENNY HUNTER — Scheduled Scan Function
 # ═══════════════════════════════════════════════════════════════
 _last_penny_scan: Optional[datetime] = None
@@ -2135,6 +2153,12 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_penny_scan, 'interval', minutes=30, id='penny_hunter', replace_existing=True)
     logger.info("✅ Penny Hunter scheduled (every 30 min)")
+
+    # ═══════════════════════════════════════════════════════════════
+    # LATE WINDOW SCALPER — Buy near-certain contracts in final 15-20s
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_late_window_scan, 'interval', seconds=2, id='late_window_scalper', replace_existing=True)
+    logger.info("✅ Late Window Scalper scheduled (every 2s)")
     
     # ═══════════════════════════════════════════════════════════════
     # BTC SIGNAL ENGINE — Scan every 45 seconds, resolve every 2 min
@@ -4278,6 +4302,83 @@ async def get_penny_scan():
     except Exception as e:
         logger.error(f"Penny scan API error: {e}")
         return {"contracts": [], "total_found": 0, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# LATE WINDOW SCALPER — API Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/late-window/status")
+async def get_late_window_status():
+    """Current state, active windows, next entry."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        return await _late_window_scalper.get_status()
+    except Exception as e:
+        logger.error(f"Late window status error: {e}")
+        return {"enabled": False, "error": str(e)}
+
+
+@app.get("/api/late-window/trades")
+async def get_late_window_trades(limit: int = 50):
+    """Recent trades with P&L."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        trades = await _late_window_scalper.get_trades(limit=min(limit, 200))
+        # Convert datetime objects to strings for JSON serialization
+        result = []
+        for t in trades:
+            d = dict(t)
+            for k, v in d.items():
+                if hasattr(v, 'isoformat'):
+                    d[k] = v.isoformat()
+                elif v is not None and hasattr(v, '__float__'):
+                    d[k] = float(v)
+            result.append(d)
+        return {"trades": result, "count": len(result)}
+    except Exception as e:
+        logger.error(f"Late window trades error: {e}")
+        return {"trades": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/late-window/stats")
+async def get_late_window_stats():
+    """Win rate, total PnL, avg entry price, trades today."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        return await _late_window_scalper.get_stats()
+    except Exception as e:
+        logger.error(f"Late window stats error: {e}")
+        return {"total_trades": 0, "win_rate": 0, "total_pnl": 0, "error": str(e)}
+
+
+@app.post("/api/late-window/toggle")
+async def toggle_late_window():
+    """Enable/disable the scalper."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        new_state = _late_window_scalper.toggle()
+        return {"enabled": new_state, "message": f"Late Window Scalper {'enabled' if new_state else 'disabled'}"}
+    except Exception as e:
+        logger.error(f"Late window toggle error: {e}")
+        return {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════
