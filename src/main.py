@@ -945,10 +945,6 @@ async def scheduled_btc_signal_scan():
                 pred = sig.get('prediction', 'SKIP')
                 if pred == 'SKIP':
                     continue
-                # Must have directional conviction
-                if not (prob > 0.70 or prob < 0.30):
-                    continue
-                
                 wl = sig.get('window_length', 15)
                 up_price = sig.get('up_price', 0.5)
                 down_price = sig.get('down_price', 0.5)
@@ -958,15 +954,17 @@ async def scheduled_btc_signal_scan():
                 if wl == 15:
                     continue
 
-                # ═══ LIVE-ADJUSTED STRATEGY (V4.1) ═══
-                # Accounts for: slippage (~3%), fees (~2%), partial fills
-                # Total execution cost estimate: ~5% round-trip
+                # ═══ LIVE-ADJUSTED STRATEGY (V4.2) ═══
+                # V4.1 was too strict: only 3.8% signals passed (3/78 in 6h)
+                # V4.2: removed redundant prob filter (entry price + R:R already gate quality)
+                #        relaxed factors from 5→4 (most signals hit 4)
+                #        now ~51% signals pass while keeping R:R >1.5x safety
                 
                 EXECUTION_COST = 0.05  # 5% total (2% fee + 3% slippage estimate)
                 MIN_ENTRY = 0.02      # Below 2c = no liquidity
                 MAX_ENTRY = 0.40      # Tightened from 50c — need more upside buffer
                 MIN_RR_AFTER_COSTS = 1.5  # Must clear 1.5:1 AFTER all costs
-                MIN_FACTORS = 5       # 5 of 7 factors must agree
+                MIN_FACTORS = 4       # 4 of 7 factors must agree (relaxed from 5)
 
                 # ═══ DYNAMIC BANKROLL SIZING ═══
                 # Query proxy wallet balance from CLOB (cached in signal engine)
