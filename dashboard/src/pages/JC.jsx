@@ -228,8 +228,21 @@ function LivePnLPanel({ trade, btcPrice, isMobile }) {
           <span style={{
             fontSize: isMobile ? 11 : 13, fontWeight: 700, color: '#fff', letterSpacing: 0.5,
           }}>
-            TRADE #{trade.id} ACTIVE — {dirLabel} from ${fmt(entry)}
+            {trade.is_live ? '' : `#${trade.id} `}{dirLabel} from ${fmt(entry)}
           </span>
+          {trade.is_live ? (
+            <span style={{
+              fontSize: 9, fontWeight: 800, color: '#22c55e', letterSpacing: 1,
+              background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.3)',
+              padding: '2px 8px', borderRadius: 4, textTransform: 'uppercase',
+              animation: 'pulse 2s infinite',
+            }}>⚡ LIVE BYBIT</span>
+          ) : (
+            <span style={{
+              fontSize: 9, fontWeight: 700, color: '#f59e0b', letterSpacing: 1,
+              background: 'rgba(245,158,11,0.1)', padding: '2px 8px', borderRadius: 4,
+            }}>📝 PAPER</span>
+          )}
         </div>
         <span style={{
           fontSize: 10, color: '#6b7280',
@@ -315,7 +328,11 @@ function LivePnLPanel({ trade, btcPrice, isMobile }) {
           { label: 'Stake', value: `$${fmt(stake, 0)}` },
           { label: 'Leverage', value: `${leverage}x` },
           { label: 'Notional', value: `$${fmt(notional, 0)}` },
-          { label: 'R:R', value: trade.rr ? `${trade.rr}:1` : '—' },
+          { label: 'R:R', value: trade.rr ? `${Number(trade.rr).toFixed(1)}:1` : '—' },
+          ...(trade.is_live ? [
+            { label: 'Size', value: `${trade.size_btc} BTC` },
+            { label: 'Liq Price', value: trade.liq_price ? `$${fmt(trade.liq_price, 0)}` : '—' },
+          ] : []),
         ].map(({ label, value }) => (
           <div key={label} style={{ fontSize: 10 }}>
             <span style={{ color: '#4a5068' }}>{label}: </span>
@@ -2386,13 +2403,44 @@ export default function JC() {
     return () => clearInterval(t);
   }, []);
 
-  // Active JC trade — 3s
+  // Active JC trade — 3s (Bybit REAL position takes priority over paper DB trades)
   useEffect(() => {
-    const load = () => fetchJSON("/api/ghost/jc-trades", { trades: [] }).then(d => {
+    const load = async () => {
+      // 1. Check real Bybit position first
+      const bybit = await fetchJSON("/api/jc/bybit/position", null);
+      const realPos = bybit?.positions?.find(p => p.size > 0);
+      if (realPos) {
+        // Map Bybit position to activeTrade format
+        setActiveTrade({
+          id: 'bybit-live',
+          direction: realPos.side === 'Buy' ? 'LONG' : 'SHORT',
+          entry: realPos.entry_price,
+          entry_price: realPos.entry_price,
+          fill_price: realPos.entry_price,
+          sl: Number(realPos.stop_loss) || null,
+          tp1: Number(realPos.take_profit) || null,
+          tp2: null,
+          stake: realPos.size * realPos.entry_price / Number(realPos.leverage || 10),
+          stake_usd: realPos.size * realPos.entry_price / Number(realPos.leverage || 10),
+          leverage: Number(realPos.leverage) || 10,
+          notional: realPos.size * realPos.entry_price,
+          rr: realPos.take_profit && realPos.stop_loss ? Math.abs(Number(realPos.take_profit) - realPos.entry_price) / Math.abs(realPos.entry_price - Number(realPos.stop_loss)) : null,
+          status: 'active',
+          reason: 'Bybit Live Position',
+          unrealized_pnl: realPos.unrealized_pnl,
+          liq_price: realPos.liq_price,
+          is_live: true,
+          symbol: realPos.symbol,
+          size_btc: realPos.size,
+        });
+        return;
+      }
+      // 2. Fallback to paper trades from DB
+      const d = await fetchJSON("/api/ghost/jc-trades", { trades: [] });
       const trades = d?.trades || [];
       const open = trades.find(t => t.status === 'active' || t.status === 'open');
       setActiveTrade(open || null);
-    });
+    };
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
