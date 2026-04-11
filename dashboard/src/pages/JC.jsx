@@ -2341,7 +2341,22 @@ export default function JC() {
 
   // PnL stats — 10s
   useEffect(() => {
-    const load = () => fetchJSON("/api/ghost/pnl", null).then(setPnlStats);
+    const load = async () => {
+      const [pnl, jcStatus] = await Promise.all([
+        fetchJSON("/api/ghost/pnl", null),
+        fetchJSON("/api/jc/status", null),
+      ]);
+      const merged = { ...pnl };
+      if (jcStatus?.bankroll) {
+        merged.balance = jcStatus.bankroll.balance;
+        merged.available = jcStatus.bankroll.available;
+        merged.in_positions = jcStatus.bankroll.in_positions;
+        merged.total_won = jcStatus.bankroll.total_won;
+        merged.total_lost = jcStatus.bankroll.total_lost;
+        merged.total_trades = jcStatus.bankroll.total_trades || merged.trades;
+      }
+      setPnlStats(merged);
+    };
     load();
     const t = setInterval(load, 10000);
     return () => clearInterval(t);
