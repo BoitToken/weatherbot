@@ -50,11 +50,14 @@ function fmtTime(ts) {
   }
 }
 
-function OutcomeIcon({ outcome }) {
+function OutcomeIcon({ outcome, pnl }) {
   if (!outcome) return <span style={{ color: '#94a3b8' }}>—</span>
   const o = outcome.toLowerCase()
-  if (['won', 'win', 'correct', 'filled', 'closed'].includes(o)) return <span>✅</span>
-  if (['lost', 'loss', 'wrong', 'liquidated'].includes(o)) return <span>❌</span>
+  if (['won', 'win', 'correct', 'filled'].includes(o) || (pnl && pnl > 0)) return <span>✅</span>
+  if (['lost', 'loss', 'wrong', 'liquidated'].includes(o) || (pnl && pnl < 0)) return <span>❌</span>
+  if (['open', 'active', 'pending'].includes(o)) return <span style={{ fontSize: 12 }}>🔄</span>
+  if (['failed'].includes(o)) return <span style={{ fontSize: 12 }}>⚠️</span>
+  if (['closed'].includes(o) && pnl != null) return pnl >= 0 ? <span>✅</span> : <span>❌</span>
   return <span style={{ color: '#94a3b8', fontSize: 12 }}>{outcome}</span>
 }
 
@@ -155,12 +158,8 @@ export default function Tradebook() {
 
   // Running totals
   const runningPnl = summary.total_net_pnl || 0
-  const totalW = Object.values(summary.by_bot || {}).reduce((s, b) => s + Math.round((b.win_rate / 100) * b.trades), 0)
-  const totalL = (summary.total_trades || 0) - totalW
-
-  // Best/worst trade
-  const bestTrade = trades.reduce((best, t) => ((t.net_pnl || 0) > (best?.net_pnl || -Infinity) ? t : best), null)
-  const worstTrade = trades.reduce((worst, t) => ((t.net_pnl || 0) < (worst?.net_pnl || Infinity) ? t : worst), null)
+  const totalW = summary.won || 0
+  const totalL = summary.lost || 0
 
   const s = {
     page: { minHeight: '100vh', background: '#0a0a0f', padding: '24px 20px', fontFamily: 'system-ui, sans-serif' },
@@ -216,15 +215,15 @@ export default function Tradebook() {
         />
         <SummaryCard
           label="Best Trade"
-          value={bestTrade ? fmtPnl(bestTrade.net_pnl) : '—'}
+          value={summary.best_trade ? fmtPnl(summary.best_trade) : '—'}
           color="#22c55e"
-          sub={bestTrade?.bot}
+          sub={summary.best_trade_bot}
         />
         <SummaryCard
           label="Worst Trade"
-          value={worstTrade ? fmtPnl(worstTrade.net_pnl) : '—'}
+          value={summary.worst_trade ? fmtPnl(summary.worst_trade) : '—'}
           color="#ef4444"
-          sub={worstTrade?.bot}
+          sub={summary.worst_trade_bot}
         />
       </div>
 
@@ -296,10 +295,15 @@ export default function Tradebook() {
                     <td style={{ ...s.td, color: '#a78bfa', fontWeight: 600 }} className="hide-mobile">{t.bot}</td>
                     <td style={{ ...s.td, color: '#94a3b8', fontSize: 12 }}>{fmtTime(t.timestamp)}</td>
                     <td style={{
-                      ...s.td, fontWeight: 600,
-                      color: t.direction?.toUpperCase() === 'UP' || t.direction?.toUpperCase() === 'LONG' ? '#22c55e' : '#ef4444'
+                      ...s.td, fontWeight: 600, fontSize: 12,
+                      color: (() => {
+                        const d = (t.direction || '').toUpperCase()
+                        if (d === 'UP' || d === 'LONG') return '#22c55e'
+                        if (d === 'DOWN' || d === 'SHORT') return '#ef4444'
+                        return '#a78bfa'  // Sports team names, etc.
+                      })()
                     }}>
-                      {t.direction?.toUpperCase() || '—'}
+                      {t.direction || '—'}
                     </td>
                     <td style={{ ...s.td, fontFamily: 'monospace' }} className="hide-mobile">
                       {t.entry_price != null ? parseFloat(t.entry_price).toFixed(4) : '—'}
@@ -314,7 +318,7 @@ export default function Tradebook() {
                     <td style={{ ...s.td, fontFamily: 'monospace', fontWeight: 700, color: isProfit ? '#22c55e' : '#ef4444' }}>
                       {fmtPnl(t.net_pnl)}
                     </td>
-                    <td style={s.td}><OutcomeIcon outcome={t.outcome} /></td>
+                    <td style={s.td}><OutcomeIcon outcome={t.outcome} pnl={t.net_pnl} /></td>
                   </tr>
                 )
               })}

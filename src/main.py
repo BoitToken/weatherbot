@@ -6072,14 +6072,14 @@ async def get_tradebook(
             logger.warning(f"⚠️ Tradebook: skipping {bot_name} — {e}")
             return []
 
-    # BTC Paper trades
+    # BTC Paper trades (from btc_pnl — the real resolved trades)
     btc_trades = await safe_query("""
         SELECT 'BTC Paper' as bot, window_id as trade_id, prediction as direction,
             entry_price, stake, trade_pnl as gross_pnl,
-            CASE WHEN correct=1 THEN 'won' ELSE 'lost' END as outcome,
+            CASE WHEN correct THEN 'won' ELSE 'lost' END as outcome,
             close_time as timestamp, window_length,
             0.0 as fees, trade_pnl as net_pnl
-        FROM btc_trades_detail ORDER BY close_time DESC
+        FROM btc_pnl ORDER BY close_time DESC
     """, 'BTC Paper')
     all_trades.extend(btc_trades)
 
@@ -6096,40 +6096,42 @@ async def get_tradebook(
     # JC Copy trades
     jc_trades = await safe_query("""
         SELECT 'JC Copy' as bot, id::text as trade_id, direction,
-            entry as entry_price, stake as stake, pnl as gross_pnl,
-            status as outcome, opened as timestamp,
-            0.0 as fees, pnl as net_pnl, NULL as window_length
-        FROM jc_trades ORDER BY opened DESC
+            entry_price, stake_usd as stake, realized_pnl as gross_pnl,
+            status as outcome, opened_at as timestamp,
+            0.0 as fees, realized_pnl as net_pnl, NULL as window_length
+        FROM jc_trades ORDER BY opened_at DESC
     """, 'JC Copy')
     all_trades.extend(jc_trades)
 
     # Maker orders (filled only)
     maker_trades = await safe_query("""
         SELECT 'Maker' as bot, order_id as trade_id, side as direction,
-            price as entry_price, size as stake, pnl_usd as gross_pnl,
+            price as entry_price, size as stake, COALESCE(pnl_usd, 0) as gross_pnl,
             status as outcome, created_at as timestamp,
-            0.0 as fees, pnl_usd as net_pnl, NULL as window_length
+            0.0 as fees, COALESCE(pnl_usd, 0) as net_pnl, NULL as window_length
         FROM maker_orders WHERE status = 'filled' ORDER BY created_at DESC
     """, 'Maker')
     all_trades.extend(maker_trades)
 
     # Sports/IPL trades
     sports_trades = await safe_query("""
-        SELECT 'Sports' as bot, id::text as trade_id, team_backed as direction,
-            entry_price, position_size as stake, pnl as gross_pnl,
-            status as outcome, entry_at as timestamp,
-            0.0 as fees, pnl as net_pnl, NULL as window_length
+        SELECT 'Sports' as bot, id::text as trade_id,
+            team_backed || ' (' || COALESCE(sport, 'IPL') || ')' as direction,
+            entry_price, position_size as stake, COALESCE(pnl, 0) as gross_pnl,
+            CASE WHEN pnl > 0 THEN 'won' WHEN pnl < 0 THEN 'lost' WHEN status = 'open' THEN 'open' ELSE status END as outcome,
+            entry_at as timestamp,
+            0.0 as fees, COALESCE(pnl, 0) as net_pnl, NULL as window_length
         FROM paper_trades_live ORDER BY entry_at DESC
     """, 'Sports')
     all_trades.extend(sports_trades)
 
     # Late window scalper trades
     scalper_trades = await safe_query("""
-        SELECT 'Scalper' as bot, id::text as trade_id, prediction as direction,
-            entry_price, stake as stake, pnl as gross_pnl,
-            outcome, created_at as timestamp,
-            0.0 as fees, pnl as net_pnl, NULL as window_length
-        FROM late_window_trades ORDER BY created_at DESC
+        SELECT 'Scalper' as bot, id::text as trade_id, direction,
+            entry_price, stake_usd as stake, COALESCE(pnl_usd, 0) as gross_pnl,
+            COALESCE(outcome, 'open') as outcome, traded_at as timestamp,
+            0.0 as fees, COALESCE(pnl_usd, 0) as net_pnl, window_length
+        FROM late_window_trades ORDER BY traded_at DESC
     """, 'Scalper')
     all_trades.extend(scalper_trades)
 
@@ -6148,8 +6150,16 @@ async def get_tradebook(
     total_gross_pnl = sum(t['gross_pnl'] or 0 for t in all_trades)
     total_fees = sum(t['fees'] or 0 for t in all_trades)
     total_net_pnl = sum(t['net_pnl'] or 0 for t in all_trades)
-    won = sum(1 for t in all_trades if t['outcome'] in ('won', 'win', 'Won', 'filled'))
-    win_rate = round((won / total_trades * 100) if total_trades > 0 else 0.0, 1)
+    won = sum(1 for t in all_trades if t['outcome'] in ('won', 'win', 'Won', 'filled') or (t.get('net_pnl') and t['net_pnl'] > 0))
+    lost = sum(1 for t in all_trades if t['outcome'] in ('lost', 'loss', 'Lost') or (t.get('net_pnl') and t['net_pnl'] < 0))
+    decided = won + lost
+    win_rate = round((won / decided * 100) if decided > 0 else 0.0, 1)
+    
+    pnl_values = [t['net_pnl'] for t in all_trades if t.get('net_pnl') and t['net_pnl'] != 0]
+    best_trade_pnl = max(pnl_values) if pnl_values else 0
+    worst_trade_pnl = min(pnl_values) if pnl_values else 0
+    best_trade_bot = next((t['bot'] for t in all_trades if t.get('net_pnl') == best_trade_pnl), '') if best_trade_pnl else ''
+    worst_trade_bot = next((t['bot'] for t in all_trades if t.get('net_pnl') == worst_trade_pnl), '') if worst_trade_pnl else ''
 
     by_bot = {}
     for t in all_trades:
@@ -6158,14 +6168,17 @@ async def get_tradebook(
             by_bot[b] = {'trades': 0, 'net_pnl': 0.0, 'wins': 0}
         by_bot[b]['trades'] += 1
         by_bot[b]['net_pnl'] += t['net_pnl'] or 0
-        if t['outcome'] in ('won', 'win', 'Won', 'filled'):
+        if t['outcome'] in ('won', 'win', 'Won', 'filled') or (t.get('net_pnl') and t['net_pnl'] > 0):
             by_bot[b]['wins'] += 1
+        if t['outcome'] in ('lost', 'loss', 'Lost') or (t.get('net_pnl') and t['net_pnl'] < 0):
+            by_bot[b].setdefault('losses', 0)
+            by_bot[b]['losses'] += 1
 
     by_bot_summary = {
         b: {
             'trades': v['trades'],
             'net_pnl': round(v['net_pnl'], 2),
-            'win_rate': round((v['wins'] / v['trades'] * 100) if v['trades'] > 0 else 0.0, 1),
+            'win_rate': round((v['wins'] / (v['wins'] + v.get('losses', 0)) * 100) if (v['wins'] + v.get('losses', 0)) > 0 else 0.0, 1),
         }
         for b, v in by_bot.items()
     }
@@ -6181,7 +6194,13 @@ async def get_tradebook(
             'total_gross_pnl': round(total_gross_pnl, 2),
             'total_fees': round(total_fees, 2),
             'total_net_pnl': round(total_net_pnl, 2),
+            'won': won,
+            'lost': lost,
             'win_rate': win_rate,
+            'best_trade': round(best_trade_pnl, 2),
+            'best_trade_bot': best_trade_bot,
+            'worst_trade': round(worst_trade_pnl, 2),
+            'worst_trade_bot': worst_trade_bot,
             'by_bot': by_bot_summary,
         }
     }
