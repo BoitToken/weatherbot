@@ -14,6 +14,7 @@ import Pennies from './pages/Pennies'
 import BTC15M from './pages/BTC15M'
 import JC from './pages/JC'
 import LastMinute from './pages/LastMinute'
+import Tradebook from './pages/Tradebook'
 
 // Global error boundary
 class ErrorBoundary extends Component {
@@ -41,6 +42,7 @@ function Sidebar() {
   const location = useLocation()
   
   const navItems = [
+    { path: '/tradebook', label: 'Tradebook', icon: '📒' },
     { path: '/jc', label: 'Casper', icon: '👻' },
     { path: '/btc15m', label: 'BroBot', icon: '🤖' },
     { path: '/pennies', label: 'Pennies', icon: '🎰' },
@@ -96,6 +98,7 @@ function App() {
               <Route path="/last-minute" element={<LastMinute />} />
               <Route path="/btc15m" element={<BTC15M />} />
               <Route path="/jc" element={<JC />} />
+              <Route path="/tradebook" element={<Tradebook />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </ErrorBoundary>

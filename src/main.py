@@ -6032,6 +6032,261 @@ async def jc_pause_trading(request: Request):
 
 
 # =============================================================================
+# Tradebook — Unified Trade Ledger API
+# =============================================================================
+
+@app.get("/api/tradebook")
+async def get_tradebook(
+    bot: Optional[str] = None,
+    limit: int = 500,
+    offset: int = 0
+):
+    """Unified trade ledger across all bots."""
+    from fastapi.responses import JSONResponse
+
+    pool = get_async_pool()
+    all_trades = []
+
+    async def safe_query(query: str, bot_name: str):
+        """Execute query and gracefully skip on error."""
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(query)
+                return [
+                    {
+                        'bot': bot_name,
+                        'trade_id': str(r['trade_id']) if r['trade_id'] is not None else None,
+                        'direction': r['direction'],
+                        'entry_price': float(r['entry_price']) if r['entry_price'] is not None else None,
+                        'stake': float(r['stake']) if r['stake'] is not None else 0.0,
+                        'gross_pnl': float(r['gross_pnl']) if r['gross_pnl'] is not None else 0.0,
+                        'fees': float(r['fees']) if r['fees'] is not None else 0.0,
+                        'net_pnl': float(r['net_pnl']) if r['net_pnl'] is not None else 0.0,
+                        'outcome': r['outcome'],
+                        'timestamp': r['timestamp'].isoformat() if r['timestamp'] is not None else None,
+                        'window_length': r.get('window_length'),
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.warning(f"⚠️ Tradebook: skipping {bot_name} — {e}")
+            return []
+
+    # BTC Paper trades
+    btc_trades = await safe_query("""
+        SELECT 'BTC Paper' as bot, window_id as trade_id, prediction as direction,
+            entry_price, stake, trade_pnl as gross_pnl,
+            CASE WHEN correct=1 THEN 'won' ELSE 'lost' END as outcome,
+            close_time as timestamp, window_length,
+            0.0 as fees, trade_pnl as net_pnl
+        FROM btc_trades_detail ORDER BY close_time DESC
+    """, 'BTC Paper')
+    all_trades.extend(btc_trades)
+
+    # BTC Live trades
+    live_trades = await safe_query("""
+        SELECT 'BTC Live' as bot, window_id as trade_id, prediction as direction,
+            entry_price, stake_usd as stake, pnl_usd as gross_pnl,
+            status as outcome, created_at as timestamp,
+            0.0 as fees, pnl_usd as net_pnl, NULL as window_length
+        FROM live_trades ORDER BY created_at DESC
+    """, 'BTC Live')
+    all_trades.extend(live_trades)
+
+    # JC Copy trades
+    jc_trades = await safe_query("""
+        SELECT 'JC Copy' as bot, id::text as trade_id, direction,
+            entry as entry_price, stake as stake, pnl as gross_pnl,
+            status as outcome, opened as timestamp,
+            0.0 as fees, pnl as net_pnl, NULL as window_length
+        FROM jc_trades ORDER BY opened DESC
+    """, 'JC Copy')
+    all_trades.extend(jc_trades)
+
+    # Maker orders (filled only)
+    maker_trades = await safe_query("""
+        SELECT 'Maker' as bot, order_id as trade_id, side as direction,
+            price as entry_price, size as stake, pnl_usd as gross_pnl,
+            status as outcome, created_at as timestamp,
+            0.0 as fees, pnl_usd as net_pnl, NULL as window_length
+        FROM maker_orders WHERE status = 'filled' ORDER BY created_at DESC
+    """, 'Maker')
+    all_trades.extend(maker_trades)
+
+    # Sports/IPL trades
+    sports_trades = await safe_query("""
+        SELECT 'Sports' as bot, id::text as trade_id, team_backed as direction,
+            entry_price, position_size as stake, pnl as gross_pnl,
+            status as outcome, entry_at as timestamp,
+            0.0 as fees, pnl as net_pnl, NULL as window_length
+        FROM paper_trades_live ORDER BY entry_at DESC
+    """, 'Sports')
+    all_trades.extend(sports_trades)
+
+    # Late window scalper trades
+    scalper_trades = await safe_query("""
+        SELECT 'Scalper' as bot, id::text as trade_id, prediction as direction,
+            entry_price, stake as stake, pnl as gross_pnl,
+            outcome, created_at as timestamp,
+            0.0 as fees, pnl as net_pnl, NULL as window_length
+        FROM late_window_trades ORDER BY created_at DESC
+    """, 'Scalper')
+    all_trades.extend(scalper_trades)
+
+    # Sort all trades by timestamp DESC
+    def ts_key(t):
+        return t['timestamp'] or ''
+    all_trades.sort(key=ts_key, reverse=True)
+
+    # Filter by bot if requested
+    if bot:
+        all_trades = [t for t in all_trades if t['bot'] == bot]
+
+    # Build summary
+    total_trades = len(all_trades)
+    total_staked = sum(t['stake'] or 0 for t in all_trades)
+    total_gross_pnl = sum(t['gross_pnl'] or 0 for t in all_trades)
+    total_fees = sum(t['fees'] or 0 for t in all_trades)
+    total_net_pnl = sum(t['net_pnl'] or 0 for t in all_trades)
+    won = sum(1 for t in all_trades if t['outcome'] in ('won', 'win', 'Won', 'filled'))
+    win_rate = round((won / total_trades * 100) if total_trades > 0 else 0.0, 1)
+
+    by_bot = {}
+    for t in all_trades:
+        b = t['bot']
+        if b not in by_bot:
+            by_bot[b] = {'trades': 0, 'net_pnl': 0.0, 'wins': 0}
+        by_bot[b]['trades'] += 1
+        by_bot[b]['net_pnl'] += t['net_pnl'] or 0
+        if t['outcome'] in ('won', 'win', 'Won', 'filled'):
+            by_bot[b]['wins'] += 1
+
+    by_bot_summary = {
+        b: {
+            'trades': v['trades'],
+            'net_pnl': round(v['net_pnl'], 2),
+            'win_rate': round((v['wins'] / v['trades'] * 100) if v['trades'] > 0 else 0.0, 1),
+        }
+        for b, v in by_bot.items()
+    }
+
+    # Paginate
+    paginated = all_trades[offset:offset + limit]
+
+    return {
+        'trades': paginated,
+        'summary': {
+            'total_trades': total_trades,
+            'total_staked': round(total_staked, 2),
+            'total_gross_pnl': round(total_gross_pnl, 2),
+            'total_fees': round(total_fees, 2),
+            'total_net_pnl': round(total_net_pnl, 2),
+            'win_rate': win_rate,
+            'by_bot': by_bot_summary,
+        }
+    }
+
+
+@app.get("/api/tradebook/export")
+async def export_tradebook():
+    """Export all trades as XLSX file."""
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from io import BytesIO
+    from datetime import date
+
+    # Fetch all trades
+    data = await get_tradebook(limit=10000)
+    trades = data['trades']
+    summary = data['summary']
+
+    wb = Workbook()
+
+    HEADERS = ['#', 'Bot', 'Timestamp', 'Direction', 'Entry Price', 'Stake',
+               'Gross P&L', 'Fees', 'Net P&L', 'Outcome']
+
+    HEADER_FILL = PatternFill('solid', fgColor='1e1e2e')
+    HEADER_FONT = Font(bold=True, color='e2e8f0', name='Calibri')
+    GREEN_FILL = PatternFill('solid', fgColor='14532d')
+    RED_FILL = PatternFill('solid', fgColor='7f1d1d')
+    GREEN_FONT = Font(color='22c55e', name='Calibri')
+    RED_FONT = Font(color='ef4444', name='Calibri')
+
+    def write_sheet(ws, rows, title='Trades'):
+        ws.title = title
+        ws.append(HEADERS)
+        for cell in ws[1]:
+            cell.font = HEADER_FONT
+            cell.fill = HEADER_FILL
+            cell.alignment = Alignment(horizontal='center')
+        for i, t in enumerate(rows, 1):
+            pnl = t.get('net_pnl') or 0
+            outcome = t.get('outcome') or ''
+            row = [
+                i,
+                t.get('bot', ''),
+                t.get('timestamp', ''),
+                t.get('direction', ''),
+                t.get('entry_price'),
+                t.get('stake'),
+                t.get('gross_pnl'),
+                t.get('fees'),
+                pnl,
+                outcome,
+            ]
+            ws.append(row)
+            row_idx = ws.max_row
+            fill = GREEN_FILL if pnl >= 0 else RED_FILL
+            font = GREEN_FONT if pnl >= 0 else RED_FONT
+            for col in [7, 9]:  # Gross P&L, Net P&L
+                c = ws.cell(row=row_idx, column=col)
+                c.fill = fill
+                c.font = font
+        # Auto-width
+        for col in ws.columns:
+            max_len = max((len(str(c.value)) if c.value else 0) for c in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
+
+    # All Trades sheet
+    ws_all = wb.active
+    write_sheet(ws_all, trades, 'All Trades')
+
+    # Per-bot sheets
+    for bot_name in ['BTC Paper', 'BTC Live', 'JC Copy', 'Sports', 'Scalper', 'Maker']:
+        bot_trades = [t for t in trades if t['bot'] == bot_name]
+        if bot_trades:
+            ws = wb.create_sheet(bot_name)
+            write_sheet(ws, bot_trades, bot_name)
+
+    # Summary sheet
+    ws_sum = wb.create_sheet('Summary')
+    ws_sum.append(['Bot', 'Trades', 'Net P&L', 'Win Rate'])
+    for cell in ws_sum[1]:
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal='center')
+    for bot_name, bdata in summary['by_bot'].items():
+        ws_sum.append([bot_name, bdata['trades'], bdata['net_pnl'], f"{bdata['win_rate']}%"])
+    ws_sum.append([])
+    ws_sum.append(['TOTAL', summary['total_trades'], summary['total_net_pnl'], f"{summary['win_rate']}%"])
+    for col in ws_sum.columns:
+        max_len = max((len(str(c.value)) if c.value else 0) for c in col)
+        ws_sum.column_dimensions[col[0].column_letter].width = min(max_len + 4, 30)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"tradebook-{date.today().isoformat()}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
+# =============================================================================
 # Static Files — Serve React Dashboard
 # =============================================================================
 
