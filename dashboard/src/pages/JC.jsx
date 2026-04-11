@@ -1038,20 +1038,24 @@ function TradesTab({ trades, pnlStats, isMobile }) {
   const [expandedId, setExpandedId] = useState(null);
   const rows = (trades || []).slice(0, 20);
 
-  const balance = pnlStats?.balance ?? pnlStats?.total_balance ?? 10000;
+  const balance = pnlStats?.balance ?? null;
   const totalPnl = pnlStats?.total_pnl ?? null;
   const winRate = pnlStats?.win_rate != null ? (pnlStats.win_rate * 100).toFixed(1) : null;
-  const totalTrades = pnlStats?.total_trades ?? rows.length;
+  const totalTrades = pnlStats?.total_trades ?? 0;
+  const unrealizedPnl = pnlStats?.unrealized_pnl ?? null;
+  const inPositions = pnlStats?.in_positions ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Bankroll */}
-      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(3, 1fr)", gap: 12 }}>
         {[
-          { label: "Balance", value: balance != null ? `$${fmt(balance, 0)}` : "—", color: C.white, big: true },
-          { label: "Total P&L", value: totalPnl != null ? `${Number(totalPnl) >= 0 ? "+" : ""}$${fmt(totalPnl)}` : "—", color: Number(totalPnl) >= 0 ? C.win : C.loss, big: true },
-          { label: "Win Rate", value: winRate != null ? `${winRate}%` : "—", color: Number(winRate) >= 50 ? C.win : C.loss },
-          { label: "Total Trades", value: totalTrades ?? "—", color: C.accent },
+          { label: "Bybit Balance", value: balance != null ? `$${fmt(balance)}` : "—", color: C.white, big: true },
+          { label: "In Positions", value: inPositions != null ? `$${fmt(inPositions)}` : "—", color: C.warning },
+          { label: "Unrealized P&L", value: unrealizedPnl != null ? `${unrealizedPnl >= 0 ? '+' : ''}$${fmt(unrealizedPnl)}` : "—", color: unrealizedPnl >= 0 ? C.win : C.loss, big: true },
+          { label: "Realized P&L", value: totalPnl != null ? `${Number(totalPnl) >= 0 ? "+" : ""}$${fmt(totalPnl)}` : "—", color: Number(totalPnl) >= 0 ? C.win : C.loss },
+          { label: "Win Rate", value: winRate != null && totalTrades > 0 ? `${winRate}%` : "—", color: Number(winRate) >= 50 ? C.win : C.loss },
+          { label: "Closed Trades", value: totalTrades || 0, color: C.accent },
         ].map(({ label, value, color, big }) => (
           <div key={label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px", textAlign: "center" }}>
             <div style={{ fontSize: 9, fontFamily: font, color: C.muted, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" }}>{label}</div>
@@ -2359,18 +2363,25 @@ export default function JC() {
   // PnL stats — 10s
   useEffect(() => {
     const load = async () => {
-      const [pnl, jcStatus] = await Promise.all([
-        fetchJSON("/api/ghost/pnl", null),
-        fetchJSON("/api/jc/status", null),
-      ]);
-      const merged = { ...pnl };
+      const jcStatus = await fetchJSON("/api/jc/status", null);
+      const merged = {};
+      // Real Bybit balance (source: bybit_live)
       if (jcStatus?.bankroll) {
         merged.balance = jcStatus.bankroll.balance;
         merged.available = jcStatus.bankroll.available;
         merged.in_positions = jcStatus.bankroll.in_positions;
-        merged.total_won = jcStatus.bankroll.total_won;
-        merged.total_lost = jcStatus.bankroll.total_lost;
-        merged.total_trades = jcStatus.bankroll.total_trades || merged.trades;
+        merged.unrealized_pnl = jcStatus.bankroll.unrealized_pnl;
+        merged.source = jcStatus.bankroll.source;
+      }
+      // Real trade stats from DB
+      if (jcStatus?.trade_stats) {
+        merged.total_pnl = jcStatus.trade_stats.total_pnl;
+        merged.total_trades = jcStatus.trade_stats.total_trades;
+        merged.wins = jcStatus.trade_stats.wins;
+        merged.losses = jcStatus.trade_stats.losses;
+        merged.win_rate = jcStatus.trade_stats.total_trades > 0
+          ? jcStatus.trade_stats.wins / jcStatus.trade_stats.total_trades
+          : 0;
       }
       setPnlStats(merged);
     };

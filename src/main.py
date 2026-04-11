@@ -5811,7 +5811,7 @@ async def get_pnl_trend():
 
 @app.get("/api/jc/status")
 async def jc_status():
-    """Get JC copy trader status: mode, daily loss, open position."""
+    """Get JC copy trader status: mode, Bybit balance, open positions, DB trades."""
     try:
         sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
         from jc_copy_trader import get_trading_mode
@@ -5819,37 +5819,77 @@ async def jc_status():
         
         result = {"mode": mode, "ok": True}
         
-        if mode == 'live':
+        # ALWAYS fetch real Bybit balance (regardless of paper/live mode)
+        try:
+            sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+            from bybit_executor import get_executor
+            executor = get_executor()
+            
+            # Balance
+            bal = executor.test_connectivity()
+            equity = float(bal.get('equity', 0))
+            available = float(bal.get('available', 0))
+            
+            # Positions
+            pos_data = executor.get_open_positions()
+            positions = pos_data.get('positions', [])
+            in_positions_usd = 0.0
+            unrealized = 0.0
+            for p in positions:
+                size = float(p.get('size', 0))
+                entry = float(p.get('entry_price', 0))
+                lev = float(p.get('leverage', 1))
+                if size > 0 and lev > 0:
+                    in_positions_usd += (size * entry) / lev
+                unrealized += float(p.get('unrealized_pnl', 0))
+            
+            result["bankroll"] = {
+                "balance": equity,
+                "available": available,
+                "in_positions": round(in_positions_usd, 2),
+                "unrealized_pnl": round(unrealized, 4),
+                "source": "bybit_live",
+            }
+            result["bybit_connected"] = True
+            result["open_positions"] = positions
+            
+        except Exception as bybit_err:
+            logger.warning(f"Bybit balance fetch failed: {bybit_err}")
+            result["bybit_error"] = str(bybit_err)
+            # Fallback to DB bankroll
             try:
-                from bybit_executor import get_executor
-                executor = get_executor()
-                conn_test = executor.test_connectivity()
-                pos = executor.get_open_positions()
-                daily = executor.get_daily_loss_state()
-                result.update({
-                    "bybit_connected": conn_test.get("ok", False),
-                    "bybit_equity": conn_test.get("equity", 0),
-                    "open_positions": pos.get("positions", []),
-                    "daily_loss": daily,
-                })
-            except Exception as e:
-                result["bybit_error"] = str(e)
+                import psycopg2
+                conn2 = psycopg2.connect("dbname=polyedge user=node host=localhost")
+                cur2 = conn2.cursor()
+                cur2.execute("SELECT balance, available, in_positions, total_won, total_lost, total_trades FROM jc_bankroll ORDER BY id DESC LIMIT 1")
+                bank = cur2.fetchone()
+                if bank:
+                    result["bankroll"] = {
+                        "balance": float(bank[0]), "available": float(bank[1]),
+                        "in_positions": float(bank[2]), "total_won": float(bank[3]),
+                        "total_lost": float(bank[4]), "total_trades": bank[5],
+                        "source": "db_fallback",
+                    }
+                conn2.close()
+            except Exception as db_err:
+                result["db_error"] = str(db_err)
         
-        # DB stats (sync via psycopg2 since we're in JC context)
+        # DB trades (open ones)
         try:
             import psycopg2
             conn2 = psycopg2.connect("dbname=polyedge user=node host=localhost")
             cur2 = conn2.cursor()
-            cur2.execute("SELECT balance, available, in_positions, total_won, total_lost, total_trades FROM jc_bankroll ORDER BY id DESC LIMIT 1")
-            bank = cur2.fetchone()
-            if bank:
-                result["bankroll"] = {
-                    "balance": float(bank[0]), "available": float(bank[1]),
-                    "in_positions": float(bank[2]), "total_won": float(bank[3]),
-                    "total_lost": float(bank[4]), "total_trades": bank[5],
-                }
-            cur2.execute("SELECT id, direction, entry_price, status FROM jc_trades WHERE status IN ('active','half_closed','breakeven')")
-            result["open_db_trades"] = [{"id": r[0], "direction": r[1], "entry_price": float(r[2]), "status": r[3]} for r in cur2.fetchall()]
+            cur2.execute("SELECT id, direction, entry_price, stake_usd, realized_pnl, status FROM jc_trades WHERE status IN ('active','half_closed','breakeven')")
+            result["open_db_trades"] = [{"id": r[0], "direction": r[1], "entry_price": float(r[2]), "stake": float(r[3] or 0), "pnl": float(r[4] or 0), "status": r[3]} for r in cur2.fetchall()]
+            # Total PnL from closed trades
+            cur2.execute("SELECT COALESCE(SUM(realized_pnl), 0), COUNT(*), COUNT(*) FILTER (WHERE realized_pnl > 0), COUNT(*) FILTER (WHERE realized_pnl < 0) FROM jc_trades WHERE status = 'closed'")
+            pnl_row = cur2.fetchone()
+            result["trade_stats"] = {
+                "total_pnl": float(pnl_row[0]),
+                "total_trades": pnl_row[1],
+                "wins": pnl_row[2],
+                "losses": pnl_row[3],
+            }
             conn2.close()
         except Exception as db_err:
             result["db_error"] = str(db_err)
