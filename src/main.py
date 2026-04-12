@@ -5899,6 +5899,135 @@ async def jc_status():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/jc/performance")
+async def jc_performance():
+    """Aggregated performance stats from ALL real data sources (btc_pnl, jc_trades, Bybit)."""
+    pool = get_async_pool()
+    try:
+        async with pool.acquire() as conn:
+            # === BTC Paper trades (from btc_pnl view) ===
+            btc_stats = await conn.fetchrow("""
+                SELECT 
+                    count(*) as total,
+                    count(*) FILTER (WHERE correct) as wins,
+                    count(*) FILTER (WHERE NOT correct) as losses,
+                    COALESCE(sum(trade_pnl), 0) as total_pnl,
+                    COALESCE(avg(trade_pnl) FILTER (WHERE correct), 0) as avg_win,
+                    COALESCE(avg(trade_pnl) FILTER (WHERE NOT correct), 0) as avg_loss,
+                    COALESCE(max(trade_pnl), 0) as best_trade,
+                    COALESCE(min(trade_pnl), 0) as worst_trade,
+                    COALESCE(sum(stake), 0) as total_staked
+                FROM btc_pnl
+            """)
+            
+            # === JC Copy trades (closed only) ===
+            jc_stats = await conn.fetchrow("""
+                SELECT 
+                    count(*) as total,
+                    count(*) FILTER (WHERE realized_pnl > 0) as wins,
+                    count(*) FILTER (WHERE realized_pnl < 0) as losses,
+                    COALESCE(sum(realized_pnl), 0) as total_pnl,
+                    COALESCE(avg(realized_pnl) FILTER (WHERE realized_pnl > 0), 0) as avg_win,
+                    COALESCE(avg(realized_pnl) FILTER (WHERE realized_pnl < 0), 0) as avg_loss
+                FROM jc_trades WHERE status = 'closed' AND realized_pnl IS NOT NULL
+            """)
+            
+            # === Daily P&L (aggregated from btc_pnl by date) ===
+            daily_rows = await conn.fetch("""
+                SELECT 
+                    close_time::date as date,
+                    sum(trade_pnl) as pnl,
+                    count(*) as trades,
+                    count(*) FILTER (WHERE correct) as wins
+                FROM btc_pnl
+                GROUP BY close_time::date
+                ORDER BY date DESC
+                LIMIT 30
+            """)
+            
+            # === Hourly heatmap (from btc_pnl) ===
+            hourly_rows = await conn.fetch("""
+                SELECT 
+                    EXTRACT(HOUR FROM close_time AT TIME ZONE 'Asia/Kolkata')::int as hour,
+                    count(*) as trades,
+                    count(*) FILTER (WHERE correct) as wins,
+                    sum(trade_pnl) as pnl
+                FROM btc_pnl
+                GROUP BY 1
+                ORDER BY 1
+            """)
+            
+            # Combine BTC + JC stats
+            total_trades = int(btc_stats['total']) + int(jc_stats['total'])
+            total_wins = int(btc_stats['wins']) + int(jc_stats['wins'])
+            total_losses = int(btc_stats['losses']) + int(jc_stats['losses'])
+            total_pnl = float(btc_stats['total_pnl']) + float(jc_stats['total_pnl'])
+            
+            # Weighted avg win/loss
+            avg_win = float(btc_stats['avg_win']) if btc_stats['wins'] > 0 else (float(jc_stats['avg_win']) if jc_stats['wins'] > 0 else 0)
+            avg_loss = float(btc_stats['avg_loss']) if btc_stats['losses'] > 0 else (float(jc_stats['avg_loss']) if jc_stats['losses'] > 0 else 0)
+            
+            # Profit factor = gross wins / gross losses
+            gw_row = await conn.fetchrow("SELECT COALESCE(sum(trade_pnl) FILTER (WHERE correct), 0) as v FROM btc_pnl")
+            gl_row = await conn.fetchrow("SELECT COALESCE(sum(trade_pnl) FILTER (WHERE NOT correct), 0) as v FROM btc_pnl")
+            gross_wins = float(gw_row['v']) if gw_row else 0
+            gross_losses = abs(float(gl_row['v'])) if gl_row else 0
+            profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else 0
+            
+            decided = total_wins + total_losses
+            win_rate = round(total_wins / decided * 100, 1) if decided > 0 else 0
+            
+            # Bybit unrealized
+            bybit_unrealized = 0
+            try:
+                import sys as _sys
+                _sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
+                from bybit_executor import get_executor
+                executor = get_executor()
+                pos = executor.get_open_positions()
+                for p in pos.get('positions', []):
+                    bybit_unrealized += float(p.get('unrealized_pnl', 0))
+            except:
+                pass
+            
+            return {
+                "total_pnl": round(total_pnl, 2),
+                "unrealized_pnl": round(bybit_unrealized, 4),
+                "win_rate": win_rate / 100,  # as decimal for frontend
+                "total_trades": total_trades,
+                "wins": total_wins,
+                "losses": total_losses,
+                "avg_win": round(avg_win, 2),
+                "avg_loss": round(avg_loss, 2),
+                "profit_factor": profit_factor,
+                "best_trade": round(float(btc_stats['best_trade']), 2),
+                "worst_trade": round(float(btc_stats['worst_trade']), 2),
+                "total_staked": round(float(btc_stats['total_staked']), 2),
+                "by_source": {
+                    "btc_paper": {
+                        "trades": int(btc_stats['total']),
+                        "pnl": round(float(btc_stats['total_pnl']), 2),
+                        "win_rate": round(int(btc_stats['wins']) / int(btc_stats['total']) * 100, 1) if btc_stats['total'] > 0 else 0,
+                    },
+                    "jc_copy": {
+                        "trades": int(jc_stats['total']),
+                        "pnl": round(float(jc_stats['total_pnl']), 2),
+                    },
+                },
+                "daily": [
+                    {"date": str(r['date']), "pnl": round(float(r['pnl']), 2), "trades": r['trades'], "wins": r['wins']}
+                    for r in reversed(daily_rows)
+                ],
+                "hourly": [
+                    {"hour": r['hour'], "trades": r['trades'], "wins": r['wins'], "pnl": round(float(r['pnl']), 2)}
+                    for r in hourly_rows
+                ],
+            }
+    except Exception as e:
+        logger.error(f"Performance endpoint error: {e}")
+        return {"error": str(e), "total_pnl": 0, "total_trades": 0}
+
+
 @app.post("/api/jc/mode")
 async def jc_set_mode(request: Request):
     """Toggle JC trading mode between 'paper' and 'live'."""

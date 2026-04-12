@@ -2360,12 +2360,15 @@ export default function JC() {
     return () => clearInterval(t);
   }, []);
 
-  // PnL stats — 10s
+  // PnL stats — 10s (from /api/jc/status for Bybit balance + /api/jc/performance for stats)
   useEffect(() => {
     const load = async () => {
-      const jcStatus = await fetchJSON("/api/jc/status", null);
+      const [jcStatus, perf] = await Promise.all([
+        fetchJSON("/api/jc/status", null),
+        fetchJSON("/api/jc/performance", null),
+      ]);
       const merged = {};
-      // Real Bybit balance (source: bybit_live)
+      // Real Bybit balance
       if (jcStatus?.bankroll) {
         merged.balance = jcStatus.bankroll.balance;
         merged.available = jcStatus.bankroll.available;
@@ -2373,15 +2376,18 @@ export default function JC() {
         merged.unrealized_pnl = jcStatus.bankroll.unrealized_pnl;
         merged.source = jcStatus.bankroll.source;
       }
-      // Real trade stats from DB
-      if (jcStatus?.trade_stats) {
-        merged.total_pnl = jcStatus.trade_stats.total_pnl;
-        merged.total_trades = jcStatus.trade_stats.total_trades;
-        merged.wins = jcStatus.trade_stats.wins;
-        merged.losses = jcStatus.trade_stats.losses;
-        merged.win_rate = jcStatus.trade_stats.total_trades > 0
-          ? jcStatus.trade_stats.wins / jcStatus.trade_stats.total_trades
-          : 0;
+      // Real performance stats
+      if (perf && !perf.error) {
+        merged.total_pnl = perf.total_pnl;
+        merged.total_trades = perf.total_trades;
+        merged.wins = perf.wins;
+        merged.losses = perf.losses;
+        merged.win_rate = perf.win_rate;
+        merged.avg_win = perf.avg_win;
+        merged.avg_loss = perf.avg_loss;
+        merged.profit_factor = perf.profit_factor;
+        merged.best_trade = perf.best_trade;
+        merged.worst_trade = perf.worst_trade;
       }
       setPnlStats(merged);
     };
@@ -2398,9 +2404,11 @@ export default function JC() {
     return () => clearInterval(t);
   }, []);
 
-  // Daily P&L — 30s
+  // Daily P&L — 30s (from performance endpoint)
   useEffect(() => {
-    const load = () => fetchJSON("/api/ghost/daily-pnl", []).then(d => setDailyPnl(Array.isArray(d) ? d : d?.data || []));
+    const load = () => fetchJSON("/api/jc/performance", null).then(d => {
+      setDailyPnl(d?.daily || []);
+    });
     load();
     const t = setInterval(load, 30000);
     return () => clearInterval(t);
