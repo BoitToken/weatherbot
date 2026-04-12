@@ -5680,20 +5680,20 @@ async def get_live_trades():
 
 @app.get("/api/live/stats")
 async def get_live_stats():
-    """Get live trading stats only."""
+    """Get BTC trading stats from btc_pnl (real data)."""
     try:
         pool = get_async_pool()
         async with pool.acquire() as conn:
+            # Query btc_pnl view for real BTC 15/5M trading data
             row = await conn.fetchrow("""
                 SELECT
                     COUNT(*) as total,
-                    COALESCE(SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END), 0) as wins,
-                    COALESCE(SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END), 0) as losses,
-                    COALESCE(SUM(pnl_usd), 0) as total_pnl,
-                    COALESCE(AVG(pnl_usd), 0) as avg_pnl,
-                    COALESCE(SUM(stake_usd), 0) as total_staked
-                FROM live_trades
-                WHERE status = 'resolved'
+                    COUNT(*) FILTER (WHERE correct) as wins,
+                    COUNT(*) FILTER (WHERE NOT correct) as losses,
+                    COALESCE(SUM(trade_pnl), 0) as total_pnl,
+                    COALESCE(AVG(trade_pnl), 0) as avg_pnl,
+                    COALESCE(SUM(stake), 0) as total_staked
+                FROM btc_pnl
             """)
             total = int(row["total"])
             wins = int(row["wins"])
