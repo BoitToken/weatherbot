@@ -2185,6 +2185,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ JC Copy Trader failed to load: {e}")
     
+    # BTC TRADING PERFORMANCE REPORTS — Every 8 hours (00:00, 08:00, 16:00 IST)
+    try:
+        from src.btc_reporter import send_btc_trading_report
+        scheduler.add_job(send_btc_trading_report, 'cron', hour='0,8,16', minute=0, timezone='Asia/Kolkata', id='btc_report', replace_existing=True)
+        logger.info("✅ BTC Trading Reports scheduled (every 8 hours: 00:00, 08:00, 16:00 IST)")
+    except Exception as e:
+        logger.error(f"❌ BTC Reporter failed to load: {e}")
+    
     # ═══════════════════════════════════════════════════════════════
     # LEARNING ENGINE — Sprint 3 Scheduled Jobs
     # ═══════════════════════════════════════════════════════════════
