@@ -1582,9 +1582,10 @@ async def lifespan(app: FastAPI):
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
-    scheduler.add_job(scheduled_btc_hourly_summary, 'cron', minute=0, timezone='Asia/Kolkata', id='btc_hourly', replace_existing=True)
-    scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
-    scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
+    # DISABLED per CEO — only send trade open/close, no periodic reports
+    # scheduler.add_job(scheduled_btc_hourly_summary, 'cron', minute=0, timezone='Asia/Kolkata', id='btc_hourly', replace_existing=True)
+    # scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
+    # scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
     # V5 Strategy — 10-point confluence + mandatory guardrails + resolution
     scheduler.add_job(scheduled_v5_paper_scan, 'interval', seconds=45, id='btc_v5_paper', replace_existing=True)
     scheduler.add_job(scheduled_v5_resolution, 'interval', minutes=2, id='btc_v5_resolve', replace_existing=True)
@@ -1600,8 +1601,9 @@ async def lifespan(app: FastAPI):
         sys.path.insert(0, '/data/.openclaw/workspace/projects/Ghost')
         from jc_copy_trader import run_jc_copy_trader, send_jc_hourly_report, send_jc_daily_report
         scheduler.add_job(run_jc_copy_trader, 'interval', seconds=10, id='jc_copy_trader', replace_existing=True)
-        scheduler.add_job(send_jc_hourly_report, 'cron', minute=0, timezone='Asia/Kolkata', id='jc_hourly', replace_existing=True)
-        scheduler.add_job(send_jc_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='jc_daily', replace_existing=True)
+        # DISABLED per CEO — only send trade open/close, no periodic reports
+        # scheduler.add_job(send_jc_hourly_report, 'cron', minute=0, timezone='Asia/Kolkata', id='jc_hourly', replace_existing=True)
+        # scheduler.add_job(send_jc_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='jc_daily', replace_existing=True)
         # JC Discord reporter — 15min updates, hourly levels, level proximity alerts, daily recap
         # JC reporter: ONLY forward Jayson's actual trade signals/charts (no periodic updates)
         # 15min, hourly, proximity alerts, daily recap — all REMOVED per CEO directive
@@ -1613,7 +1615,8 @@ async def lifespan(app: FastAPI):
     # BTC TRADING PERFORMANCE REPORTS — Every 8 hours (00:00, 08:00, 16:00 IST)
     try:
         from src.btc_reporter import send_btc_trading_report
-        scheduler.add_job(send_btc_trading_report, 'cron', hour='0,8,16', minute=0, timezone='Asia/Kolkata', id='btc_report', replace_existing=True)
+        # DISABLED per CEO — only trade open/close notifications
+        # scheduler.add_job(send_btc_trading_report, 'cron', hour='0,8,16', minute=0, timezone='Asia/Kolkata', id='btc_report', replace_existing=True)
         logger.info("✅ BTC Trading Reports scheduled (every 8 hours: 00:00, 08:00, 16:00 IST)")
     except Exception as e:
         logger.error(f"❌ BTC Reporter failed to load: {e}")
