@@ -29,7 +29,7 @@ CONSECUTIVE_LOSS_DAYS = 3
 WALLET_15MIN_PCT = 0.10
 MAX_TRADES_PER_HOUR = 8
 MAX_ENTRY_PRICE = 0.50        # < 50c (V3 rule: R:R >= 1:1)
-MIN_SECONDS_REMAINING = 210   # Enter only in first 90s of 300s window
+MIN_SECONDS_REMAINING = 60    # Enter with at least 60s left (was 210 — too restrictive)
 PAPER_STARTING_BANKROLL = 10000.0
 IST = pytz.timezone("Asia/Calcutta")
 
@@ -197,10 +197,10 @@ class BTCV5Strategy:
         
         factors["timing"] = f"{seconds_remaining}s remaining ✅"
         
-        # ── Confidence check (engine must have decent conviction) ────────
-        if engine_confidence < 0.3:
+        # ── Confidence check (engine must have some conviction) ──────────
+        if engine_confidence < 0.15:
             return {"should_trade": False,
-                    "reason": f"Low confidence: {engine_confidence:.2f} (need >= 0.3)",
+                    "reason": f"Low confidence: {engine_confidence:.2f} (need >= 0.15)",
                     "direction": direction, "score": 0, "factors": factors}
         
         factors["confidence"] = f"{engine_confidence:.2f} ✅"

@@ -1108,7 +1108,8 @@ async def scheduled_v5_paper_scan():
                          factors_json, jc_level, strategy_version)
                         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,'V5')
                     """, window_id, direction, token_price, stake, score,
-                         _json.dumps(factors), str(jc_label))
+                         _json.dumps({k: v.encode('ascii','ignore').decode() if isinstance(v,str) else str(v) for k,v in (factors if isinstance(factors,dict) else {}).items()}),
+                         str(jc_label).encode('ascii','ignore').decode())
 
                 logger.info(f"📝 V5 PAPER: {direction} | {token_price*100:.1f}c | ${stake} | Score {score}")
 
@@ -1590,8 +1591,42 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(scheduled_v5_paper_scan, 'interval', seconds=45, id='btc_v5_paper', replace_existing=True)
     scheduler.add_job(scheduled_v5_resolution, 'interval', minutes=2, id='btc_v5_resolve', replace_existing=True)
     scheduler.add_job(scheduled_v4_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_v5_daily', replace_existing=True)
-    logger.info("✅ V5 Strategy scheduled (scan: 45s, resolve: 2min, daily: 11PM)")
-    logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min, hourly: on-the-hour)")
+
+    # HEARTBEAT: Send status to @ArbitrageBihariBot every 4 hours so CEO knows bot is alive
+    async def v5_heartbeat():
+        try:
+            pool = get_async_pool()
+            async with pool.acquire() as conn:
+                trades = await conn.fetchrow("SELECT count(*) as total, count(*) FILTER (WHERE won=true) as wins, COALESCE(SUM(simulated_pnl),0) as pnl FROM paper_trades WHERE strategy_version='V5' AND resolved_at IS NOT NULL")
+                open_t = await conn.fetchval("SELECT count(*) FROM paper_trades WHERE strategy_version='V5' AND resolved_at IS NULL")
+                br = await conn.fetchrow("SELECT balance FROM btc_bankroll WHERE id=1")
+            import httpx
+            btc = await httpx.AsyncClient(timeout=5).get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
+            btc_price = float(btc.json()['price'])
+            bankroll = float(br['balance']) if br else 10000
+            total = int(trades['total']) if trades else 0
+            wins = int(trades['wins']) if trades else 0
+            pnl = float(trades['pnl']) if trades else 0
+            wr = (wins/total*100) if total > 0 else 0
+            from src.strategies.btc_v5_strategy import tg_send
+            await tg_send(
+                f"💓 BroBot V5 Heartbeat\n"
+                f"{'━'*24}\n"
+                f"BTC: ${btc_price:,.0f}\n"
+                f"Trades: {total} | Open: {open_t}\n"
+                f"Win Rate: {wr:.0f}% ({wins}/{total})\n"
+                f"P&L: ${pnl:+,.2f}\n"
+                f"Bankroll: ${bankroll:,.2f}\n"
+                f"{'━'*24}\n"
+                f"⚠️ PAPER MODE | Scans every 45s"
+            )
+            logger.info(f"💓 V5 heartbeat sent: {total} trades, ${pnl:+.2f} P&L")
+        except Exception as e:
+            logger.error(f"V5 heartbeat failed: {e}")
+
+    scheduler.add_job(v5_heartbeat, 'cron', hour='0,6,12,18', minute=0, timezone='Asia/Kolkata', id='v5_heartbeat', replace_existing=True)
+    logger.info("✅ V5 Strategy scheduled (scan: 45s, resolve: 2min, heartbeat: 4h, daily: 11PM)")
+    logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
 
     # ═══════════════════════════════════════════════════════════════
     # JC COPY TRADER — Monitor Jayson's levels every 10s
