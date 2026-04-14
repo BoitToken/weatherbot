@@ -1,5 +1,5 @@
 """
-BroBot FastAPI Server
+WeatherBot FastAPI Server
 API endpoints for dashboard + scheduler for data/signal loops.
 All endpoints query REAL database — no stubs, no mocks.
 """
@@ -31,6 +31,7 @@ scheduler = AsyncIOScheduler()
 
 # Track scan times
 _last_data_scan: Optional[datetime] = None
+_last_signal_scan: Optional[datetime] = None
 _startup_time: Optional[datetime] = None
 
 
@@ -89,15 +90,85 @@ _signal_loop = None
 _improvement_engine = None
 
 
+async def scheduled_data_scan():
+    """Run data collection cycle on schedule."""
+    global _last_data_scan
+    try:
+        from src.data.data_loop import run_single_cycle
+        logger.info("⏰ Scheduled data scan starting...")
+        await run_single_cycle()
+        _last_data_scan = datetime.utcnow()
+        logger.info(f"✅ Data scan complete at {_last_data_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"❌ Data scan failed: {e}\n{traceback.format_exc()}")
 
 
-
-
+async def scheduled_signal_scan():
+    """Run signal detection on schedule."""
+    global _last_signal_scan, _signal_loop
+    try:
+        if _signal_loop is None:
+            logger.warning("Signal loop not initialized, skipping")
+            return
+        logger.info("⏰ Scheduled signal scan starting...")
+        await _signal_loop.run_once()
+        _last_signal_scan = datetime.utcnow()
+        logger.info(f"✅ Signal scan complete at {_last_signal_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"❌ Signal scan failed: {e}\n{traceback.format_exc()}")
 
 
 # ═══════════════════════════════════════════════════════════════
+# SPORTS INTELLIGENCE — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_sports_loop = None
+_last_sports_scan: Optional[datetime] = None
 
 
+async def scheduled_sports_scan():
+    """Run sports intelligence cycle on schedule.
+    Protocols: P2 (Cross-Market Arb) + P4 (Line Movement) + P6 (Risk Mgmt)
+    See INTELLIGENCE.md for full protocol definitions.
+    """
+    global _last_sports_scan, _sports_loop
+    try:
+        if _sports_loop is None:
+            # Initialize on first run
+            from src.sports.sports_signal_loop import SportsSignalLoop
+            async_pool = get_async_pool()
+            _sports_loop = SportsSignalLoop(async_pool)
+            logger.info("✅ Sports signal loop initialized")
+        
+        logger.info("⏰ Scheduled sports scan starting...")
+        result = await _sports_loop.run_once()
+        _last_sports_scan = datetime.utcnow()
+        logger.info(f"✅ Sports scan complete: {result}")
+    except Exception as e:
+        logger.error(f"❌ Sports scan failed: {e}\n{traceback.format_exc()}")
+# ═══════════════════════════════════════════════════════════════
+
+
+async def scheduled_edge_monitor():
+    """Protocol 3: Edge Decay Monitoring.
+    Check all open positions — if edge < 2%, flag for exit.
+    See INTELLIGENCE.md Protocol 3.
+    """
+    try:
+        from src.execution.edge_monitor import EdgeMonitor
+        monitor = EdgeMonitor(get_async_pool())
+        alerts = await monitor.check_all_positions()
+
+        exit_needed = [a for a in alerts if a['recommendation'].startswith('EXIT')]
+        if exit_needed:
+            logger.warning(f"⚠️ {len(exit_needed)} positions need exit!")
+            # Log internally only — DO NOT spam subscribers with edge decay
+            # Subscribers only get: trade placed + trade resolved
+        else:
+            total = len(alerts)
+            if total > 0:
+                logger.info(f"✅ Edge monitor: {total} positions healthy")
+    except Exception as e:
+        logger.error(f"❌ Edge monitor failed: {e}")
 
 
 async def scheduled_settlement():
@@ -130,25 +201,400 @@ async def scheduled_settlement():
 
 # ═══════════════════════════════════════════════════════════════
 # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
+# ═══════════════════════════════════════════════════════════════
+_telegram_bot = None
 
 
+async def check_and_broadcast_signals():
+    """Check for new HIGH confidence signals and broadcast to subscribers."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    
+    try:
+        # Get signals created in last 3 minutes with >10% edge
+        async_pool = get_async_pool()
+        async with async_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT id, sport, market_id, market_title, polymarket_price, fair_value, 
+                           edge_pct, signal, confidence, reasoning, created_at
+                    FROM sports_signals
+                    WHERE created_at >= NOW() - INTERVAL '3 minutes'
+                      AND confidence = 'HIGH'
+                      AND edge_pct > 10
+                    ORDER BY created_at DESC
+                """)
+                rows = await cur.fetchall()
+                
+                for row in rows:
+                    signal_dict = {
+                        'id': row[0],
+                        'sport': row[1],
+                        'market_id': row[2],
+                        'market_title': row[3],
+                        'polymarket_price': float(row[4]) if row[4] else 0,
+                        'fair_value': float(row[5]) if row[5] else 0,
+                        'edge_pct': float(row[6]) if row[6] else 0,
+                        'signal': row[7],
+                        'confidence': row[8],
+                        'reasoning': row[9],
+                        'created_at': row[10],
+                        'sportsbooks': 'DraftKings, Pinnacle, Betfair',
+                        'source_count': 22,
+                        'start_time': 'TBD'
+                    }
+                    pass  # Signal alert broadcast disabled (noise)
+                    logger.info(f"📢 Broadcasted signal: {signal_dict['market_title'][:40]}")
+    except Exception as e:
+        logger.error(f"❌ Signal broadcast failed: {e}")
 
 
-
-
-
-
-
+async def daily_summary_task():
+    """Send daily summary at 9 AM IST — Sprint 2 enhanced version."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    # Gate: this is paper/sports summary, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 Daily summary suppressed (paper_notifications=false)")
+        return
+    try:
+        import pytz
+        IST = pytz.timezone('Asia/Calcutta')
+        now_ist = datetime.now(IST)
+        yesterday = (now_ist - timedelta(days=1)).date()
+        
+        # Yesterday's trades from trades table
+        yesterday_stats = await fetch_one("""
+            SELECT 
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl
+            FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+        """, (yesterday,))
+        
+        y_trades = int(yesterday_stats.get('trades', 0) or 0) if yesterday_stats else 0
+        y_wins = int(yesterday_stats.get('wins', 0) or 0) if yesterday_stats else 0
+        y_pnl = float(yesterday_stats.get('total_pnl', 0) or 0) if yesterday_stats else 0
+        y_win_rate = (y_wins / y_trades * 100) if y_trades > 0 else 0
+        
+        # Per-strategy breakdown
+        strat_rows = await fetch_all("""
+            SELECT strategy,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(pnl_usd), 0) as pnl
+            FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            GROUP BY strategy
+            ORDER BY pnl DESC
+        """, (yesterday,))
+        
+        # Best / worst trade
+        best = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            ORDER BY pnl_usd DESC LIMIT 1
+        """, (yesterday,))
+        worst = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE DATE(resolved_at) = %s AND status IN ('won', 'lost')
+            ORDER BY pnl_usd ASC LIMIT 1
+        """, (yesterday,))
+        
+        # Bankroll
+        bankroll = await fetch_one(
+            "SELECT total_usd, available_usd, in_positions_usd FROM bankroll ORDER BY timestamp DESC LIMIT 1"
+        )
+        bankroll_total = float(bankroll.get('total_usd', 0) or 0) if bankroll else 0
+        bankroll_available = float(bankroll.get('available_usd', 0) or 0) if bankroll else 0
+        bankroll_deployed = float(bankroll.get('in_positions_usd', 0) or 0) if bankroll else 0
+        
+        # Disabled strategies
+        disabled = await fetch_all("""
+            SELECT strategy, win_rate, total_trades FROM strategy_performance
+            WHERE is_active = false
+        """)
+        
+        # Build the message
+        pnl_emoji = '\U0001f4b0' if y_pnl >= 0 else '\U0001f534'
+        pnl_sign = '+' if y_pnl >= 0 else ''
+        
+        msg = (
+            f"\U0001f4ca <b>Daily Digest \u2014 {now_ist.strftime('%b %d, %Y')}</b>\n\n"
+            f"<b>Yesterday's Results:</b>\n"
+            f"Trades: {y_trades} | Win Rate: {y_win_rate:.0f}%\n"
+            f"{pnl_emoji} P&amp;L: {pnl_sign}${y_pnl:.2f}\n\n"
+        )
+        
+        # Strategy breakdown
+        if strat_rows:
+            msg += "<b>Per-Strategy:</b>\n"
+            for s in strat_rows:
+                s_pnl = float(s.get('pnl', 0) or 0)
+                s_emoji = '\u2705' if s_pnl >= 0 else '\u274c'
+                s_sign = '+' if s_pnl >= 0 else ''
+                s_wins = int(s.get('wins', 0) or 0)
+                s_trades = int(s.get('trades', 0) or 0)
+                msg += f"{s_emoji} {s['strategy']}: {s_sign}${s_pnl:.2f} ({s_wins}/{s_trades})\n"
+            msg += "\n"
+        
+        # Best/worst trades
+        if best and float(best.get('pnl_usd', 0) or 0) != 0:
+            msg += f"\U0001f3c6 <b>Best:</b> {(best.get('market_title',''))[:40]} (+${float(best.get('pnl_usd',0) or 0):.2f})\n"
+        if worst and float(worst.get('pnl_usd', 0) or 0) < 0:
+            msg += f"\U0001f4a5 <b>Worst:</b> {(worst.get('market_title',''))[:40]} (${float(worst.get('pnl_usd',0) or 0):.2f})\n"
+        if best or worst:
+            msg += "\n"
+        
+        # Bankroll
+        msg += (
+            f"\U0001f4b3 <b>Bankroll:</b>\n"
+            f"Total: ${bankroll_total:.2f} | Available: ${bankroll_available:.2f}\n"
+            f"Deployed: ${bankroll_deployed:.2f}\n"
+        )
+        
+        # Disabled strategies
+        if disabled:
+            msg += "\n\U0001f6a8 <b>Auto-Disabled:</b>\n"
+            for d in disabled:
+                d_wr = float(d.get('win_rate', 0) or 0) * 100
+                msg += f"\u26d4 {d['strategy']} ({d_wr:.1f}% over {d['total_trades']} trades)\n"
+        
+        # Send to all subscribers
+        subscribers = await _telegram_bot.get_all_subscribers()
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(
+                    chat_id=sub['chat_id'],
+                    text=msg,
+                    parse_mode='HTML'
+                )
+            except Exception as send_err:
+                logger.error(f"Failed to send daily digest to {sub['chat_id']}: {send_err}")
+        
+        logger.info(f"\U0001f4ca Daily digest sent to {len(subscribers)} subscribers")
+    except Exception as e:
+        logger.error(f"\u274c Daily summary failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
-
-
+# INTERNAL ARBITRAGE — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_last_internal_arb_scan: Optional[datetime] = None
 
 
 # ═══════════════════════════════════════════════════════════════
+# LATE WINDOW SCALPER — Global instance
+# ═══════════════════════════════════════════════════════════════
+_late_window_scalper = None
+
+async def scheduled_late_window_scan():
+    """Late Window Scalper: buy near-certain BTC contracts in final 15-20s of 5M windows."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        await _late_window_scalper.scan_and_scalp()
+    except Exception as e:
+        logger.error(f"❌ Late window scan failed: {e}\n{traceback.format_exc()}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# PENNY HUNTER — Scheduled Scan Function
+# ═══════════════════════════════════════════════════════════════
+_last_penny_scan: Optional[datetime] = None
+
+
+async def scheduled_penny_scan():
+    """Penny Hunter: scan for 1-3¢ contracts with asymmetric upside."""
+    global _last_penny_scan
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        await hunter.ensure_tables()
+
+        # Scan markets
+        pennies = await hunter.scan_penny_contracts()
+
+        # Score and filter
+        scored = []
+        for p in pennies:
+            score, reason = hunter.score_catalyst(p)
+            p['catalyst_score'] = score
+            p['catalyst_reason'] = reason
+            if score >= 3:
+                scored.append(p)
+
+        # Sort by score, take top 5 per scan
+        scored.sort(key=lambda x: -x['catalyst_score'])
+
+        executed = 0
+        executed_contracts = []
+        for contract in scored[:5]:
+            pos_id = await hunter.execute_penny_bet(contract)
+            if pos_id:
+                executed += 1
+                executed_contracts.append(contract)
+
+        # Check resolutions
+        resolved = await hunter.check_resolutions()
+        _last_penny_scan = datetime.utcnow()
+
+        # Penny bet placed — silent (only HIT/DEAD broadcasts, no entry noise)
+
+        # Broadcast resolutions — only if paper notifications are enabled
+        if _telegram_bot and resolved:
+            _tcfg = await get_trading_mode()
+            if should_send_paper_telegram(_tcfg):
+                for r in resolved:
+                    won = r.get('pnl_usd', 0) > 0
+                    emoji = "💰" if won else "💀"
+                    bp = r.get('buy_price', 0.01)
+                    msg = (
+                        f"{emoji} PENNY {'HIT!' if won else 'DEAD'}\n\n"
+                        f"{r['question'][:60]}\n"
+                        f"Bought at: {bp*100:.0f}¢\n"
+                        f"P&L: ${r['pnl_usd']:+.2f}\n"
+                        f"{'🎯 ' + str(int(1/bp)) + 'x RETURN!' if won else ''}"
+                    )
+                    try:
+                        subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+                        for sub in subscribers:
+                            try:
+                                await _telegram_bot.app.bot.send_message(chat_id=sub['chat_id'], text=msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            else:
+                logger.info(f"🔇 Penny resolutions suppressed (paper_notifications=false, {len(resolved)} resolved)")
+
+        logger.info(
+            f"🎰 Penny scan complete: {len(pennies)} found, {len(scored)} scored, "
+            f"{executed} executed, {len(resolved)} resolved"
+        )
+    except Exception as e:
+        logger.error(f"❌ Penny scan failed: {e}\n{traceback.format_exc()}")
+# ═══════════════════════════════════════════════════════════════
+
+
+async def scheduled_internal_arb_scan():
+    """Protocol 1: Internal Arbitrage (RISK-FREE).
+    Scan all Polymarket markets for YES+NO < $1.00.
+    Buy both sides for guaranteed profit after 2% fee.
+    See INTELLIGENCE.md Protocol 1. Priority: HIGHEST.
+    """
+    global _last_internal_arb_scan
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_combined()
+        _last_internal_arb_scan = datetime.utcnow()
+        if opps:
+            logger.info(f"💰 Found {len(opps)} internal arb opportunities!")
+            # Auto-execute paper trades for profitable ones
+            for opp in opps:
+                if opp['fee_adjusted_profit_pct'] > 0.5:
+                    await scanner.execute_internal_arb(
+                        opp['market_id'], opp['yes_price'], opp['no_price'],
+                        opp.get('recommended_stake', 25)
+                    )
+            # Broadcast ONLY executed trades to subscribers (not raw opportunities)
+            executed = [o for o in opps if o.get('fee_adjusted_profit_pct', 0) > 0.5]
+            if _telegram_bot and executed:
+                pass  # Internal arb broadcasts disabled (noise)
+        else:
+            logger.info("💰 Internal arb scan: no opportunities found")
+    except Exception as e:
+        logger.error(f"❌ Internal arb scan failed: {e}\n{traceback.format_exc()}")
+
+
+async def broadcast_internal_arb_trades(executed_opps):
+    """Broadcast EXECUTED internal arb trades to ALL subscribers."""
+    if not _telegram_bot:
+        return
+    
+    subscribers = await _telegram_bot.get_all_subscribers(instant_only=True)
+    
+    for opp in executed_opps[:3]:  # Max 3 per cycle
+        profit_usd = opp.get('recommended_stake', 25) * (opp['fee_adjusted_profit_pct'] / 100)
+        msg = (
+            f"🟢 RISK-FREE TRADE PLACED\n\n"
+            f"{opp['question'][:60]}\n\n"
+            f"Action: Buy YES ({opp['yes_price']:.2f}\u00a2) + NO ({opp['no_price']:.2f}\u00a2)\n"
+            f"Combined Cost: {opp['combined_cost']:.2f}\u00a2 (< $1.00)\n"
+            f"Guaranteed Profit: {opp['fee_adjusted_profit_pct']:.1f}% (${profit_usd:.2f})\n"
+            f"Stake: ${opp.get('recommended_stake', 25)}\n\n"
+            f"Rationale: YES + NO < $1.00 = guaranteed payout.\n"
+            f"Risk: None (both sides covered, profit locked at entry)."
+        )
+        for sub in subscribers:
+            try:
+                await _telegram_bot.app.bot.send_message(
+                    chat_id=sub['chat_id'], text=msg
+                )
+            except Exception as e:
+                logger.error(f"Failed to send arb trade to {sub['chat_id']}: {e}")
+# ═══════════════════════════════════════════════════════════════
+
+
+async def pre_match_alerts():
+    """Check for matches starting in 1 hour and send alerts."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    # Gate: sports are paper trades, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        return
+    try:
+        one_hour_later = datetime.utcnow() + timedelta(hours=1)
+        async_pool = get_async_pool()
+        
+        async with async_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Find matches starting in 55-65 minutes
+                await cur.execute("""
+                    SELECT event_name, sport, start_time
+                    FROM live_events
+                    WHERE status = 'scheduled'
+                      AND start_time BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'
+                """)
+                rows = await cur.fetchall()
+                
+                for row in rows:
+                    event_name, sport, start_time = row
+                    
+                    # Get our position for this match
+                    await cur.execute("""
+                        SELECT market_title, size_usd, signal, edge_pct
+                        FROM paper_trades_live
+                        WHERE market_title LIKE %s AND status = 'open'
+                        LIMIT 1
+                    """, (f"%{event_name}%",))
+                    trade_row = await cur.fetchone()
+                    
+                    match_dict = {
+                        'event_name': event_name,
+                        'sport': sport,
+                        'size_usd': float(trade_row[1]) if trade_row else 0,
+                        'pick': trade_row[2] if trade_row else 'No position',
+                        'edge_pct': float(trade_row[3]) if trade_row else 0,
+                        'odds_display': 'TBD',
+                        'source_count': 22
+                    }
+                    
+                    if trade_row:  # Only alert if we have a position
+                        await _telegram_bot.broadcast_pre_match_alert(match_dict)
+                        logger.info(f"⏰ Pre-match alert sent: {event_name}")
+    except Exception as e:
+        logger.error(f"❌ Pre-match alerts failed: {e}")
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -311,8 +757,163 @@ _btc_engine = None
 _last_btc_scan: Optional[datetime] = None
 _last_btc_resolution: Optional[datetime] = None
 
+# ═══════════════════════════════════════════════════════════════
+# MAKER ENGINE — Spread quoting for BTC 5M windows
+# ═══════════════════════════════════════════════════════════════
+_maker_engine = None
+_last_maker_quote: Optional[datetime] = None
 
 
+async def scheduled_maker_quote():
+    """
+    Maker Quote Engine: runs every 5 seconds.
+    Logic:
+      - If active 5M window AND >30s remaining: start or update quotes
+      - Check toxic flow → cancel if triggered
+      - If <10s remaining: cancel all orders
+    Only runs in live mode. Skips gracefully if engine not initialized.
+    """
+    global _maker_engine, _last_maker_quote, _btc_engine
+    try:
+        # Only run in live mode
+        _tcfg = await get_trading_mode()
+        if not is_live_mode(_tcfg):
+            return
+
+        # Lazy-init maker engine
+        if _maker_engine is None:
+            from src.execution.maker_engine import MakerEngine
+            _maker_engine = MakerEngine(get_async_pool(), dry_run=False)
+            await _maker_engine.ensure_tables()
+            logger.info("✅ MakerEngine initialized")
+
+        # Skip if paused for daily loss limit
+        if _maker_engine.is_paused:
+            return
+
+        # Find the active 5M window (from btc_signal_engine cache)
+        if _btc_engine is None:
+            return
+
+        # Get current active windows from DB
+        now = datetime.utcnow()
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            active_window = await conn.fetchrow("""
+                SELECT w.window_id, w.window_length, w.open_time, w.close_time,
+                       w.up_price, w.down_price, w.volume_usd,
+                       s.prediction, s.prob_up, s.confidence,
+                       s.f_price_delta, s.f_momentum, s.f_volume_imbalance,
+                       s.f_oracle_lead, s.f_book_imbalance
+                FROM btc_windows w
+                LEFT JOIN LATERAL (
+                    SELECT * FROM btc_signals
+                    WHERE window_id = w.window_id AND prediction != 'SKIP'
+                    ORDER BY confidence DESC LIMIT 1
+                ) s ON true
+                WHERE w.window_length = 5
+                  AND w.close_time > NOW()
+                  AND w.resolution IS NULL
+                ORDER BY w.close_time ASC
+                LIMIT 1
+            """)
+
+        if not active_window:
+            # No active 5M window — cancel any resting orders and clean up
+            if _maker_engine.is_quoting:
+                await _maker_engine.cancel_all_orders(expire_window=True)
+            return
+
+        close_time = active_window["close_time"]
+        # Ensure close_time is offset-aware
+        if close_time.tzinfo is None:
+            from datetime import timezone as _tz
+            close_time = close_time.replace(tzinfo=_tz.utc)
+        from datetime import timezone as _tz
+        now_aware = datetime.now(_tz.utc)
+        seconds_remaining = max(0, int((close_time - now_aware).total_seconds()))
+
+        window_id = active_window["window_id"]
+        up_price = float(active_window["up_price"] or 0.5)
+        down_price = float(active_window["down_price"] or 0.5)
+        fair_value = float(active_window["prob_up"] or 0.5)
+        prediction = active_window["prediction"]   # 'UP', 'DOWN', or None
+        confidence = float(active_window["confidence"] or 0.5)
+
+        # Extract token IDs from btc_windows (stored by signal engine scan)
+        up_token = ""
+        down_token = ""
+        async with pool.acquire() as conn:
+            token_row = await conn.fetchrow("""
+                SELECT token_id_up, token_id_down FROM btc_windows WHERE window_id = $1
+            """, window_id)
+        if token_row:
+            up_token = token_row["token_id_up"] or ""
+            down_token = token_row["token_id_down"] or ""
+
+        # If <10s remaining: cancel all and bail
+        if seconds_remaining < 10:
+            if _maker_engine.is_quoting:
+                logger.info(f"🔔 Window {window_id} closing in {seconds_remaining}s — cancelling all orders")
+                await _maker_engine.cancel_all_orders(expire_window=True)
+            return
+
+        # Toxic flow check (runs whether quoting or not, uses deque from engine)
+        if _maker_engine.is_quoting:
+            is_toxic = await _maker_engine.check_toxic_flow()
+            if is_toxic:
+                await _maker_engine.cancel_all_orders(expire_window=False)
+                _last_maker_quote = datetime.utcnow()
+                return
+
+        # We need token IDs to post orders. Try to get them via the scan.
+        # The btc_signal_engine stores token IDs in the signal metadata.
+        if not up_token or not down_token:
+            async with pool.acquire() as conn:
+                sig_row = await conn.fetchrow("""
+                    SELECT skip_reason FROM btc_signals
+                    WHERE window_id = $1 ORDER BY created_at DESC LIMIT 1
+                """, window_id)
+            # If token IDs unavailable, skip making for this window
+            if not up_token or not down_token:
+                logger.debug(f"Maker: no token IDs for window {window_id} — skipping")
+                return
+
+        # If >30s remaining: start or update quotes
+        if seconds_remaining > 30:
+            # Parse window epoch from window_id (format: btc-updown-5m-{epoch})
+            try:
+                window_epoch = int(window_id.split("-")[-1])
+            except Exception:
+                window_epoch = int(now_aware.timestamp())
+
+            if not _maker_engine.is_quoting:
+                await _maker_engine.start_quoting(
+                    window_epoch=window_epoch,
+                    window_length=5,
+                    fair_value=fair_value,
+                    up_token=up_token,
+                    down_token=down_token,
+                    size_per_side=_maker_engine.MAX_SIZE_PER_SIDE,
+                )
+            else:
+                await _maker_engine.update_quotes(
+                    new_fair_value=fair_value,
+                    seconds_remaining=seconds_remaining,
+                    confidence=confidence,
+                    predicted_side=prediction,
+                )
+
+        _last_maker_quote = datetime.utcnow()
+
+    except Exception as e:
+        logger.error(f"❌ scheduled_maker_quote failed: {e}")
+        # Safety: cancel all on any error
+        if _maker_engine:
+            try:
+                await _maker_engine.cancel_all_orders(expire_window=False)
+            except Exception:
+                pass
 
 
 async def scheduled_btc_signal_scan():
@@ -999,6 +1600,104 @@ async def scheduled_btc_intelligence_loop():
         logger.error(f'\u274c Intelligence Loop failed: {e}\n{traceback.format_exc()}')
 
 
+async def scheduled_penny_daily_report():
+    """Daily penny positions report at 9 PM IST — portfolio, timeline, risk."""
+    global _telegram_bot
+    if not _telegram_bot:
+        return
+    # Gate: penny trades are paper-only, suppress if paper_notifications=false
+    _tcfg = await get_trading_mode()
+    if not should_send_paper_telegram(_tcfg):
+        logger.info("🔇 Penny daily report suppressed (paper_notifications=false)")
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dbname='polyedge', user='node', host='localhost')
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT question, outcome, buy_price, quantity, size_usd, potential_payout,
+                catalyst_score, days_to_resolution, category, status, resolution, pnl_usd,
+                opened_at AT TIME ZONE 'Asia/Kolkata' as opened
+            FROM penny_positions ORDER BY days_to_resolution ASC
+        """)
+        positions = cur.fetchall()
+
+        # Decrement days_to_resolution daily
+        cur.execute("UPDATE penny_positions SET days_to_resolution = GREATEST(days_to_resolution - 1, 0) WHERE status = 'open'")
+        conn.commit()
+        conn.close()
+
+        open_pos = [p for p in positions if p[9] == 'open']
+        resolved_pos = [p for p in positions if p[9] == 'resolved']
+
+        if not open_pos and not resolved_pos:
+            return
+
+        total_invested = sum(float(p[4]) for p in open_pos)
+        total_upside = sum(float(p[5]) for p in open_pos)
+        avg_entry = sum(float(p[2]) for p in open_pos) / len(open_pos) if open_pos else 0
+        realized_pnl = sum(float(p[11] or 0) for p in resolved_pos)
+
+        lines = [
+            '\U0001f3b0 PENNY POSITIONS \u2014 Daily Report',
+            f'Date: {datetime.now().strftime("%Y-%m-%d %H:%M")} IST',
+            '',
+            '\u2501\u2501\u2501 PORTFOLIO \u2501\u2501\u2501',
+            f'Open: {len(open_pos)} | Resolved: {len(resolved_pos)}',
+            f'Capital at risk: ${total_invested:.2f}',
+            f'Potential payout: ${total_upside:.2f}',
+            f'Avg entry: {avg_entry*100:.1f}\u00a2',
+        ]
+
+        if resolved_pos:
+            won = len([p for p in resolved_pos if p[10] == 'yes'])
+            lines.append(f'Resolved: {won}W-{len(resolved_pos)-won}L | P&L: {"+ " if realized_pnl>=0 else ""}${realized_pnl:.2f}')
+
+        imminent = [p for p in open_pos if p[7] <= 4]
+        mid = [p for p in open_pos if 4 < p[7] <= 21]
+        far = [p for p in open_pos if p[7] > 21]
+
+        if imminent:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \u26a1 RESOLVING SOON (1-4d) \u2501\u2501\u2501')
+            for p in imminent:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | ${p[4]} \u2192 ${float(p[5]):.0f} | +${upside:.0f} | {p[7]}d')
+
+        if mid:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \U0001f4c5 MID-TERM (5-21d) \u2501\u2501\u2501')
+            for p in mid:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | +${upside:.0f} | {p[7]}d | {p[8]}')
+
+        if far:
+            lines.append('')
+            lines.append('\u2501\u2501\u2501 \U0001f5d3\ufe0f LONG-TERM (22d+) \u2501\u2501\u2501')
+            for p in far:
+                q = p[0][:55] + '...' if len(p[0]) > 55 else p[0]
+                upside = float(p[5]) * 0.98 - float(p[4])
+                lines.append(f'\u2022 {q}')
+                lines.append(f'  {float(p[2])*100:.1f}\u00a2 | +${upside:.0f} | {p[7]}d | {p[8]}')
+
+        lines.append('')
+        lines.append('\u2501\u2501\u2501 RISK SCENARIOS \u2501\u2501\u2501')
+        avg_payout = total_upside / len(open_pos) if open_pos else 0
+        lines.append(f'If 1/{len(open_pos)} hits: +${avg_payout*0.98 - total_invested:.0f}')
+        lines.append(f'If 2 hit: +${2*avg_payout*0.98 - total_invested:.0f}')
+        lines.append(f'If 0 hit: -${total_invested:.2f}')
+
+        msg = '\n'.join(lines)
+        subscribers = await _telegram_bot.get_all_subscribers(instant_only=False)
+        await _send_and_pin(_telegram_bot.bot_token, subscribers, msg, 'penny')
+        logger.info(f'\U0001f3b0 Penny daily report sent + pinned to {len(subscribers)} subscribers')
+    except Exception as e:
+        logger.error(f'\u274c Penny daily report failed: {e}\n{traceback.format_exc()}')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1006,20 +1705,20 @@ async def scheduled_btc_intelligence_loop():
 # ═══════════════════════════════════════════════════════════════
 _v4_strategy = None
 
-_v5_strategy = None
-
-async def scheduled_v5_paper_scan():
-    """V5 Strategy: Signal engine direction + JC confluence + risk gates. Paper only."""
-    global _v5_strategy, _btc_engine
+async def scheduled_v4_paper_scan():
+    """V4 Strategy: 10-point confluence scan every 45s. Paper mode only."""
+    global _v4_strategy, _btc_engine
     try:
-        if _v5_strategy is None:
-            from src.strategies.btc_v5_strategy import BTCV5Strategy
-            _v5_strategy = BTCV5Strategy(get_async_pool())
-            logger.info("✅ V5 Strategy initialized")
+        if _v4_strategy is None:
+            from src.strategies.btc_v4_strategy import BTCV4Strategy
+            _v4_strategy = BTCV4Strategy(get_async_pool())
+            logger.info("✅ V4 Strategy initialized")
 
+        # Get current BTC windows from signal engine
         if _btc_engine is None:
             return
 
+        # Get active windows
         pool = get_async_pool()
         async with pool.acquire() as conn:
             windows = await conn.fetch("""
@@ -1050,98 +1749,55 @@ async def scheduled_v5_paper_scan():
             if existing:
                 continue
 
-            # ══ Get signal engine prediction (7 factors) ═════════════════
-            try:
-                btc_data = await _btc_engine.get_btc_price()
-                trades = await _btc_engine.get_btc_trades(limit=200)
-                engine_factors = await _btc_engine.compute_factors(
-                    {"window_id": window_id, "up_price": up_price, "down_price": down_price,
-                     "btc_open": float(w['btc_open'] or 0), "seconds_remaining": seconds_remaining,
-                     "window_length": 5},
-                    btc_data, trades)
-                prediction, prob_up, confidence = _btc_engine.predict(engine_factors)
-            except Exception as e:
-                logger.warning(f"V5 signal engine error for {window_id}: {e}")
-                continue
-
-            if prediction == 'SKIP':
-                logger.info(f"V5 scan {window_id}: Signal engine SKIP")
-                continue
-
-            # ══ V5 MANDATORY RISK GATES ══════════════════════════════════
-            risk = await _v5_strategy.check_risk_gates()
-            if not risk['ok']:
-                logger.warning(f"🛑 V5 RISK BLOCKED: {risk['reason']}")
-                continue
-
-            # ══ V5 EVALUATE (engine direction + JC confluence) ═══════════
-            btc_price = btc_data.get('price', 0) if btc_data else 0
-            result = await _v5_strategy.evaluate(
+            # Evaluate V4 strategy
+            result = await _v4_strategy.evaluate(
                 window_id=window_id,
                 up_price=up_price,
                 down_price=down_price,
-                seconds_remaining=seconds_remaining,
-                engine_prediction=prediction,
-                engine_prob_up=prob_up,
-                engine_confidence=confidence,
-                engine_factors=engine_factors,
-                btc_price=btc_price
+                seconds_remaining=seconds_remaining
             )
 
-            logger.info(f"V5 scan {window_id}: {result.get('reason', 'no reason')}")
+            score = result.get('score', 0)
+            logger.info(f"V4 scan {window_id}: {result.get('reason')}")
 
             if result.get('should_trade'):
                 direction = result['direction']
                 stake = result['stake']
                 token_price = result['token_price']
-                jc_label = result.get('jc_level', 'none')
-                factors = result.get('factors', {})
-                bankroll = risk.get('bankroll', 10000)
-                score = result.get('score', 0)
-                rr = result.get('rr', 0)
+                jc = result.get('jc_level', {})
 
-                import json as _json
+                # Log paper trade
                 async with pool.acquire() as conn:
                     await conn.execute("""
                         INSERT INTO paper_trades
                         (window_id, direction, token_price, stake_usd, confluence_score,
                          factors_json, jc_level, strategy_version)
-                        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,'V5')
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,'V4')
                     """, window_id, direction, token_price, stake, score,
-                         _json.dumps(factors), str(jc_label))
+                         str(result.get('factors', {})),
+                         jc.get('label', 'unknown') if jc else 'unknown')
 
-                logger.info(f"📝 V5 PAPER: {direction} | {token_price*100:.1f}c | ${stake} | Score {score}")
+                logger.info(f"📝 V4 PAPER TRADE: {direction} | {token_price*100:.1f}c | ${stake} | Score {score}/10 | {jc.get('label','') if jc else ''}")
 
-                from src.strategies.btc_v5_strategy import tg_send as v5_tg
-                engine_info = f"prob_up={prob_up:.2f} conf={confidence:.2f}"
-                await v5_tg(
-                    f"📊 V5 PAPER TRADE\n"
-                    f"{'─'*28}\n"
-                    f"{'🟢 UP' if direction=='UP' else '🔴 DOWN'} at {token_price*100:.1f}¢ | ${stake:.2f}\n"
-                    f"BTC: ${btc_price:,.0f} | R:R {rr:.1f}:1\n"
-                    f"🎯 Engine: {engine_info}\n"
-                    f"🔮 JC: {jc_label}\n"
-                    f"{'─'*28}\n"
-                    f"💰 Bankroll: ${bankroll:,.2f}\n"
-                    f"⚠️ PAPER MODE"
-                )
+                # Send Telegram alert
+                if _telegram_bot:
+                    try:
+                        msg = (
+                            f"📊 V4 PAPER TRADE\n"
+                            f"{'🟢 UP' if direction=='UP' else '🔴 DOWN'} | {token_price*100:.1f}¢ entry\n"
+                            f"Score: {score}/10 | Stake: ${stake:.0f}\n"
+                            f"JC Level: {jc.get('label','') if jc else 'n/a'}\n"
+                            f"Window: {window_id}\n"
+                            f"⚠️ PAPER MODE — not real money"
+                        )
+                        subs = ['1656605843']
+                        for chat_id in subs:
+                            await _telegram_bot.bot.send_message(chat_id=chat_id, text=msg)
+                    except Exception as _te:
+                        logger.warning(f"V4 Telegram alert failed: {_te}")
 
     except Exception as e:
-        logger.error(f"❌ V5 paper scan failed: {e}")
-
-
-async def scheduled_v5_resolution():
-    """V5: Resolve open paper trades every 2 min. Score win/loss, update bankroll, send Telegram."""
-    global _v5_strategy
-    try:
-        if _v5_strategy is None:
-            return
-        resolved = await _v5_strategy.resolve_open_trades()
-        if resolved:
-            summaries = [f"{r['direction']}->{'W' if r['won'] else 'L'} ${r['pnl']:+.2f}" for r in resolved]
-            logger.info(f"✅ V5 resolved {len(resolved)} trades: {summaries}")
-    except Exception as e:
-        logger.error(f"❌ V5 resolution failed: {e}")
+        logger.error(f"❌ V4 paper scan failed: {e}")
 
 
 async def scheduled_v4_daily_report():
@@ -1155,7 +1811,7 @@ async def scheduled_v4_daily_report():
                        resolution, won, simulated_pnl, created_at
                 FROM paper_trades
                 WHERE created_at > NOW() - INTERVAL '7 days'
-                AND strategy_version IN ('V4', 'V5')
+                AND strategy_version = 'V4'
             """)
 
         if not trades:
@@ -1509,12 +2165,27 @@ async def scheduled_btc_resolution_check():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage app lifecycle: startup and shutdown."""
-    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine, _telegram_bot
+    global _last_data_scan, _startup_time, _signal_loop, _improvement_engine, _telegram_bot, _leader_poller
 
-    logger.info("🚀 BroBot starting...")
+    logger.info("🚀 WeatherBot starting...")
     _startup_time = datetime.utcnow()
     await init_tables()
 
+    # Initialize signal loop
+    try:
+        from src.signals.signal_loop import SignalLoop
+        from src.data.city_map import CITY_TO_ICAO
+        async_pool = get_async_pool()
+        _signal_loop = SignalLoop(
+            db_pool=async_pool,
+            city_map=CITY_TO_ICAO,
+            anthropic_api_key=config.ANTHROPIC_API_KEY,
+            min_edge_for_claude=float(getattr(config, 'MIN_EDGE_ALERT', 0.15)),
+            min_edge_for_trade=float(getattr(config, 'MIN_EDGE_AUTO_TRADE', 0.25)),
+        )
+        logger.info("✅ Signal loop initialized")
+    except Exception as e:
+        logger.error(f"⚠️ Signal loop init failed (will retry): {e}")
     
     # Initialize improvement engine
     try:
@@ -1525,6 +2196,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ Improvement engine init failed: {e}")
 
+    # Run initial data fetch
+    try:
+        from src.data.data_loop import run_single_cycle
+        await run_single_cycle()
+        _last_data_scan = datetime.utcnow()
+        logger.info(f"✅ Initial data fetch complete: {_last_data_scan.isoformat()}")
+    except Exception as e:
+        logger.error(f"⚠️ Initial data fetch failed: {e}")
 
     # Initialize btc_bankroll if empty
     try:
@@ -1567,29 +2246,87 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ Telegram bot init failed: {e}")
     
+    # ═══════════════════════════════════════════════════════════════
+    # LEADER STRATEGY — Copy-Trading Poller
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        from src.leader_poller import LeaderPoller
+        async_pool = get_async_pool()
+        _leader_poller = LeaderPoller(
+            db_pool=async_pool,
+            telegram_bot=_telegram_bot if '_telegram_bot' in dir() else None
+        )
+        asyncio.create_task(_leader_poller.start())
+        logger.info("✅ Leader Poller started (tracking 0x4924...3782)")
+    except Exception as e:
+        logger.error(f"⚠️ Leader Poller init failed: {e}")
     
     # Start scheduler
+    scheduler.add_job(scheduled_data_scan, 'interval', minutes=15, id='data_loop', replace_existing=True)
+    scheduler.add_job(scheduled_signal_scan, 'interval', minutes=2, id='signal_loop', replace_existing=True)
     
+    # ═══════════════════════════════════════════════════════════════
+    # SPORTS INTELLIGENCE — Scheduled Jobs
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_sports_scan, 'interval', seconds=45, id='sports_loop', replace_existing=True)
     
+    # ═══════════════════════════════════════════════════════════════
+    # TELEGRAM SUBSCRIBER BOT — Scheduled Jobs
+    # ═══════════════════════════════════════════════════════════════
+    if _telegram_bot:
+        # DISABLED: sports signal broadcasts (noise)
+        # scheduler.add_job(check_and_broadcast_signals, ...)
+        # DISABLED: old sports daily summary (replaced by BTC daily)
+        # scheduler.add_job(daily_summary_task, ...)
+        # DISABLED: pre-match sports alerts (noise)
+        # scheduler.add_job(pre_match_alerts, ...)
+        logger.info("✅ Telegram broadcast jobs scheduled")
     
+    # ═══════════════════════════════════════════════════════════════
+    # TRADE SETTLEMENT — Auto-resolve completed matches every 5 min
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_settlement, 'interval', minutes=1, id='settlement_loop', replace_existing=True)
+    logger.info("✅ Settlement loop scheduled (every 5 min)")
     
+    # ═══════════════════════════════════════════════════════════════
+    # EDGE MONITOR — Check open positions for edge decay every 5 min
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_edge_monitor, 'interval', minutes=1, id='edge_monitor', replace_existing=True)
+    logger.info("✅ Edge monitor scheduled (every 5 min)")
     
+    # ═══════════════════════════════════════════════════════════════
+    # INTERNAL ARBITRAGE — Primary strategy, scan every 2 minutes
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_internal_arb_scan, 'interval', seconds=30, id='internal_arb', replace_existing=True)
+    logger.info("✅ Internal arb scanner scheduled (every 2 min)")
     
+    # ═══════════════════════════════════════════════════════════════
+    # PENNY HUNTER — Scan every 30 minutes for 1-3¢ contracts
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_penny_scan, 'interval', minutes=30, id='penny_hunter', replace_existing=True)
+    logger.info("✅ Penny Hunter scheduled (every 30 min)")
 
+    # ═══════════════════════════════════════════════════════════════
+    # LATE WINDOW SCALPER — Buy near-certain contracts in final 15-20s
+    # ═══════════════════════════════════════════════════════════════
+    scheduler.add_job(scheduled_late_window_scan, 'interval', seconds=2, id='late_window_scalper', replace_existing=True)
+    logger.info("✅ Late Window Scalper scheduled (every 2s)")
     
     # ═══════════════════════════════════════════════════════════════
     # BTC SIGNAL ENGINE — Scan every 45 seconds, resolve every 2 min
     # ═══════════════════════════════════════════════════════════════
     scheduler.add_job(scheduled_btc_signal_scan, 'interval', seconds=45, id='btc_signal', replace_existing=True)
     scheduler.add_job(scheduled_btc_resolution_check, 'interval', minutes=2, id='btc_resolution', replace_existing=True)
+    scheduler.add_job(scheduled_maker_quote, 'interval', seconds=5, id='maker_quote', replace_existing=True)
+    logger.info("✅ Maker Engine scheduled (every 5s)")
     scheduler.add_job(scheduled_btc_hourly_summary, 'cron', minute=0, timezone='Asia/Kolkata', id='btc_hourly', replace_existing=True)
     scheduler.add_job(scheduled_btc_intelligence_loop, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_intelligence', replace_existing=True)
     scheduler.add_job(scheduled_btc_daily_strategy_report, 'cron', hour=23, minute=30, timezone='Asia/Kolkata', id='btc_daily', replace_existing=True)
-    # V5 Strategy — 10-point confluence + mandatory guardrails + resolution
-    scheduler.add_job(scheduled_v5_paper_scan, 'interval', seconds=45, id='btc_v5_paper', replace_existing=True)
-    scheduler.add_job(scheduled_v5_resolution, 'interval', minutes=2, id='btc_v5_resolve', replace_existing=True)
-    scheduler.add_job(scheduled_v4_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_v5_daily', replace_existing=True)
-    logger.info("✅ V5 Strategy scheduled (scan: 45s, resolve: 2min, daily: 11PM)")
+    scheduler.add_job(scheduled_penny_daily_report, 'cron', hour=21, minute=0, timezone='Asia/Kolkata', id='penny_daily', replace_existing=True)
+    # V4 Strategy — 10-point confluence paper trading
+    scheduler.add_job(scheduled_v4_paper_scan, 'interval', seconds=45, id='btc_v4_paper', replace_existing=True)
+    scheduler.add_job(scheduled_v4_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='btc_v4_daily', replace_existing=True)
+    logger.info("✅ BTC V4 Strategy (paper) scheduled (scan: 45s, daily report: 11PM IST)")
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min, hourly: on-the-hour)")
 
     # ═══════════════════════════════════════════════════════════════
@@ -1602,11 +2339,7 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(run_jc_copy_trader, 'interval', seconds=10, id='jc_copy_trader', replace_existing=True)
         scheduler.add_job(send_jc_hourly_report, 'cron', minute=0, timezone='Asia/Kolkata', id='jc_hourly', replace_existing=True)
         scheduler.add_job(send_jc_daily_report, 'cron', hour=23, minute=0, timezone='Asia/Kolkata', id='jc_daily', replace_existing=True)
-        # JC Discord reporter — 15min updates, hourly levels, level proximity alerts, daily recap
-        # JC reporter: ONLY forward Jayson's actual trade signals/charts (no periodic updates)
-        # 15min, hourly, proximity alerts, daily recap — all REMOVED per CEO directive
-        # Live signal forwarding happens in ghost-watcher on_message → jc_reporter.forward_new_jc_message()
-        logger.info("✅ JC Reporter scheduled (15min updates, hourly levels, 2min proximity alerts, daily 11PM)")
+        logger.info("✅ JC Copy Trader scheduled (trade: 10s, hourly report, daily at 11PM)")
     except Exception as e:
         logger.error(f"❌ JC Copy Trader failed to load: {e}")
     
@@ -1683,8 +2416,8 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Learning engine jobs scheduled (optimize: daily 4AM IST, auto-disable: 6h, weekly: Sun 9AM IST)")
     
     scheduler.start()
-    logger.info("✅ Scheduler started (btc_signal: 45s, btc_resolution: 2min, v4_paper: 45s, btc_hourly, btc_intelligence, btc_daily, jc_copy_trader, jc_hourly)")
-    logger.info("✅ BroBot ready")
+    logger.info("✅ Scheduler started (data: 30min, signals: 5min, sports: 3min, settlement: 5min, learning: enabled, telegram: enabled)")
+    logger.info("✅ WeatherBot ready")
 
     yield
 
@@ -1692,6 +2425,9 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 WeatherBot shutting down...")
     scheduler.shutdown(wait=False)
     
+    # Shutdown Leader Poller
+    if '_leader_poller' in globals() and _leader_poller:
+        await _leader_poller.stop()
     
     # Shutdown Telegram bot
     if _telegram_bot:
@@ -1702,7 +2438,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="BroBot — PolyEdge",
+    title="WeatherBot — PolyEdge",
     version="0.2.0",
     lifespan=lifespan
 )
@@ -1732,20 +2468,221 @@ except Exception as e:
 # Paper Trades
 # =============================================================================
 
+@app.get("/api/paper-trades")
+async def get_paper_trades():
+    """Return all paper trades from paper_trades_live table."""
+    try:
+        query = """
+            SELECT id, match_name, sport, team_backed, entry_price, fair_value,
+                   edge_pct, position_size, shares, strategy, books_consensus,
+                   book_count, status, exit_price, pnl, match_time, entry_at,
+                   resolved_at, notes
+            FROM paper_trades_live
+            ORDER BY entry_at DESC
+        """
+        results = await fetch_all(query)
+        trades = [{
+            "id": r['id'],
+            "match_name": r['match_name'],
+            "sport": r['sport'],
+            "team_backed": r['team_backed'],
+            "entry_price": float(r['entry_price']) if r['entry_price'] else 0,
+            "fair_value": float(r['fair_value']) if r['fair_value'] else 0,
+            "edge_pct": float(r['edge_pct']) if r['edge_pct'] else 0,
+            "position_size": float(r['position_size']) if r['position_size'] else 0,
+            "shares": float(r['shares']) if r['shares'] else 0,
+            "strategy": r['strategy'],
+            "books_consensus": r['books_consensus'],
+            "book_count": r['book_count'],
+            "status": r['status'],
+            "exit_price": float(r['exit_price']) if r['exit_price'] else None,
+            "pnl": float(r['pnl']) if r['pnl'] else None,
+            "match_time": str(r['match_time']) if r['match_time'] else None,
+            "entry_at": str(r['entry_at']) if r['entry_at'] else None,
+            "resolved_at": str(r['resolved_at']) if r['resolved_at'] else None,
+            "notes": r['notes'],
+        } for r in results]
+        return {"trades": trades, "count": len(trades)}
+    except Exception as e:
+        logger.error(f"Paper trades error: {e}")
+        return {"trades": [], "count": 0}
 
 
 # =============================================================================
 # Polymarket Leaderboard API
 # =============================================================================
 
+@app.get("/api/leaderboard")
+async def get_polymarket_leaderboard(
+    category: str = "OVERALL",
+    timePeriod: str = "MONTH", 
+    orderBy: str = "PNL",
+    limit: int = 10
+):
+    """Proxy Polymarket leaderboard API — top traders by PnL or volume."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://data-api.polymarket.com/v1/leaderboard",
+                params={
+                    "category": category.upper(),
+                    "timePeriod": timePeriod.upper(),
+                    "orderBy": orderBy.upper(),
+                    "limit": min(limit, 50),
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            traders = []
+            for t in (data if isinstance(data, list) else []):
+                name = t.get("userName") or t.get("xUsername") or (t.get("proxyWallet", "")[:10] + "...")
+                traders.append({
+                    "rank": t.get("rank"),
+                    "name": name,
+                    "wallet": t.get("proxyWallet", ""),
+                    "pnl": float(t.get("pnl", 0)),
+                    "volume": float(t.get("vol", 0)),
+                    "profileImage": t.get("profileImage"),
+                    "verified": bool(t.get("verifiedBadge")),
+                    "xUsername": t.get("xUsername"),
+                })
+            
+            return {"traders": traders, "category": category, "timePeriod": timePeriod, "orderBy": orderBy}
+    except Exception as e:
+        logger.error(f"Leaderboard error: {e}")
+        return {"traders": [], "error": str(e)}
 
 
 # =============================================================================
 # Polymarket Gamma API Proxies
 # =============================================================================
 
+@app.get("/api/polymarket/events")
+async def proxy_polymarket_events(
+    limit: int = 20,
+    active: bool = True,
+    closed: bool = False,
+    tag: str = None,
+    order: str = "volume",
+    ascending: bool = False
+):
+    """Proxy Polymarket Gamma events API."""
+    import httpx
+    try:
+        params = {
+            "limit": min(limit, 50),
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if tag and tag != 'all':
+            params["tag"] = tag
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/events", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            events = []
+            for e in (data if isinstance(data, list) else []):
+                markets = e.get("markets", [])
+                parsed_markets = []
+                for m in markets:
+                    prices_str = m.get("outcomePrices", "[]")
+                    try:
+                        prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                    except:
+                        prices = []
+                    parsed_markets.append({
+                        "id": m.get("id"),
+                        "question": m.get("question"),
+                        "yes_price": float(prices[0]) if len(prices) > 0 else 0.5,
+                        "no_price": float(prices[1]) if len(prices) > 1 else 0.5,
+                        "volume": float(m.get("volume", 0) or 0),
+                        "image": m.get("image"),
+                        "active": m.get("active", True),
+                        "closed": m.get("closed", False),
+                        "endDate": m.get("endDate"),
+                        "outcomes": m.get("outcomes"),
+                        "slug": m.get("slug"),
+                    })
+                
+                events.append({
+                    "id": e.get("id"),
+                    "title": e.get("title"),
+                    "description": (e.get("description") or "")[:300],
+                    "image": e.get("image"),
+                    "icon": e.get("icon"),
+                    "volume": float(e.get("volume", 0) or 0),
+                    "active": e.get("active", True),
+                    "closed": e.get("closed", False),
+                    "markets": parsed_markets,
+                    "market_count": len(parsed_markets),
+                })
+            
+            return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.error(f"Polymarket events proxy error: {e}")
+        return {"events": [], "error": str(e)}
 
 
+@app.get("/api/polymarket/markets")
+async def proxy_polymarket_markets(
+    limit: int = 50,
+    active: bool = True,
+    closed: bool = False,
+    tag: str = None,
+    order: str = "volume",
+    ascending: bool = False
+):
+    """Proxy Polymarket Gamma markets API."""
+    import httpx
+    try:
+        params = {
+            "limit": min(limit, 100),
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if tag and tag != 'all':
+            params["tag"] = tag
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/markets", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            markets = []
+            for m in (data if isinstance(data, list) else []):
+                prices_str = m.get("outcomePrices", "[]")
+                try:
+                    prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                except:
+                    prices = []
+                markets.append({
+                    "id": m.get("id"),
+                    "question": m.get("question"),
+                    "yes_price": float(prices[0]) if len(prices) > 0 else 0.5,
+                    "no_price": float(prices[1]) if len(prices) > 1 else 0.5,
+                    "volume": float(m.get("volume", 0) or 0),
+                    "image": m.get("image"),
+                    "icon": m.get("icon"),
+                    "active": m.get("active", True),
+                    "closed": m.get("closed", False),
+                    "endDate": m.get("endDate"),
+                    "outcomes": m.get("outcomes"),
+                    "slug": m.get("slug"),
+                    "description": (m.get("description") or "")[:200],
+                })
+            
+            return {"markets": markets, "count": len(markets)}
+    except Exception as e:
+        logger.error(f"Polymarket markets proxy error: {e}")
+        return {"markets": [], "error": str(e)}
 
 
 # =============================================================================
@@ -1753,7 +2690,6 @@ except Exception as e:
 # =============================================================================
 
 @app.get("/api/health")
-@app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
@@ -1761,6 +2697,7 @@ async def health_check():
         "version": "0.2.0",
         "scheduler": scheduler.running,
         "last_data_scan": _last_data_scan.isoformat() if _last_data_scan else None,
+        "last_signal_scan": _last_signal_scan.isoformat() if _last_signal_scan else None,
     }
 
 
@@ -1794,6 +2731,7 @@ async def bot_status():
         "running": scheduler.running,
         "mode": getattr(config, 'MODE', 'paper'),
         "last_data_scan": _last_data_scan.isoformat() if _last_data_scan else None,
+        "last_signal_scan": _last_signal_scan.isoformat() if _last_signal_scan else None,
         "uptime_seconds": int(uptime),
         "signal_loop_ready": _signal_loop is not None,
         "auto_trade": auto_trade_stats,
@@ -1804,56 +2742,317 @@ async def bot_status():
 # Manual Triggers
 # =============================================================================
 
+@app.post("/api/bot/scan-now")
+async def trigger_scan():
+    """Manually trigger a full data + signal scan."""
+    results = {}
+    try:
+        await scheduled_data_scan()
+        results["data_scan"] = "completed"
+    except Exception as e:
+        results["data_scan"] = f"failed: {str(e)}"
+
+    try:
+        await scheduled_signal_scan()
+        results["signal_scan"] = "completed"
+    except Exception as e:
+        results["signal_scan"] = f"failed: {str(e)}"
+
+    return {"status": "scan_triggered", "results": results, "timestamp": datetime.utcnow().isoformat()}
 
 
 # =============================================================================
 # METAR Data
 # =============================================================================
 
+@app.get("/api/metar/latest")
+async def get_latest_metar():
+    query = """
+        SELECT DISTINCT ON (station_icao)
+            station_icao, temperature_c, dewpoint_c,
+            wind_speed_kt, wind_dir, raw_metar,
+            observation_time, created_at
+        FROM metar_readings
+        ORDER BY station_icao, observation_time DESC
+    """
+    results = await fetch_all(query)
+    return {"data": results, "count": len(results)}
 
 
+@app.get("/api/metar/{icao}")
+async def get_metar_history(icao: str, hours: int = 24):
+    icao = icao.upper()
+    since = datetime.utcnow() - timedelta(hours=hours)
+    query = """
+        SELECT station_icao, temperature_c, dewpoint_c,
+               wind_speed_kt, raw_metar,
+               observation_time
+        FROM metar_readings
+        WHERE station_icao = %s AND observation_time >= %s
+        ORDER BY observation_time DESC
+    """
+    results = await fetch_all(query, (icao, since))
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No data for {icao}")
+    return {"station": icao, "data": results, "count": len(results)}
 
 
 # =============================================================================
 # Markets — queries REAL weather_markets table
 # =============================================================================
 
+@app.get("/api/markets")
+async def get_active_markets():
+    query = """
+        SELECT market_id, title, city, station_icao, threshold_type,
+               threshold_value, threshold_unit, resolution_date,
+               yes_price, no_price, volume_usd, liquidity_usd,
+               last_updated, active
+        FROM weather_markets
+        WHERE active = true
+        ORDER BY last_updated DESC
+    """
+    results = await fetch_all(query)
+    return {"data": results, "count": len(results)}
 
 
 # =============================================================================
 # Signals — queries REAL signals table
 # =============================================================================
 
+@app.get("/api/signals")
+async def get_signals(limit: int = 50, strategy: str = None):
+    """Get signals, optionally filtered by strategy"""
+    if strategy:
+        query = """
+            SELECT id, market_id, station_icao, city, side,
+                   our_probability, market_price, edge, confidence,
+                   claude_reasoning, was_traded, skip_reason, strategy, created_at
+            FROM signals
+            WHERE strategy = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (strategy, limit))
+    else:
+        query = """
+            SELECT id, market_id, station_icao, city, side,
+                   our_probability, market_price, edge, confidence,
+                   claude_reasoning, was_traded, skip_reason, strategy, created_at
+            FROM signals
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
+    return {"data": results, "count": len(results)}
 
 
+@app.get("/api/signals/pending")
+async def get_pending_signals():
+    query = """
+        SELECT id, market_id, station_icao, city, side,
+               our_probability, market_price, edge, confidence,
+               claude_reasoning, strategy, created_at
+        FROM signals
+        WHERE was_traded = false AND confidence IN ('HIGH', 'MEDIUM')
+        ORDER BY edge DESC
+    """
+    results = await fetch_all(query)
+    return {"data": results, "count": len(results)}
 
 
 # =============================================================================
 # Dual Strategy Endpoints
 # =============================================================================
 
+@app.get("/api/strategy/comparison")
+async def get_strategy_comparison():
+    """Side-by-side performance comparison of Strategy A vs Strategy B"""
+    try:
+        # Get performance metrics for both strategies
+        query = """
+            SELECT
+                strategy,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(100.0 * SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) as win_rate,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                COALESCE(AVG(edge_at_entry), 0) as avg_edge,
+                COUNT(CASE WHEN status = 'open' THEN 1 END) as open_positions
+            FROM trades
+            WHERE strategy IN ('forecast_edge', 'intelligence_layer')
+            GROUP BY strategy
+        """
+        results = await fetch_all(query)
+        
+        # Format as dict
+        comparison = {
+            "forecast_edge": {
+                "name": "Strategy A: Forecast Edge",
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "avg_edge": 0,
+                "open_positions": 0
+            },
+            "intelligence_layer": {
+                "name": "Strategy B: Intelligence Layer",
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "avg_edge": 0,
+                "open_positions": 0
+            }
+        }
+        
+        for row in results:
+            strategy = row['strategy']
+            if strategy in comparison:
+                comparison[strategy].update({
+                    "total_trades": row['total_trades'],
+                    "wins": row['wins'],
+                    "losses": row['losses'],
+                    "win_rate": float(row['win_rate'] or 0),
+                    "total_pnl": float(row['total_pnl'] or 0),
+                    "avg_edge": float(row['avg_edge'] or 0),
+                    "open_positions": row['open_positions']
+                })
+        
+        return {
+            "strategies": comparison,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Strategy comparison error: {e}")
+        return {"strategies": {}, "error": str(e)}
 
 
+@app.get("/api/strategy/a/signals")
+async def get_strategy_a_signals(limit: int = 20):
+    """Latest Strategy A (Forecast Edge) signals"""
+    return await get_signals(limit=limit, strategy='forecast_edge')
 
 
+@app.get("/api/strategy/b/signals")
+async def get_strategy_b_signals(limit: int = 20):
+    """Latest Strategy B (Intelligence Layer) signals"""
+    return await get_signals(limit=limit, strategy='intelligence_layer')
 
 
+@app.get("/api/positions/open")
+async def get_open_positions():
+    """All open positions with current P/L"""
+    query = """
+        SELECT
+            p.id, p.market_id, p.market_title, p.city, p.strategy,
+            p.side, p.entry_price, p.current_price, p.size_usd,
+            p.entered_at,
+            CASE
+                WHEN p.side = 'YES' THEN (p.current_price - p.entry_price) * p.size_usd / p.entry_price
+                ELSE (p.entry_price - p.current_price) * p.size_usd / p.entry_price
+            END as unrealized_pnl,
+            w.yes_price, w.no_price
+        FROM positions p
+        LEFT JOIN weather_markets w ON p.market_id = w.market_id
+        WHERE p.status = 'open'
+        ORDER BY p.entered_at DESC
+    """
+    try:
+        results = await fetch_all(query)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Open positions error: {e}")
+        return {"data": [], "count": 0}
 
 
+@app.get("/api/noaa/forecast/{city}")
+async def get_noaa_forecast(city: str):
+    """Get NOAA forecast for a city"""
+    try:
+        from src.data.noaa_forecast import fetch_noaa_forecast
+        forecast = await fetch_noaa_forecast(city)
+        if not forecast:
+            raise HTTPException(status_code=404, detail=f"No NOAA forecast for {city} (may not be in US)")
+        return forecast
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"NOAA forecast error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
 # Trades — correct column names from actual schema
 # =============================================================================
 
+@app.get("/api/trades")
+async def get_trades(limit: int = 100):
+    query = """
+        SELECT id, signal_id, market_id, market_title, side,
+               entry_price, shares, size_usd, edge_at_entry,
+               status, exit_price, pnl_usd, pnl_pct,
+               resolved_at, entry_at, metadata
+        FROM trades
+        ORDER BY entry_at DESC
+        LIMIT %s
+    """
+    try:
+        results = await fetch_all(query, (limit,))
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Failed to fetch trades: {e}")
+        return {"data": [], "count": 0}
 
 
+@app.get("/api/trades/active")
+async def get_active_trades():
+    query = """
+        SELECT id, signal_id, market_id, market_title, side,
+               entry_price, shares, size_usd, edge_at_entry,
+               status, entry_at, metadata
+        FROM trades
+        WHERE status IN ('open', 'paper_open', 'live_open')
+        ORDER BY entry_at DESC
+    """
+    try:
+        results = await fetch_all(query)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Failed to fetch active trades: {e}")
+        return {"data": [], "count": 0}
 
 
 # =============================================================================
 # P&L & Analytics — correct column names
 # =============================================================================
 
+@app.get("/api/pnl/daily")
+async def get_daily_pnl(days: int = 30):
+    since = datetime.utcnow() - timedelta(days=days)
+    query = """
+        SELECT
+            DATE(resolved_at) as date,
+            COUNT(*) as trades,
+            SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl_usd) as total_pnl,
+            AVG(pnl_usd) as avg_pnl
+        FROM trades
+        WHERE resolved_at IS NOT NULL AND resolved_at >= %s
+        GROUP BY DATE(resolved_at)
+        ORDER BY date DESC
+    """
+    try:
+        results = await fetch_all(query, (since,))
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Failed to fetch daily P&L: {e}")
+        return {"data": [], "count": 0}
 
 
 @app.get("/api/bankroll")
@@ -1877,51 +3076,669 @@ async def get_bankroll():
         return {"total": 0, "available": 0, "in_positions": 0, "daily_pnl": 0, "last_updated": None}
 
 
+@app.get("/api/analytics/win-rate")
+async def get_win_rate(days: int = 30):
+    since = datetime.utcnow() - timedelta(days=days)
+    query = """
+        SELECT
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+            CASE WHEN COUNT(*) > 0
+                THEN ROUND(100.0 * SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) / COUNT(*), 2)
+                ELSE 0 END as win_rate_pct,
+            COALESCE(SUM(pnl_usd), 0) as total_pnl,
+            COALESCE(AVG(edge_at_entry), 0) as avg_edge
+        FROM trades
+        WHERE resolved_at IS NOT NULL AND resolved_at >= %s
+    """
+    try:
+        result = await fetch_one(query, (since,))
+        return result or {"total_trades": 0, "wins": 0, "win_rate_pct": 0, "total_pnl": 0, "avg_edge": 0}
+    except Exception as e:
+        logger.error(f"Failed to fetch win rate: {e}")
+        return {"total_trades": 0, "wins": 0, "win_rate_pct": 0, "total_pnl": 0, "avg_edge": 0}
 
 
 # =============================================================================
 # DB Stats (for dashboard verification)
 # =============================================================================
 
+@app.get("/api/stats")
+async def get_db_stats():
+    """Return row counts for all tables — useful for verifying real data."""
+    tables = ["metar_readings", "temperature_trends", "weather_markets", "signals", "trades", "bankroll", "station_accuracy"]
+    stats = {}
+    for table in tables:
+        try:
+            result = await fetch_one(f"SELECT COUNT(*) as count FROM {table}")
+            stats[table] = result["count"] if result else 0
+        except:
+            stats[table] = "error"
+    return {"tables": stats, "timestamp": datetime.utcnow().isoformat()}
 
 
 # =============================================================================
 # Polymarket Explorer — Proxy to bypass ISP blocks
 # =============================================================================
 
+def detect_category(question: str) -> str:
+    """Detect market category from question text."""
+    q = question.lower()
+    
+    weather_kw = ['temperature', 'weather', 'rain', 'snow', 'celsius', 'fahrenheit', '°f', '°c', 'heat wave', 'cold front', 'forecast', 'high temp', 'low temp']
+    sports_kw = ['ncaa', 'nba', 'nfl', 'mlb', 'nhl', 'premier league', 'champions league', 'world cup', 'super bowl', 'touchdown', 'goal', 'match', 'game', 'playoffs', 'series', 'vs.', 'vs ']
+    politics_kw = ['president', 'election', 'vote', 'congress', 'senate', 'governor', 'democrat', 'republican', 'biden', 'trump', 'parliament', 'prime minister']
+    crypto_kw = ['bitcoin', 'ethereum', 'btc', 'eth', 'crypto', 'token', 'blockchain', 'defi', 'solana', 'sol']
+    economics_kw = ['gdp', 'inflation', 'fed', 'interest rate', 'unemployment', 'recession', 'stock', 's&p', 'nasdaq', 'dow jones']
+    science_kw = ['ai', 'artificial intelligence', 'spacex', 'nasa', 'climate', 'vaccine', 'disease', 'pandemic']
+    entertainment_kw = ['oscar', 'grammy', 'box office', 'movie', 'album', 'taylor swift', 'drake', 'emmy']
+    
+    if any(kw in q for kw in weather_kw): return 'weather'
+    if any(kw in q for kw in sports_kw): return 'sports'
+    if any(kw in q for kw in politics_kw): return 'politics'
+    if any(kw in q for kw in crypto_kw): return 'crypto'
+    if any(kw in q for kw in economics_kw): return 'economics'
+    if any(kw in q for kw in science_kw): return 'science'
+    if any(kw in q for kw in entertainment_kw): return 'entertainment'
+    return 'other'
 
 
+@app.get("/api/explorer/markets")
+async def explore_markets(category: str = None, search: str = None, limit: int = 50, cursor: str = "MA==", active_only: bool = True):
+    """Proxy to Polymarket Gamma API — filtered, categorized markets."""
+    import httpx
+    
+    all_markets = []
+    offset = 0
+    try:
+        offset = int.from_bytes(base64.b64decode(cursor), 'big') if cursor and cursor != 'MA==' else 0
+    except Exception:
+        offset = 0
+    
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            # Use Gamma API which supports server-side active/closed filtering
+            params = {
+                "limit": min(limit * 2, 200),  # fetch extra for client-side filters
+                "offset": offset,
+                "order": "volume",
+                "ascending": "false",
+            }
+            if active_only:
+                params["active"] = "true"
+                params["closed"] = "false"
+            else:
+                params["closed"] = "true"
+            
+            if search:
+                params["tag"] = search
+            
+            resp = await client.get("https://gamma-api.polymarket.com/markets", params=params)
+            resp.raise_for_status()
+            batch = resp.json()
+            
+            if not isinstance(batch, list):
+                batch = batch.get("data", []) if isinstance(batch, dict) else []
+            
+            for market in batch:
+                question = (market.get("question") or "").lower()
+                market["_category"] = detect_category(question)
+                
+                # Apply category filter
+                if category and market["_category"] != category.lower():
+                    continue
+                
+                # Apply search filter (text match beyond tag search)
+                if search and search.lower() not in question:
+                    continue
+                
+                # Extract price data from Gamma format
+                out_price = market.get("outcomePrices", "")
+                try:
+                    prices = json.loads(out_price) if isinstance(out_price, str) and out_price else []
+                except Exception:
+                    prices = []
+                market["_yes_price"] = float(prices[0]) if len(prices) > 0 else 0.5
+                market["_no_price"] = float(prices[1]) if len(prices) > 1 else 0.5
+                market["_volume"] = float(market.get("volume", 0) or 0)
+                market["active"] = market.get("active", True)
+                market["closed"] = market.get("closed", False)
+                
+                all_markets.append(market)
+                if len(all_markets) >= limit:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Explorer markets error: {e}")
+    
+    # Next cursor for pagination
+    next_offset = offset + len(all_markets)
+    next_cursor = base64.b64encode(next_offset.to_bytes(4, 'big')).decode() if len(all_markets) >= limit else None
+    
+    return {
+        "data": all_markets[:limit],
+        "count": len(all_markets[:limit]),
+        "next_cursor": next_cursor,
+        "source": "polymarket_gamma"
+    }
 
 
+@app.get("/api/explorer/weather")
+async def explore_weather_markets():
+    """Our tracked weather markets from DB."""
+    query = """
+        SELECT market_id, title, city, station_icao, threshold_type, threshold_value,
+               threshold_unit, resolution_date, yes_price, no_price, volume_usd, 
+               liquidity_usd, active, last_updated
+        FROM weather_markets 
+        WHERE active = true
+        ORDER BY volume_usd DESC NULLS LAST
+    """
+    try:
+        results = await fetch_all(query)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Weather markets error: {e}")
+        return {"data": [], "count": 0}
 
 
+@app.get("/api/explorer/events")
+async def explore_events(tag: str = None, search: str = None, limit: int = 20):
+    """Proxy to Polymarket events."""
+    import httpx
+    params = {"limit": limit, "active": "true", "closed": "false"}
+    if tag:
+        params["tag"] = tag
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/events", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        
+        # Ensure data is a list
+        if not isinstance(data, list):
+            data = data.get("data", []) if isinstance(data, dict) else []
+        
+        # Filter by search
+        if search:
+            search_lower = search.lower()
+            data = [
+                e for e in data 
+                if search_lower in e.get("title", "").lower() 
+                or search_lower in e.get("question", "").lower()
+            ]
+        
+        return {"data": data, "count": len(data)}
+    except Exception as e:
+        logger.error(f"Explorer events error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch events: {str(e)}")
 
 
+@app.get("/api/explorer/market/{condition_id}")
+async def get_market_detail(condition_id: str):
+    """Get detailed market data including order book."""
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get market data
+            market_resp = await client.get(f"https://clob.polymarket.com/markets/{condition_id}")
+            market_resp.raise_for_status()
+            market = market_resp.json()
+            
+            # Get order book
+            try:
+                book_resp = await client.get(f"https://clob.polymarket.com/book?token_id={condition_id}")
+                book_resp.raise_for_status()
+                order_book = book_resp.json()
+            except:
+                order_book = {"bids": [], "asks": []}
+        
+        return {
+            "market": market,
+            "order_book": order_book
+        }
+    except Exception as e:
+        logger.error(f"Explorer market detail error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch market detail: {str(e)}")
 
 
+@app.get("/api/explorer/prices/{condition_id}")
+async def get_price_history(condition_id: str, interval: str = "1h", fidelity: int = 60):
+    """Get price history for charting."""
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://clob.polymarket.com/prices-history",
+                params={"market": condition_id, "interval": interval, "fidelity": fidelity}
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Explorer price history error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch price history: {str(e)}")
 
 
 # =============================================================================
 # Intelligence Data — Forecasts, Historical, Combined View
 # =============================================================================
 
+@app.get("/api/intelligence/live-signals")
+async def get_live_signals():
+    """Run real-time intelligence analysis across all tracked markets.
+    Returns probability estimates, expected returns, and trade recommendations.
+    This is the LIVE TRADING SIGNAL BOARD."""
+    from src.data.openmeteo import fetch_forecast
+    
+    try:
+        # 1. Get all active weather markets from DB
+        markets = await fetch_all("""
+            SELECT * FROM weather_markets 
+            WHERE active = true
+            ORDER BY volume_usd DESC NULLS LAST
+        """)
+        
+        # 2. Get latest METAR for each station
+        metar = await fetch_all("""
+            SELECT DISTINCT ON (station_icao)
+                station_icao, temperature_c, observation_time
+            FROM metar_readings 
+            ORDER BY station_icao, observation_time DESC
+        """)
+        metar_map = {m['station_icao']: m for m in metar}
+        
+        # 3. Get trends
+        trends = await fetch_all("""
+            SELECT DISTINCT ON (station_icao)
+                station_icao, trend_per_hour, projected_high, projected_low, confidence
+            FROM temperature_trends 
+            ORDER BY station_icao, calculated_at DESC
+        """)
+        trend_map = {t['station_icao']: t for t in trends}
+        
+        signals = []
+        for market in markets:
+            icao = market.get('station_icao', '')
+            if not icao:
+                continue
+            
+            metar_data = metar_map.get(icao, {})
+            trend_data = trend_map.get(icao, {})
+            
+            if not metar_data:
+                continue
+            
+            current_temp = float(metar_data.get('temperature_c', 0) or 0)
+            threshold = float(market.get('threshold_value', 0) or 0)
+            yes_price = float(market.get('yes_price', 0.5) or 0.5)
+            no_price = float(market.get('no_price', 0.5) or 0.5)
+            trend = float(trend_data.get('trend_per_hour', 0) or 0)
+            projected_high = trend_data.get('projected_high')
+            
+            # Get forecast (cached, don't fetch every call)
+            forecast_high = None
+            try:
+                forecast = await fetch_forecast(icao)
+                if forecast:
+                    forecast_high = forecast.get('forecast_high_c')
+            except:
+                pass
+            
+            # Calculate our probability
+            # Simple model: based on data convergence
+            votes_yes = 0
+            total_sources = 0
+            
+            threshold_type = market.get('threshold_type', 'high_above')
+            
+            # Source 1: Current METAR
+            total_sources += 1
+            if threshold_type == 'high_above':
+                if current_temp >= threshold:
+                    votes_yes += 1  # Already hit
+                elif projected_high and float(projected_high) >= threshold:
+                    votes_yes += 0.7  # Trend says likely
+            elif threshold_type == 'low_below':
+                if current_temp <= threshold:
+                    votes_yes += 1
+            
+            # Source 2: Forecast
+            if forecast_high is not None:
+                total_sources += 1
+                if threshold_type == 'high_above' and forecast_high >= threshold:
+                    votes_yes += 1
+                elif threshold_type == 'low_below' and forecast_high <= threshold:
+                    votes_yes += 1
+            
+            # Our probability estimate
+            our_prob = min(0.95, max(0.05, votes_yes / max(total_sources, 1)))
+            
+            # Edge = our probability - market price
+            edge_yes = our_prob - yes_price
+            edge_no = (1 - our_prob) - no_price
+            
+            # Which side has better edge?
+            if edge_yes > edge_no:
+                recommended_side = "YES"
+                edge = edge_yes
+                entry_price = yes_price
+            else:
+                recommended_side = "NO"
+                edge = edge_no
+                entry_price = no_price
+            
+            # Expected return
+            if entry_price > 0 and entry_price < 1:
+                expected_return_pct = ((1.0 / entry_price) - 1) * our_prob * 100
+            else:
+                expected_return_pct = 0
+            
+            # Signal strength
+            if edge >= 0.25:
+                signal_status = "STRONG_BUY"  # Green flash
+                auto_trade = True
+            elif edge >= 0.15:
+                signal_status = "BUY"  # Yellow
+                auto_trade = False  # Alert only
+            elif edge >= 0.05:
+                signal_status = "WATCH"  # Gray
+                auto_trade = False
+            else:
+                signal_status = "SKIP"
+                auto_trade = False
+            
+            # Binary arbitrage check
+            arb_total = yes_price + no_price
+            is_arb = arb_total < 0.98
+            
+            signals.append({
+                "market_id": market.get('market_id'),
+                "title": market.get('title', ''),
+                "city": market.get('city', ''),
+                "station_icao": icao,
+                "threshold": threshold,
+                "threshold_type": threshold_type,
+                "threshold_unit": market.get('threshold_unit', '°C'),
+                
+                # Current data
+                "current_temp": current_temp,
+                "trend_per_hour": trend,
+                "projected_high": float(projected_high) if projected_high else None,
+                "forecast_high": forecast_high,
+                
+                # Market prices
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "volume": float(market.get('volume_usd', 0) or 0),
+                
+                # Our analysis
+                "our_probability": round(our_prob, 4),
+                "recommended_side": recommended_side,
+                "edge": round(edge, 4),
+                "expected_return_pct": round(expected_return_pct, 2),
+                
+                # Signal
+                "signal": signal_status,
+                "auto_trade": auto_trade,
+                "is_arbitrage": is_arb,
+                "arb_total": round(arb_total, 4),
+                
+                # Data sources used
+                "sources": {
+                    "metar": True,
+                    "forecast": forecast_high is not None,
+                    "historical": False,  # Not fetched per-call for speed
+                    "trend": trend != 0,
+                },
+                
+                "resolution_date": str(market.get('resolution_date', '')),
+                "last_updated": str(market.get('last_updated', '')),
+            })
+        
+        # Sort by edge (strongest signals first)
+        signals.sort(key=lambda s: abs(s['edge']), reverse=True)
+        
+        return {
+            "signals": signals,
+            "total_markets": len(markets),
+            "actionable": sum(1 for s in signals if s['signal'] in ('STRONG_BUY', 'BUY')),
+            "arbitrage": sum(1 for s in signals if s['is_arbitrage']),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Live signals error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/trades/execute")
+async def execute_trade(data: dict):
+    """Execute a trade (paper or live based on mode)."""
+    from src.execution.paper_trader import paper_trade
+    
+    try:
+        market_id = data.get("market_id")
+        side = data.get("side", "YES")
+        size_usd = float(data.get("size_usd", 25))
+        
+        if not market_id:
+            raise HTTPException(status_code=400, detail="market_id required")
+        
+        # Get current settings
+        settings_row = await fetch_one("SELECT value FROM bot_settings WHERE key = 'trading_mode'")
+        mode = settings_row['value'] if settings_row else '"paper"'
+        
+        # Execute paper trade (always paper for now)
+        result = await paper_trade({
+            "market_id": market_id,
+            "side": side,
+            "size_usd": size_usd,
+            "mode": "paper",
+        })
+        
+        return {
+            "status": "executed",
+            "trade": result,
+            "mode": "paper",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Execute trade error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =============================================================================
 # Trade Settlement
 # =============================================================================
 
+@app.post("/api/trades/settle")
+async def settle_trades_endpoint():
+    """Auto-settle completed trades using Odds API + ESPN scores."""
+    from src.execution.settlement import settle_trades
+    try:
+        odds_key = os.environ.get('ODDS_API_KEY', '')
+        if not odds_key:
+            # Try loading from .env
+            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.startswith('ODDS_API_KEY'):
+                            odds_key = line.split('=', 1)[1].strip().strip('"').strip("'")
+                            break
+        result = await settle_trades(fetch_all, execute, fetch_one, odds_key)
+        return result
+    except Exception as e:
+        logger.error(f"Settlement error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/trades/settle-manual")
+async def settle_trade_manual(data: dict):
+    """Manually settle a trade by ID."""
+    from src.execution.settlement import manual_settle
+    trade_id = data.get('trade_id')
+    outcome = data.get('outcome')  # 'won' or 'lost'
+    winner = data.get('winner', '')
+    
+    if not trade_id or outcome not in ('won', 'lost'):
+        raise HTTPException(status_code=400, detail="trade_id and outcome ('won'/'lost') required")
+    
+    try:
+        result = await manual_settle(execute, int(trade_id), outcome, winner)
+        if 'error' in result:
+            raise HTTPException(status_code=404, detail=result['error'])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/intelligence/forecast/{icao}")
+async def get_forecast(icao: str):
+    """Get Open-Meteo forecast for a station."""
+    from src.data.openmeteo import fetch_forecast
+    try:
+        result = await fetch_forecast(icao.upper())
+        if not result:
+            raise HTTPException(status_code=404, detail=f"No forecast data for {icao}")
+        return {"station": icao.upper(), **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/intelligence/forecasts")
+async def get_all_forecasts():
+    """Get Open-Meteo forecasts for all tracked stations."""
+    from src.data.openmeteo import fetch_all_forecasts, CITY_COORDS
+    try:
+        stations = list(CITY_COORDS.keys())
+        results = await fetch_all_forecasts(stations)
+        return {"data": results, "count": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/intelligence/historical/{icao}")
+async def get_historical(icao: str):
+    """Get historical temperature pattern for a station."""
+    from src.data.historical import fetch_historical_pattern
+    from datetime import datetime
+    try:
+        result = await fetch_historical_pattern(icao.upper(), datetime.utcnow())
+        if not result:
+            raise HTTPException(status_code=404, detail=f"No historical data for {icao}")
+        return {"station": icao.upper(), **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/intelligence/dashboard")
+async def get_intelligence_dashboard():
+    """Combined intelligence view — METAR + forecasts + trends + comparison.
+    Returns all data needed for the Intelligence dashboard page."""
+    from src.data.openmeteo import fetch_forecast, CITY_COORDS
+    from src.data.city_map import CITY_TO_ICAO
+    import asyncio
+    
+    try:
+        # Get latest METAR data
+        metar_data = await fetch_all("""SELECT DISTINCT ON (station_icao)
+            station_icao, temperature_c, dewpoint_c, wind_speed_kt, wind_dir,
+            observation_time, created_at
+            FROM metar_readings ORDER BY station_icao, observation_time DESC""")
+        
+        # Get temperature trends
+        trends = await fetch_all("""SELECT DISTINCT ON (station_icao)
+            station_icao, trend_per_hour, projected_high, projected_low, confidence, num_readings
+            FROM temperature_trends ORDER BY station_icao, calculated_at DESC""")
+        trend_map = {t['station_icao']: t for t in trends}
+        
+        # Get Open-Meteo forecasts for top 10 stations (to keep response fast)
+        top_stations = [m['station_icao'] for m in metar_data[:10]]
+        forecasts = {}
+        for icao in top_stations:
+            try:
+                f = await fetch_forecast(icao)
+                if f:
+                    forecasts[icao] = f
+            except:
+                pass
+        
+        # Build combined view per station
+        stations = []
+        for m in metar_data:
+            icao = m['station_icao']
+            trend = trend_map.get(icao, {})
+            forecast = forecasts.get(icao, {})
+            
+            # Calculate data convergence (Gate 1 preview)
+            metar_temp = m.get('temperature_c', 0)
+            forecast_high = forecast.get('forecast_high_c')
+            trend_projected = trend.get('projected_high')
+            
+            sources_agree = 0
+            total_sources = 1  # METAR always counts
+            if forecast_high is not None:
+                total_sources += 1
+                if abs(forecast_high - metar_temp) < 5:  # Within 5°C
+                    sources_agree += 1
+            if trend_projected is not None:
+                total_sources += 1
+                if abs(trend_projected - metar_temp) < 5:
+                    sources_agree += 1
+            
+            stations.append({
+                'station_icao': icao,
+                'metar': {
+                    'temperature_c': metar_temp,
+                    'dewpoint_c': m.get('dewpoint_c'),
+                    'wind_speed_kt': m.get('wind_speed_kt'),
+                    'wind_dir': m.get('wind_dir'),
+                    'observation_time': str(m.get('observation_time', '')),
+                },
+                'trend': {
+                    'per_hour': trend.get('trend_per_hour'),
+                    'projected_high': trend.get('projected_high'),
+                    'projected_low': trend.get('projected_low'),
+                    'confidence': trend.get('confidence'),
+                },
+                'forecast': {
+                    'high_c': forecast_high,
+                    'low_c': forecast.get('forecast_low_c'),
+                    'hourly_temps': forecast.get('hourly_temps', [])[:12],
+                    'precip_probs': forecast.get('precipitation_probs', [])[:12],
+                },
+                'convergence': {
+                    'sources_agree': sources_agree,
+                    'total_sources': total_sources,
+                    'status': 'high' if sources_agree >= 2 else 'medium' if sources_agree == 1 else 'low',
+                },
+            })
+        
+        # Get signal count and recent activity
+        signal_count = await fetch_all("SELECT COUNT(*) as count FROM signals")
+        trade_count = await fetch_all("SELECT COUNT(*) as count FROM trades")
+        
+        return {
+            'stations': stations,
+            'station_count': len(stations),
+            'signal_count': signal_count[0]['count'] if signal_count else 0,
+            'trade_count': trade_count[0]['count'] if trade_count else 0,
+            'forecast_count': len(forecasts),
+            'trend_count': len(trends),
+        }
+    except Exception as e:
+        logger.error(f"Intelligence dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -2050,14 +3867,186 @@ async def get_performance_strategies():
         return {"strategies": [], "count": 0}
 
 
+@app.get("/api/performance/signals/timeline")
+async def get_signals_timeline():
+    """Signal generation over time (hourly for 24h)."""
+    try:
+        # Hourly buckets for last 24 hours
+        query = """
+            SELECT
+                DATE_TRUNC('hour', created_at) as time_bucket,
+                COUNT(CASE WHEN edge_type = 'cross_odds' THEN 1 END) as cross_odds_count,
+                COUNT(CASE WHEN edge_type = 'logical_arb' THEN 1 END) as logical_arb_count,
+                COUNT(*) as total
+            FROM sports_signals
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY time_bucket
+            ORDER BY time_bucket ASC
+        """
+        results = await fetch_all(query)
+        
+        buckets = [{
+            "time": str(r['time_bucket']),
+            "cross_odds_count": r['cross_odds_count'],
+            "logical_arb_count": r['logical_arb_count'],
+            "total": r['total']
+        } for r in results]
+        
+        return {"buckets": buckets, "count": len(buckets)}
+    except Exception as e:
+        logger.error(f"Signals timeline error: {e}")
+        return {"buckets": [], "count": 0}
 
 
+@app.get("/api/performance/signals/latest")
+async def get_latest_signals_feed(limit: int = 50):
+    """Latest 50 signals with full detail for live feed."""
+    try:
+        query = """
+            SELECT
+                id, edge_type, sport, market_id, market_title,
+                polymarket_price, fair_value,
+                edge_pct, signal, confidence,
+                reasoning, created_at
+            FROM sports_signals
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
+        
+        signals = [{
+            "id": r['id'],
+            "strategy": "Cross-Odds" if r['edge_type'] == 'cross_odds' else "Logical Arb",
+            "sport": r['sport'],
+            "market_id": r['market_id'],
+            "market_title": r['market_title'],
+            "polymarket_price": float(r['polymarket_price']) if r['polymarket_price'] else 0,
+            "fair_value": float(r['fair_value']) if r['fair_value'] else 0,
+            "edge": float(r['edge_pct']) if r['edge_pct'] else 0,
+            "side": r['signal'] or 'HOLD',
+            "confidence": r['confidence'] or 'MEDIUM',
+            "reasoning": r['reasoning'],
+            "created_at": str(r['created_at'])
+        } for r in results]
+        
+        return {"signals": signals, "count": len(signals)}
+    except Exception as e:
+        logger.error(f"Latest signals error: {e}")
+        return {"signals": [], "count": 0}
 
 
+@app.get("/api/performance/edge-distribution")
+async def get_edge_distribution():
+    """Edge % distribution for histogram."""
+    try:
+        query = """
+            SELECT bucket as range, COUNT(*) as count FROM (
+                SELECT
+                    CASE
+                        WHEN ABS(edge_pct) < 5 THEN '0-5%'
+                        WHEN ABS(edge_pct) < 10 THEN '5-10%'
+                        WHEN ABS(edge_pct) < 25 THEN '10-25%'
+                        WHEN ABS(edge_pct) < 50 THEN '25-50%'
+                        WHEN ABS(edge_pct) < 100 THEN '50-100%'
+                        ELSE '100%+'
+                    END as bucket
+                FROM sports_signals
+            ) sub
+            GROUP BY bucket
+            ORDER BY
+                CASE bucket
+                    WHEN '0-5%' THEN 1
+                    WHEN '5-10%' THEN 2
+                    WHEN '10-25%' THEN 3
+                    WHEN '25-50%' THEN 4
+                    WHEN '50-100%' THEN 5
+                    ELSE 6
+                END
+        """
+        results = await fetch_all(query)
+        
+        buckets = [{
+            "range": r['range'],
+            "count": r['count']
+        } for r in results]
+        
+        return {"buckets": buckets, "count": len(buckets)}
+    except Exception as e:
+        logger.error(f"Edge distribution error: {e}")
+        return {"buckets": [], "count": 0}
 
 
+@app.get("/api/performance/sports-breakdown")
+async def get_sports_breakdown():
+    """Signals grouped by sport."""
+    try:
+        query = """
+            SELECT
+                sport,
+                COUNT(*) as signals,
+                AVG(edge_pct) as avg_edge,
+                COUNT(DISTINCT market_id) as markets
+            FROM sports_signals
+            GROUP BY sport
+            ORDER BY signals DESC
+        """
+        results = await fetch_all(query)
+        
+        sports = [{
+            "sport": r['sport'],
+            "signals": r['signals'],
+            "avg_edge": round(float(r['avg_edge'] or 0), 2),
+            "markets": r['markets']
+        } for r in results]
+        
+        return {"sports": sports, "count": len(sports)}
+    except Exception as e:
+        logger.error(f"Sports breakdown error: {e}")
+        return {"sports": [], "count": 0}
 
 
+@app.get("/api/performance/odds-comparison")
+async def get_odds_comparison(limit: int = 50):
+    """Sportsbook vs Polymarket comparison for matched markets."""
+    try:
+        # Match sportsbook outcomes to Polymarket questions by team name
+        query = """
+            SELECT DISTINCT ON (so.outcome, sm.market_id)
+                sm.market_id,
+                sm.question as event,
+                sm.sport,
+                sm.yes_price as polymarket_price,
+                so.outcome as team,
+                so.implied_probability as book_prob,
+                so.bookmaker as book_name,
+                so.event_name as book_event,
+                ABS(so.implied_probability - sm.yes_price) * 100 as edge_pct
+            FROM sports_markets sm
+            CROSS JOIN sportsbook_odds so
+            WHERE sm.yes_price IS NOT NULL
+              AND so.implied_probability IS NOT NULL
+              AND LOWER(sm.question) LIKE '%%' || LOWER(SPLIT_PART(so.outcome, ' ', array_length(string_to_array(so.outcome, ' '), 1))) || '%%'
+              AND LOWER(sm.sport) = LOWER(so.sport)
+            ORDER BY so.outcome, sm.market_id, ABS(so.implied_probability - sm.yes_price) DESC
+            LIMIT %s
+        """
+        results = await fetch_all(query, (limit,))
+        
+        comparisons = [{
+            "event": r['event'][:100],
+            "team": r.get('team', ''),
+            "polymarket_price": round(float(r['polymarket_price']), 3),
+            "book_price": round(float(r['book_prob']), 3),
+            "book_name": r['book_name'],
+            "book_event": r.get('book_event', ''),
+            "edge": round(float(r['edge_pct']), 2),
+            "sport": r['sport']
+        } for r in results]
+        
+        return {"comparisons": comparisons, "count": len(comparisons)}
+    except Exception as e:
+        logger.error(f"Odds comparison error: {e}")
+        return {"comparisons": [], "count": 0}
 
 
 # =============================================================================
@@ -2294,6 +4283,24 @@ async def stop_bot():
     return {"status": "stopped", "running": scheduler.running, "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/positions/health")
+async def get_position_health():
+    """Check health of all open positions — edge decay monitoring."""
+    try:
+        from src.execution.edge_monitor import EdgeMonitor
+        monitor = EdgeMonitor(get_async_pool())
+        alerts = await monitor.check_all_positions()
+        return {
+            "positions": alerts,
+            "exit_needed": len([a for a in alerts if a['recommendation'].startswith('EXIT')]),
+            "watch": len([a for a in alerts if a['recommendation'] == 'WATCH']),
+            "healthy": len([a for a in alerts if a['recommendation'] == 'HOLD']),
+            "total_open": len(alerts),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Position health error: {e}")
+        return {"positions": [], "exit_needed": 0, "total_open": 0, "error": str(e)}
 
 
 @app.get("/api/wallet/balance")
@@ -2345,10 +4352,120 @@ from src.sports.cross_odds_engine import CrossOddsEngine
 # Penny Hunter API
 # =============================================================================
 
+@app.get("/api/penny/positions")
+async def get_penny_positions(status: str = None, limit: int = 100):
+    """Get penny positions, optionally filtered by status."""
+    try:
+        if status:
+            rows = await fetch_all("""
+                SELECT id, market_id, condition_id, question, category, outcome,
+                       buy_price, quantity, size_usd, potential_payout,
+                       catalyst_score, catalyst_reason, days_to_resolution,
+                       volume_usd, status, resolution, pnl_usd,
+                       opened_at, resolved_at, metadata
+                FROM penny_positions
+                WHERE status = %s
+                ORDER BY opened_at DESC
+                LIMIT %s
+            """, (status, min(limit, 500)))
+        else:
+            rows = await fetch_all("""
+                SELECT id, market_id, condition_id, question, category, outcome,
+                       buy_price, quantity, size_usd, potential_payout,
+                       catalyst_score, catalyst_reason, days_to_resolution,
+                       volume_usd, status, resolution, pnl_usd,
+                       opened_at, resolved_at, metadata
+                FROM penny_positions
+                ORDER BY opened_at DESC
+                LIMIT %s
+            """, (min(limit, 500),))
+        
+        positions = []
+        for r in (rows or []):
+            positions.append({
+                'id': r['id'],
+                'market_id': r['market_id'],
+                'condition_id': r.get('condition_id', ''),
+                'question': r['question'],
+                'category': r.get('category', ''),
+                'outcome': r.get('outcome', ''),
+                'buy_price': float(r['buy_price']) if r['buy_price'] else 0,
+                'quantity': float(r['quantity']) if r['quantity'] else 0,
+                'size_usd': float(r['size_usd']) if r['size_usd'] else 0,
+                'potential_payout': float(r['potential_payout']) if r['potential_payout'] else 0,
+                'catalyst_score': float(r['catalyst_score']) if r['catalyst_score'] else 0,
+                'catalyst_reason': r.get('catalyst_reason', ''),
+                'days_to_resolution': r.get('days_to_resolution'),
+                'volume_usd': float(r['volume_usd']) if r['volume_usd'] else 0,
+                'status': r['status'],
+                'resolution': r.get('resolution', ''),
+                'pnl_usd': float(r['pnl_usd']) if r['pnl_usd'] else 0,
+                'opened_at': str(r['opened_at']) if r['opened_at'] else None,
+                'resolved_at': str(r['resolved_at']) if r['resolved_at'] else None,
+            })
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        logger.error(f"Penny positions error: {e}")
+        return {"positions": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/penny/stats")
+async def get_penny_stats():
+    """Get penny portfolio stats."""
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        stats = await hunter.get_portfolio_stats()
+        stats['last_scan'] = _last_penny_scan.isoformat() if _last_penny_scan else None
+        return stats
+    except Exception as e:
+        logger.error(f"Penny stats error: {e}")
+        return {"error": str(e), "total_positions": 0, "open_positions": 0, "total_pnl": 0}
 
 
+@app.get("/api/penny/scan")
+async def get_penny_scan():
+    """Run a live scan and return current penny contracts available (no trades executed)."""
+    try:
+        from src.strategies.penny_hunter import PennyHunter
+        hunter = PennyHunter(get_async_pool())
+        pennies = await hunter.scan_penny_contracts()
+        
+        # Score all
+        for p in pennies:
+            score, reason = hunter.score_catalyst(p)
+            p['catalyst_score'] = score
+            p['catalyst_reason'] = reason
+        
+        # Sort by score
+        pennies.sort(key=lambda x: -x['catalyst_score'])
+        
+        # Return top 50
+        results = []
+        for p in pennies[:50]:
+            results.append({
+                'market_id': p['market_id'],
+                'question': p['question'],
+                'category': p.get('category', ''),
+                'outcome': p.get('outcome', ''),
+                'buy_price': p['buy_price'],
+                'days_to_resolution': p.get('days_to_resolution'),
+                'volume_usd': p.get('volume_usd', 0),
+                'catalyst_score': p['catalyst_score'],
+                'catalyst_reason': p['catalyst_reason'],
+                'would_buy': p['catalyst_score'] >= 3,
+                'potential_return': f"{(1/p['buy_price']):.0f}x" if p['buy_price'] > 0 else '0x',
+            })
+        
+        return {
+            "contracts": results,
+            "total_found": len(pennies),
+            "would_buy": sum(1 for p in pennies if p['catalyst_score'] >= 3),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Penny scan API error: {e}")
+        return {"contracts": [], "total_found": 0, "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2356,12 +4473,76 @@ from src.sports.cross_odds_engine import CrossOddsEngine
 # ═══════════════════════════════════════════════════════════════
 
 
+@app.get("/api/late-window/status")
+async def get_late_window_status():
+    """Current state, active windows, next entry."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        return await _late_window_scalper.get_status()
+    except Exception as e:
+        logger.error(f"Late window status error: {e}")
+        return {"enabled": False, "error": str(e)}
 
 
+@app.get("/api/late-window/trades")
+async def get_late_window_trades(limit: int = 50):
+    """Recent trades with P&L."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        trades = await _late_window_scalper.get_trades(limit=min(limit, 200))
+        # Convert datetime objects to strings for JSON serialization
+        result = []
+        for t in trades:
+            d = dict(t)
+            for k, v in d.items():
+                if hasattr(v, 'isoformat'):
+                    d[k] = v.isoformat()
+                elif v is not None and hasattr(v, '__float__'):
+                    d[k] = float(v)
+            result.append(d)
+        return {"trades": result, "count": len(result)}
+    except Exception as e:
+        logger.error(f"Late window trades error: {e}")
+        return {"trades": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/late-window/stats")
+async def get_late_window_stats():
+    """Win rate, total PnL, avg entry price, trades today."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        return await _late_window_scalper.get_stats()
+    except Exception as e:
+        logger.error(f"Late window stats error: {e}")
+        return {"total_trades": 0, "win_rate": 0, "total_pnl": 0, "error": str(e)}
 
 
+@app.post("/api/late-window/toggle")
+async def toggle_late_window():
+    """Enable/disable the scalper."""
+    global _late_window_scalper
+    try:
+        from src.strategies.late_window_scalper import LateWindowScalper
+        if _late_window_scalper is None:
+            _late_window_scalper = LateWindowScalper(get_async_pool())
+            await _late_window_scalper.ensure_tables()
+        new_state = _late_window_scalper.toggle()
+        return {"enabled": new_state, "message": f"Late Window Scalper {'enabled' if new_state else 'disabled'}"}
+    except Exception as e:
+        logger.error(f"Late window toggle error: {e}")
+        return {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2382,37 +4563,6 @@ async def get_btc_state():
     except Exception as e:
         logger.error(f"BTC state error: {e}")
         return {"error": str(e), "btc_price": 0, "active_windows": [], "accuracy": {}}
-
-
-@app.get("/api/btc/v4-trades")
-async def get_btc_v4_trades():
-    """BroBot V4 paper trades with full confluence breakdown — for signal cards."""
-    try:
-        pool = get_async_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT
-                    id, window_id, direction, token_price, stake_usd,
-                    confluence_score, factors_json, jc_level,
-                    resolution, won, simulated_pnl, strategy_version,
-                    created_at, resolved_at
-                FROM paper_trades
-                ORDER BY created_at DESC
-                LIMIT 30
-            """)
-            trades = []
-            for r in rows:
-                t = dict(r)
-                for k, v in t.items():
-                    if hasattr(v, 'isoformat'):
-                        t[k] = v.isoformat()
-                    elif hasattr(v, '__float__'):
-                        t[k] = float(v)
-                trades.append(t)
-            return {"trades": trades, "count": len(trades)}
-    except Exception as e:
-        logger.error(f"V4 trades error: {e}")
-        return {"trades": [], "count": 0, "error": str(e)}
 
 
 @app.get("/api/btc/signals")
@@ -2900,27 +5050,343 @@ async def get_btc_performance():
         return {"error": str(e)}
 
 
+@app.get("/api/arb/internal")
+async def get_internal_arb_opportunities():
+    """Get current internal arb opportunities (YES+NO < $1.00)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_combined()
+        return {
+            "opportunities": opps,
+            "count": len(opps),
+            "last_scan": _last_internal_arb_scan.isoformat() if _last_internal_arb_scan else None,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Internal arb API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/arb/internal/db")
+async def get_internal_arb_db_only():
+    """Get arb opportunities from DB only (faster, no external API calls)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_all_markets()
+        return {"opportunities": opps, "count": len(opps)}
+    except Exception as e:
+        logger.error(f"Internal arb DB API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/arb/internal/live")
+async def get_internal_arb_live():
+    """Get arb opportunities from Gamma API (real-time, slower)."""
+    try:
+        from src.strategies.internal_arb import InternalArbScanner
+        scanner = InternalArbScanner(get_async_pool())
+        opps = await scanner.scan_clob_live()
+        return {"opportunities": opps, "count": len(opps)}
+    except Exception as e:
+        logger.error(f"Internal arb live API error: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/arb/trades")
+async def get_internal_arb_trades(limit: int = 50):
+    """Get executed internal arb paper trades."""
+    try:
+        results = await fetch_all("""
+            SELECT id, market_id, market_title, side, entry_price, shares,
+                   size_usd, edge_at_entry, status, pnl_usd, pnl_pct,
+                   entry_at, resolved_at, metadata
+            FROM trades
+            WHERE strategy = 'internal_arb'
+            ORDER BY entry_at DESC
+            LIMIT %s
+        """, (min(limit, 200),))
+        
+        total_pnl = sum(float(r.get('pnl_usd', 0) or 0) for r in (results or []))
+        return {
+            "trades": results or [],
+            "count": len(results or []),
+            "total_pnl": round(total_pnl, 2),
+        }
+    except Exception as e:
+        logger.error(f"Internal arb trades error: {e}")
+        return {"trades": [], "count": 0, "error": str(e)}
 
 
+# =============================================================================
+# Sports Intelligence Endpoints
+# =============================================================================
+
+@app.get("/api/sports/markets")
+async def sports_markets(sport: str = None, limit: int = 200):
+    """Get active sports markets from Polymarket, categorized. Fetches live from Gamma API."""
+    import httpx
+    try:
+        scanner = PolymarketSportsScanner(None)
+        raw_markets = await scanner.fetch_sports_markets()
+        
+        # Categorize and filter
+        categorized = []
+        for m in raw_markets:
+            q = m.get('question', '')
+            s = scanner.categorize_sport(q)
+            if sport and s.lower() != sport.lower():
+                continue
+            m['sport'] = s
+            m['event_type'] = scanner.detect_event_type(q)
+            m['group_id'] = scanner.generate_group_id(q)
+            team_a, team_b = scanner.extract_teams(q, s)
+            m['team_a'] = team_a
+            m['team_b'] = team_b
+            categorized.append(m)
+        
+        # Sort by volume
+        categorized.sort(key=lambda x: float(x.get('volume', 0) or 0), reverse=True)
+        categorized = categorized[:limit]
+        
+        # Group by sport
+        sports_summary = {}
+        for m in categorized:
+            s = m.get('sport', 'Other')
+            if s not in sports_summary:
+                sports_summary[s] = {'count': 0, 'total_volume': 0, 'total_liquidity': 0}
+            sports_summary[s]['count'] += 1
+            sports_summary[s]['total_volume'] += float(m.get('volume', 0) or 0)
+            sports_summary[s]['total_liquidity'] += float(m.get('liquidity', 0) or 0)
+        
+        # Normalize field names
+        for m in categorized:
+            m['yes_price'] = m.get('outcomePrices', '').split(',')[0] if m.get('outcomePrices') else None
+            m['volume_usd'] = m.get('volume', 0)
+            m['liquidity_usd'] = m.get('liquidity', 0)
+            m['market_id'] = m.get('id', '')
+            m['resolution_date'] = m.get('endDate', '')
+        
+        return {
+            "total": len(categorized),
+            "scanned": len(raw_markets),
+            "by_sport": sports_summary,
+            "markets": categorized
+        }
+    except Exception as e:
+        logger.error(f"Sports markets error: {e}")
+        import traceback; traceback.print_exc()
+        return {"total": 0, "error": str(e), "markets": []}
 
 
+@app.get("/api/sports/markets/{sport}")
+async def sports_markets_by_sport(sport: str):
+    """Get markets for a specific sport."""
+    return await sports_markets(sport=sport, limit=200)
 
 
+@app.get("/api/sports/groups")
+async def sports_groups():
+    """Get market groups with sum analysis. Groups markets by event (e.g., all Stanley Cup teams)."""
+    try:
+        # Fetch fresh market data
+        data = await sports_markets(limit=500)
+        all_markets = data.get('markets', [])
+        
+        # Group by group_id
+        group_map = {}
+        for m in all_markets:
+            gid = m.get('group_id')
+            if not gid:
+                continue
+            if gid not in group_map:
+                group_map[gid] = {'sport': m.get('sport', 'Other'), 'markets': []}
+            
+            # Parse yes_price
+            yp = 0
+            try:
+                prices_str = m.get('outcomePrices', '')
+                if prices_str:
+                    # Format is '["0.95","0.05"]' or '0.95,0.05'
+                    import json
+                    try:
+                        prices = json.loads(prices_str)
+                        yp = float(prices[0]) if prices else 0
+                    except:
+                        yp = float(prices_str.split(',')[0].strip('[]"')) if ',' in prices_str else 0
+            except:
+                yp = 0
+            
+            group_map[gid]['markets'].append({
+                'question': m.get('question', ''),
+                'yes_price': yp,
+                'market_id': m.get('id', m.get('market_id', '')),
+                'volume': float(m.get('volume', 0) or 0)
+            })
+        
+        # Build groups with sum analysis
+        groups = []
+        for gid, data in group_map.items():
+            mkts = data['markets']
+            if len(mkts) < 2:
+                continue
+            total = sum(m['yes_price'] for m in mkts)
+            mkts.sort(key=lambda x: -x['yes_price'])
+            groups.append({
+                'group_id': gid,
+                'sport': data['sport'],
+                'market_count': len(mkts),
+                'total_yes_sum': round(total, 4),
+                'overpriced': total > 1.05,
+                'sum_pct': round(total * 100, 1),
+                'arb_edge': round((total - 1.0) * 100, 1) if total > 1.0 else 0,
+                'questions': [m['question'] for m in mkts[:10]],
+                'prices': [m['yes_price'] for m in mkts[:10]],
+                'market_ids': [m['market_id'] for m in mkts[:10]],
+                'total_volume': sum(m['volume'] for m in mkts)
+            })
+        
+        groups.sort(key=lambda x: -x['total_yes_sum'])
+        
+        return {
+            "total_groups": len(groups),
+            "overpriced_groups": len([g for g in groups if g['overpriced']]),
+            "groups": groups
+        }
+    except Exception as e:
+        logger.error(f"Sports groups error: {e}")
+        import traceback; traceback.print_exc()
+        return {"total_groups": 0, "error": str(e), "groups": []}
 
 
+@app.get("/api/sports/arbitrage")
+async def sports_arbitrage():
+    """Find logical arbitrage from group overpricing."""
+    try:
+        group_data = await sports_groups()
+        overpriced = [g for g in group_data.get('groups', []) if g['overpriced']]
+        
+        opportunities = []
+        for g in overpriced:
+            opportunities.append({
+                'type': 'group_overpricing',
+                'group_id': g['group_id'],
+                'sport': g['sport'],
+                'market_count': g['market_count'],
+                'sum_pct': g['sum_pct'],
+                'edge_pct': g['arb_edge'],
+                'reasoning': f"Group '{g['group_id']}' has {g['market_count']} markets summing to {g['sum_pct']}% (should be ~100%). Overpriced by {g['arb_edge']}%.",
+                'top_markets': list(zip(g['questions'][:5], g['prices'][:5]))
+            })
+        
+        return {
+            "total": len(opportunities),
+            "opportunities": opportunities
+        }
+    except Exception as e:
+        logger.error(f"Sports arbitrage error: {e}")
+        return {"total": 0, "error": str(e), "opportunities": []}
 
 
+@app.get("/api/sports/signals")
+async def sports_signals(limit: int = 50):
+    """Get sports trading signals. For now, derive from group overpricing."""
+    try:
+        arb_data = await sports_arbitrage()
+        signals = []
+        for opp in arb_data.get('opportunities', []):
+            signals.append({
+                'id': len(signals) + 1,
+                'edge_type': opp['type'],
+                'sport': opp['sport'],
+                'market_id': opp['group_id'],
+                'market_title': opp['group_id'],
+                'polymarket_price': opp['sum_pct'] / 100,
+                'fair_value': 1.0,
+                'edge_pct': opp['edge_pct'],
+                'confidence': 'HIGH' if opp['edge_pct'] > 10 else 'MEDIUM',
+                'signal': 'SELL_OVERPRICED',
+                'reasoning': opp['reasoning'],
+                'created_at': datetime.utcnow().isoformat()
+            })
+        return {"signals": signals}
+    except Exception as e:
+        logger.error(f"Sports signals error: {e}")
+        return {"signals": [], "error": str(e)}
 
 
+@app.get("/api/sports/live")
+async def sports_live():
+    """Get live games with scores from ESPN."""
+    import httpx
+    try:
+        espn_feeds = [
+            ('hockey', 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard'),
+            ('basketball', 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'),
+            ('soccer_ucl', 'https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard'),
+            ('soccer_epl', 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard'),
+            ('baseball', 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard'),
+        ]
+        
+        events = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            for sport_key, url in espn_feeds:
+                try:
+                    resp = await client.get(url)
+                    data = resp.json()
+                    for evt in data.get('events', []):
+                        status_type = evt.get('status', {}).get('type', {})
+                        status = 'live' if status_type.get('state') == 'in' else ('finished' if status_type.get('completed') else 'scheduled')
+                        comps = evt.get('competitions', [{}])[0]
+                        competitors = comps.get('competitors', [])
+                        home = next((c for c in competitors if c.get('homeAway') == 'home'), competitors[0] if competitors else {})
+                        away = next((c for c in competitors if c.get('homeAway') == 'away'), competitors[1] if len(competitors) > 1 else {})
+                        events.append({
+                            'sport': sport_key.replace('_ucl','').replace('_epl',''),
+                            'event_id': evt.get('id', ''),
+                            'home_team': home.get('team', {}).get('displayName', ''),
+                            'away_team': away.get('team', {}).get('displayName', ''),
+                            'home_score': int(home.get('score', 0) or 0),
+                            'away_score': int(away.get('score', 0) or 0),
+                            'status': status,
+                            'detail': status_type.get('shortDetail', ''),
+                            'period': comps.get('status', {}).get('period', ''),
+                            'minute': comps.get('status', {}).get('displayClock', ''),
+                        })
+                except Exception as e:
+                    logger.warning(f"ESPN {sport_key} fetch failed: {e}")
+        
+        # Sort: live first, then scheduled, then finished
+        events.sort(key=lambda x: 0 if x['status'] == 'live' else (1 if x['status'] == 'scheduled' else 2))
+        
+        return {
+            "total": len(events),
+            "live": len([e for e in events if e['status'] == 'live']),
+            "scheduled": len([e for e in events if e['status'] == 'scheduled']),
+            "finished": len([e for e in events if e['status'] == 'finished']),
+            "events": events
+        }
+    except Exception as e:
+        logger.error(f"Sports live error: {e}")
+        return {"total": 0, "error": str(e), "events": []}
 
 
-
+@app.get("/api/sports/performance")
+async def sports_performance():
+    """Sports strategy performance metrics."""
+    try:
+        arb_data = await sports_arbitrage()
+        return {
+            "total_opportunities": arb_data.get('total', 0),
+            "by_edge_type": [{
+                'type': 'group_overpricing',
+                'total': arb_data.get('total', 0),
+                'avg_edge': sum(o['edge_pct'] for o in arb_data.get('opportunities',[])) / max(len(arb_data.get('opportunities',[])), 1)
+            }]
+        }
+    except Exception as e:
+        return {"by_edge_type": [], "error": str(e)}
 
 
 # =============================================================================
@@ -3001,22 +5467,328 @@ async def manual_broadcast(data: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =============================================================================
+# Leader Strategy — Copy-Trading System
+# =============================================================================
+
+LEADER_WALLET = "0x492442eab586f242b53bda933fd5de859c8a3782"
 
 
+@app.get("/api/leader/trades")
+async def get_leader_trades(limit: int = 50, status: str = None, sport: str = None):
+    """Get tracked leader trades."""
+    query = "SELECT * FROM leader_trades ORDER BY detected_at DESC LIMIT %s"
+    params = (min(limit, 200),)
+    
+    if status:
+        query = "SELECT * FROM leader_trades WHERE status = %s ORDER BY detected_at DESC LIMIT %s"
+        params = (status, min(limit, 200))
+    
+    rows = await fetch_all(query, tuple(params))
+    return {"trades": rows or [], "count": len(rows or [])}
 
 
+@app.get("/api/leader/stats")
+async def get_leader_stats():
+    """Get leader strategy statistics."""
+    # Overall stats
+    stats = await fetch_one("""
+        SELECT 
+            COUNT(*) as total_trades,
+            SUM(leader_size) as total_volume,
+            AVG(leader_price) as avg_entry_price,
+            COUNT(CASE WHEN status = 'detected' THEN 1 END) as active,
+            COUNT(CASE WHEN result = 'won' THEN 1 END) as wins,
+            COUNT(CASE WHEN result = 'lost' THEN 1 END) as losses,
+            SUM(CASE WHEN result IS NOT NULL THEN pnl ELSE 0 END) as total_pnl,
+            SUM(our_size) as our_total_deployed
+        FROM leader_trades
+    """)
+    
+    # By sport breakdown
+    by_sport = await fetch_all("""
+        SELECT sport, COUNT(*) as count, SUM(leader_size) as volume, 
+               AVG(leader_price) as avg_price
+        FROM leader_trades 
+        GROUP BY sport ORDER BY volume DESC
+    """)
+    
+    # By type breakdown
+    by_type = await fetch_all("""
+        SELECT trade_type, COUNT(*) as count, SUM(leader_size) as volume
+        FROM leader_trades
+        GROUP BY trade_type ORDER BY volume DESC
+    """)
+    
+    # Daily performance
+    daily = await fetch_all("""
+        SELECT * FROM leader_performance 
+        WHERE wallet = %s 
+        ORDER BY date DESC LIMIT 14
+    """, (LEADER_WALLET,))
+    
+    return {
+        "stats": stats or {},
+        "by_sport": by_sport or [],
+        "by_type": by_type or [],
+        "daily_performance": daily or [],
+        "leader_wallet": LEADER_WALLET,
+        "leader_name": "Multicolored-Self",
+        "leader_rank": "#1 Monthly"
+    }
 
 
+@app.get("/api/leader/live")  
+async def get_leader_live_activity():
+    """Get leader's live activity feed (real-time from Polymarket API)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://data-api.polymarket.com/v1/activity",
+                params={"user": LEADER_WALLET, "limit": 20}
+            )
+            data = resp.json()
+            
+            activities = []
+            for a in data:
+                slug = a.get('slug', '').lower()
+                # Classify
+                if 'spread' in slug: 
+                    trade_type = 'SPREAD'
+                elif 'total' in slug: 
+                    trade_type = 'TOTAL'
+                else: 
+                    trade_type = 'ML'
+                
+                sport = 'OTHER'
+                for s, kw in [('NBA','nba'),('NHL','nhl'),('NCAA','ncaa'),('MLB','mlb')]:
+                    if kw in slug:
+                        sport = s
+                        break
+                
+                activities.append({
+                    "type": a.get("type"),
+                    "title": a.get("title"),
+                    "slug": a.get("slug"),
+                    "price": float(a.get("price", 0)),
+                    "size": float(a.get("usdcSize", 0)),
+                    "side": a.get("side", ""),
+                    "outcome": a.get("outcome", ""),
+                    "outcome_index": a.get("outcomeIndex"),
+                    "timestamp": a.get("timestamp"),
+                    "trade_type": trade_type,
+                    "sport": sport,
+                    "condition_id": a.get("conditionId"),
+                })
+            
+            return {"activities": activities, "count": len(activities)}
+    except Exception as e:
+        logger.error(f"Leader live activity error: {e}")
+        return {"activities": [], "error": str(e)}
 
 
+@app.get("/api/leader/config")
+async def get_leader_config():
+    """Get leader tracking configuration."""
+    wallets = await fetch_all("SELECT * FROM leader_wallets WHERE active = true")
+    return {
+        "wallets": wallets or [{
+            "wallet": LEADER_WALLET,
+            "name": "Multicolored-Self (#1 Monthly)",
+            "scale_factor": 0.00025,
+            "max_position": 50.0,
+            "active": True
+        }],
+        "poll_interval": 60,
+        "strategy_rules": {
+            "only_spreads_totals": True,
+            "max_entry_price": 0.60,
+            "min_leader_size": 10000,
+            "sports_filter": ["NBA", "NHL", "NCAA"],
+            "copy_delay_seconds": 5,
+        }
+    }
 
 
+# =============================================================================
+# SPRINT 2: Analytics Endpoints
+# =============================================================================
+
+@app.get("/api/analytics/strategies")
+async def get_analytics_strategies():
+    """Returns all strategy performance data from strategy_performance table."""
+    try:
+        results = await fetch_all("""
+            SELECT strategy, sport, period_start, period_end,
+                   total_trades, wins, losses, win_rate,
+                   total_pnl, avg_edge, avg_pnl_per_trade,
+                   max_drawdown, sharpe_ratio, is_active, updated_at
+            FROM strategy_performance
+            ORDER BY updated_at DESC
+        """)
+        strategies = []
+        for r in results:
+            strategies.append({
+                'strategy': r['strategy'],
+                'sport': r['sport'],
+                'period_start': str(r['period_start']) if r['period_start'] else None,
+                'period_end': str(r['period_end']) if r['period_end'] else None,
+                'total_trades': r['total_trades'],
+                'wins': r['wins'],
+                'losses': r['losses'],
+                'win_rate': float(r['win_rate']) if r['win_rate'] else 0,
+                'total_pnl': float(r['total_pnl']) if r['total_pnl'] else 0,
+                'avg_edge': float(r['avg_edge']) if r['avg_edge'] else 0,
+                'avg_pnl_per_trade': float(r['avg_pnl_per_trade']) if r['avg_pnl_per_trade'] else 0,
+                'max_drawdown': float(r['max_drawdown']) if r['max_drawdown'] else 0,
+                'sharpe_ratio': float(r['sharpe_ratio']) if r['sharpe_ratio'] else None,
+                'is_active': r['is_active'],
+                'updated_at': str(r['updated_at']) if r['updated_at'] else None,
+            })
+        return {"strategies": strategies, "count": len(strategies)}
+    except Exception as e:
+        logger.error(f"Analytics strategies error: {e}")
+        return {"strategies": [], "count": 0, "error": str(e)}
 
 
+@app.get("/api/analytics/daily-digest")
+async def get_analytics_daily_digest():
+    """Returns today's summary: trades, P&L, best/worst strategy, bankroll."""
+    try:
+        # Today's settled trades
+        today_stats = await fetch_one("""
+            SELECT 
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                MAX(pnl_usd) as best_pnl,
+                MIN(pnl_usd) as worst_pnl
+            FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+        """)
+        
+        # Per-strategy today
+        strat_breakdown = await fetch_all("""
+            SELECT strategy,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(pnl_usd), 0) as pnl
+            FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            GROUP BY strategy
+            ORDER BY pnl DESC
+        """)
+        
+        # Best and worst trade details
+        best_trade = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            ORDER BY pnl_usd DESC LIMIT 1
+        """)
+        worst_trade = await fetch_one("""
+            SELECT market_title, pnl_usd, strategy FROM trades
+            WHERE resolved_at >= CURRENT_DATE AND status IN ('won', 'lost')
+            ORDER BY pnl_usd ASC LIMIT 1
+        """)
+        
+        # Bankroll
+        bankroll = await fetch_one(
+            "SELECT total_usd, available_usd, in_positions_usd FROM bankroll ORDER BY timestamp DESC LIMIT 1"
+        )
+        
+        # Disabled strategies
+        disabled = await fetch_all("""
+            SELECT strategy, win_rate, total_trades FROM strategy_performance
+            WHERE is_active = false
+        """)
+        
+        total_trades = int(today_stats.get('trades', 0) or 0) if today_stats else 0
+        wins = int(today_stats.get('wins', 0) or 0) if today_stats else 0
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        
+        return {
+            "date": datetime.utcnow().strftime('%Y-%m-%d'),
+            "trades": total_trades,
+            "wins": wins,
+            "losses": int(today_stats.get('losses', 0) or 0) if today_stats else 0,
+            "win_rate": round(win_rate, 1),
+            "total_pnl": float(today_stats.get('total_pnl', 0) or 0) if today_stats else 0,
+            "best_trade": {
+                "market": best_trade.get('market_title', '') if best_trade else '',
+                "pnl": float(best_trade.get('pnl_usd', 0) or 0) if best_trade else 0,
+                "strategy": best_trade.get('strategy', '') if best_trade else '',
+            } if best_trade else None,
+            "worst_trade": {
+                "market": worst_trade.get('market_title', '') if worst_trade else '',
+                "pnl": float(worst_trade.get('pnl_usd', 0) or 0) if worst_trade else 0,
+                "strategy": worst_trade.get('strategy', '') if worst_trade else '',
+            } if worst_trade else None,
+            "strategy_breakdown": [{
+                "strategy": s['strategy'],
+                "trades": s['trades'],
+                "wins": int(s['wins'] or 0),
+                "pnl": float(s['pnl'] or 0),
+            } for s in (strat_breakdown or [])],
+            "bankroll": {
+                "total": float(bankroll.get('total_usd', 0) or 0) if bankroll else 0,
+                "available": float(bankroll.get('available_usd', 0) or 0) if bankroll else 0,
+                "in_positions": float(bankroll.get('in_positions_usd', 0) or 0) if bankroll else 0,
+            },
+            "disabled_strategies": [{
+                "strategy": d['strategy'],
+                "win_rate": float(d['win_rate'] or 0),
+                "total_trades": d['total_trades'],
+            } for d in (disabled or [])],
+        }
+    except Exception as e:
+        logger.error(f"Analytics daily digest error: {e}")
+        return {"error": str(e)}
 
 
-
-
+@app.get("/api/analytics/sport-breakdown")
+async def get_analytics_sport_breakdown():
+    """P&L breakdown by sport."""
+    try:
+        # From trades table - extract sport from market_title heuristics
+        results = await fetch_all("""
+            SELECT 
+                CASE 
+                    WHEN LOWER(market_title) LIKE '%%ipl%%' OR LOWER(market_title) LIKE '%%cricket%%' THEN 'Cricket/IPL'
+                    WHEN LOWER(market_title) LIKE '%%nba%%' OR LOWER(market_title) LIKE '%%basketball%%' THEN 'NBA'
+                    WHEN LOWER(market_title) LIKE '%%nhl%%' OR LOWER(market_title) LIKE '%%hockey%%' THEN 'NHL'
+                    WHEN LOWER(market_title) LIKE '%%soccer%%' OR LOWER(market_title) LIKE '%%epl%%' THEN 'Soccer'
+                    WHEN LOWER(market_title) LIKE '%%mlb%%' OR LOWER(market_title) LIKE '%%baseball%%' THEN 'MLB'
+                    ELSE 'Other'
+                END as sport,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl,
+                COALESCE(AVG(pnl_usd), 0) as avg_pnl,
+                COALESCE(AVG(edge_at_entry), 0) as avg_edge
+            FROM trades
+            WHERE status IN ('won', 'lost')
+            GROUP BY sport
+            ORDER BY total_pnl DESC
+        """)
+        
+        sports = [{
+            'sport': r['sport'],
+            'total_trades': r['total_trades'],
+            'wins': int(r['wins'] or 0),
+            'losses': int(r['losses'] or 0),
+            'win_rate': round(int(r['wins'] or 0) / r['total_trades'] * 100, 1) if r['total_trades'] > 0 else 0,
+            'total_pnl': round(float(r['total_pnl'] or 0), 2),
+            'avg_pnl': round(float(r['avg_pnl'] or 0), 2),
+            'avg_edge': round(float(r['avg_edge'] or 0), 4),
+        } for r in (results or [])]
+        
+        return {"sports": sports, "count": len(sports)}
+    except Exception as e:
+        logger.error(f"Sport breakdown error: {e}")
+        return {"sports": [], "count": 0, "error": str(e)}
 
 
 # =============================================================================
@@ -3878,51 +6650,6 @@ async def export_tradebook():
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
     )
-
-
-# =============================================================================
-# JC Discord Feed API — must be before static file catch-all
-# =============================================================================
-
-@app.get("/api/jc/discord-feed")
-async def jc_discord_feed():
-    """Get recent JC Discord messages with BTC context for frontend display."""
-    import sqlite3, httpx
-    TRADING_DB = '/data/.openclaw/workspace/projects/Ghost/data/trading.db'
-    JC_LEVELS = [
-        {"price": 85500, "label": "SPV resistance", "type": "resistance"},
-        {"price": 84000, "label": "Current resistance", "type": "resistance"},
-        {"price": 83000, "label": "Support level", "type": "support"},
-        {"price": 82000, "label": "Key support", "type": "support"},
-        {"price": 80000, "label": "Round number POC", "type": "support"},
-    ]
-    try:
-        conn = sqlite3.connect(TRADING_DB)
-        rows = conn.execute(
-            """SELECT id, channel_type, author, content, attachments, created_at
-               FROM messages WHERE author='jayson_casper'
-               ORDER BY created_at DESC LIMIT 30"""
-        ).fetchall()
-        conn.close()
-        btc = 0.0
-        try:
-            async with httpx.AsyncClient(timeout=4) as c:
-                r = await c.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
-                btc = float(r.json()['price'])
-        except Exception:
-            pass
-        messages = [
-            {
-                "id": r[0], "channel": r[1], "author": r[2],
-                "content": r[3], "attachments": r[4], "timestamp": r[5],
-                "has_chart": "tradingview.com" in (r[3] or "").lower() or "chart" in (r[3] or "").lower(),
-                "is_signal": any(kw in (r[3] or "").lower() for kw in ["long", "short", "buy", "sell", "sl ", " tp", "stop", "entry", "target"]),
-            }
-            for r in rows
-        ]
-        return {"messages": messages, "btc_price": btc, "jc_levels": JC_LEVELS, "count": len(messages)}
-    except Exception as e:
-        return {"messages": [], "btc_price": 0.0, "jc_levels": JC_LEVELS, "count": 0, "error": str(e)}
 
 
 # =============================================================================

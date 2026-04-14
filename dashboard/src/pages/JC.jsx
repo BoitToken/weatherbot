@@ -2284,6 +2284,7 @@ export default function JC() {
   const [watcherStatus, setWatcherStatus] = useState(null);
   const [signals, setSignals] = useState([]);
   const [messages, setMessages] = useState([]);
+  // discordFeed removed — JC Discord is JC's tab only, BroBot signals are separate
   const [position, setPosition] = useState(null);
   const [pnlStats, setPnlStats] = useState(null);
   const [trades, setTrades] = useState([]);
@@ -2340,6 +2341,8 @@ export default function JC() {
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
+
+
 
   // Messages — 10s
   useEffect(() => {

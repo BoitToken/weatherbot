@@ -30,7 +30,7 @@ MAX_STAKE_USD = 25.0        # Hard cap per trade
 MIN_FACTORS = 5             # Minimum factor agreement (out of 7)
 MAX_ENTRY_PRICE = 0.50      # Entry must be below 50¢
 MIN_BALANCE_USD = 5.0       # Don't trade if wallet balance < $5
-MAX_OPEN_TRADES = 5         # Max concurrent live positions
+MAX_OPEN_TRADES = 3         # Max concurrent live positions
 MAX_DAILY_LOSS_USD = 50.0   # Daily loss circuit breaker
 
 
@@ -39,6 +39,10 @@ class PolymarketLiveTrader:
     Live execution client for Polymarket CLOB.
     Places real orders using py-clob-client.
     """
+
+    # Class-level in-memory lock: prevents concurrent calls for the same window
+    # from racing past the DB duplicate check before the pending record is written
+    _active_windows: set = set()
 
     def __init__(self, db_pool):
         self.db_pool = db_pool
@@ -185,29 +189,39 @@ class PolymarketLiveTrader:
             ]
 
             total_balance = 0.0
-            wallet = Web3.to_checksum_address(self.wallet_address)
 
-            for contract_addr in USDC_CONTRACTS:
-                try:
-                    contract = w3.eth.contract(
-                        address=Web3.to_checksum_address(contract_addr),
-                        abi=ERC20_ABI,
-                    )
-                    decimals = contract.functions.decimals().call()
-                    raw_balance = contract.functions.balanceOf(wallet).call()
-                    balance = raw_balance / (10 ** decimals)
-                    if balance > 0:
-                        logger.info(f"💰 USDC balance ({contract_addr[:10]}...): ${balance:.4f}")
-                    total_balance += balance
-                except Exception as e:
-                    logger.debug(f"Balance check failed for {contract_addr[:10]}...: {e}")
+            # Check all wallets: EOA + proxy wallet (where Polymarket collateral lives)
+            wallets_to_check = [self.wallet_address]
+            if self.proxy_wallet and self.proxy_wallet != self.wallet_address:
+                wallets_to_check.append(self.proxy_wallet)
 
-            # Also check Polymarket CTF allowance if client is initialized
+            for wallet_addr in wallets_to_check:
+                wallet = Web3.to_checksum_address(wallet_addr)
+                for contract_addr in USDC_CONTRACTS:
+                    try:
+                        contract = w3.eth.contract(
+                            address=Web3.to_checksum_address(contract_addr),
+                            abi=ERC20_ABI,
+                        )
+                        decimals = contract.functions.decimals().call()
+                        raw_balance = contract.functions.balanceOf(wallet).call()
+                        balance = raw_balance / (10 ** decimals)
+                        if balance > 0:
+                            logger.info(f"💰 USDC balance ({wallet_addr[:10]}... @ {contract_addr[:10]}...): ${balance:.4f}")
+                        total_balance += balance
+                    except Exception as e:
+                        logger.debug(f"Balance check failed for {contract_addr[:10]}... @ {wallet_addr[:10]}...: {e}")
+
+            # Also check Polymarket CLOB balance allowance (proxy wallet collateral on Polymarket)
             if self._client and self._initialized:
                 try:
                     ba = self._client.get_balance_allowance()
                     if ba:
-                        logger.info(f"📊 CLOB balance/allowance: {ba}")
+                        clob_balance = int(ba.get('balance', 0)) / 10**6
+                        logger.info(f"📊 CLOB proxy balance: ${clob_balance:.4f}")
+                        # If CLOB shows higher balance, use that (it's the actual trading balance)
+                        if clob_balance > total_balance:
+                            total_balance = clob_balance
                 except Exception:
                     pass
 
@@ -247,11 +261,11 @@ class PolymarketLiveTrader:
             return 999  # Fail safe — prevent new trades
 
     async def _check_duplicate(self, window_id: str) -> bool:
-        """Check if we already have an open trade for this window."""
+        """Check if we already have an open or pending trade for this window."""
         try:
             async with self.db_pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT 1 FROM live_trades WHERE window_id = $1 AND status = 'open'",
+                    "SELECT 1 FROM live_trades WHERE window_id = $1 AND status IN ('open', 'pending')",
                     window_id,
                 )
                 return row is not None
@@ -272,6 +286,7 @@ class PolymarketLiveTrader:
         stake_usd: float,
         factors_agreeing: int,
         signal_metadata: Optional[Dict] = None,
+        seconds_remaining: int = 999,
     ) -> Optional[int]:
         """
         Execute a LIVE trade on Polymarket.
@@ -279,8 +294,47 @@ class PolymarketLiveTrader:
         Returns: trade_id from live_trades table, or None if failed/blocked.
         """
         # ═══════════════════════════════════════════════════════════
+        # FAST PATH: in-memory lock (prevents race before DB write)
+        # ═══════════════════════════════════════════════════════════
+        if window_id in self.__class__._active_windows:
+            logger.info(f"⏭️ Window {window_id} already processing in-memory — skipping")
+            return None
+        self.__class__._active_windows.add(window_id)
+
+        try:
+            return await self._execute_live_trade_inner(
+                window_id=window_id,
+                prediction=prediction,
+                token_id=token_id,
+                entry_price=entry_price,
+                stake_usd=stake_usd,
+                factors_agreeing=factors_agreeing,
+                signal_metadata=signal_metadata,
+                seconds_remaining=seconds_remaining,
+            )
+        finally:
+            self.__class__._active_windows.discard(window_id)
+
+    async def _execute_live_trade_inner(
+        self,
+        window_id: str,
+        prediction: str,
+        token_id: str,
+        entry_price: float,
+        stake_usd: float,
+        factors_agreeing: int,
+        signal_metadata: Optional[Dict] = None,
+        seconds_remaining: int = 999,
+    ) -> Optional[int]:
+        """Inner implementation — called only when in-memory lock is held."""
+        # ═══════════════════════════════════════════════════════════
         # SAFETY GATE — every check must pass
         # ═══════════════════════════════════════════════════════════
+
+        # 0. Window time check — skip if < 60 seconds remaining
+        if seconds_remaining < 60:
+            logger.info(f"⏭️ Window {window_id} closes in {seconds_remaining}s — too late to enter")
+            return None
 
         # 1. Stake cap
         if stake_usd > MAX_STAKE_USD:
@@ -300,9 +354,9 @@ class PolymarketLiveTrader:
             logger.warning(f"🛑 Entry {entry_price*100:.1f}¢ too low — suspicious. Skipping.")
             return None
 
-        # 4. Duplicate check
+        # 4. Duplicate check (DB-level — checks 'open' AND 'pending')
         if await self._check_duplicate(window_id):
-            logger.info(f"⏭️ Already have open trade for {window_id}")
+            logger.info(f"⏭️ Already have open/pending trade for {window_id}")
             return None
 
         # 5. Open trade limit
@@ -330,15 +384,57 @@ class PolymarketLiveTrader:
             stake_usd = min(stake_usd, balance * 0.5)  # Use max 50% if balance is low
 
         # ═══════════════════════════════════════════════════════════
+        # PENDING LOCK — write 'pending' to DB BEFORE placing order
+        # This prevents race conditions when the scheduler fires again
+        # before the order completes and status='open' is written
+        # ═══════════════════════════════════════════════════════════
+        pending_id = None
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Double-check (now inside the pending insert transaction)
+                existing = await conn.fetchrow(
+                    "SELECT 1 FROM live_trades WHERE window_id = $1 AND status IN ('open', 'pending')",
+                    window_id,
+                )
+                if existing:
+                    logger.info(f"⏭️ Trade already exists for {window_id} (pending lock check) — skipping")
+                    return None
+                # Insert pending record — locks the window_id at DB level
+                pending_id = await conn.fetchval(
+                    """
+                    INSERT INTO live_trades (
+                        window_id, prediction, token_id, side,
+                        entry_price, stake_usd, tx_hash, status,
+                        wallet_balance_before, created_at
+                    ) VALUES ($1, $2, $3, 'BUY', $4, $5, 'pending', 'pending', $6, NOW())
+                    RETURNING id
+                    """,
+                    window_id, prediction, token_id,
+                    entry_price, stake_usd, balance,
+                )
+                logger.info(f"🔒 Pending lock acquired for {window_id} — trade #{pending_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to acquire pending lock for {window_id}: {e}")
+            return None
+
+        if not pending_id:
+            logger.error(f"❌ Pending insert returned no ID for {window_id}")
+            return None
+
+        # ═══════════════════════════════════════════════════════════
         # EXECUTE ORDER
         # ═══════════════════════════════════════════════════════════
 
         if not self._init_client():
             logger.error("🛑 CLOB client not initialized — cannot trade")
+            async with self.db_pool.acquire() as _c:
+                await _c.execute("UPDATE live_trades SET status = 'failed', tx_hash = 'CLOB_INIT_FAILED' WHERE id = $1", pending_id)
             return None
 
         if not self._has_private_key:
             logger.error("🛑 No private key — cannot sign orders. Set POLYMARKET_PRIVATE_KEY in .env")
+            async with self.db_pool.acquire() as _c:
+                await _c.execute("UPDATE live_trades SET status = 'failed', tx_hash = 'NO_PRIVATE_KEY' WHERE id = $1", pending_id)
             await self._send_trade_alert(
                 prediction=prediction,
                 entry_price=entry_price,
@@ -389,18 +485,16 @@ class PolymarketLiveTrader:
             error_msg = str(e)
             logger.error(f"❌ Order placement failed: {error_msg}\n{traceback.format_exc()}")
 
-            # Record failed trade
-            trade_id = await self._record_trade(
-                window_id=window_id,
-                prediction=prediction,
-                token_id=token_id,
-                side="BUY",
-                entry_price=entry_price,
-                stake_usd=stake_usd,
-                tx_hash=f"FAILED: {error_msg[:100]}",
-                status="failed",
-                balance_before=balance_before,
-            )
+            # Update pending record to 'failed'
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE live_trades SET status = 'failed', tx_hash = $1 WHERE id = $2",
+                        f"FAILED: {error_msg[:100]}",
+                        pending_id,
+                    )
+            except Exception as db_e:
+                logger.error(f"❌ Failed to mark pending trade as failed: {db_e}")
 
             # Send failure alert
             await self._send_trade_alert(
@@ -415,20 +509,20 @@ class PolymarketLiveTrader:
             return None
 
         # ═══════════════════════════════════════════════════════════
-        # RECORD SUCCESS
+        # RECORD SUCCESS — update pending → open
         # ═══════════════════════════════════════════════════════════
 
-        trade_id = await self._record_trade(
-            window_id=window_id,
-            prediction=prediction,
-            token_id=token_id,
-            side="BUY",
-            entry_price=entry_price,
-            stake_usd=stake_usd,
-            tx_hash=tx_hash or "pending",
-            status="open",
-            balance_before=balance_before,
-        )
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE live_trades SET status = 'open', tx_hash = $1 WHERE id = $2",
+                    tx_hash or "pending",
+                    pending_id,
+                )
+            trade_id = pending_id
+        except Exception as e:
+            logger.error(f"❌ Failed to update pending trade to open: {e}")
+            trade_id = pending_id  # Still track it
 
         # Send success alert 🟢
         await self._send_trade_alert(

@@ -4,16 +4,9 @@ import './App.css'
 
 // Pages
 import Overview from './pages/Overview'
-import Markets from './pages/Markets'
-import Performance from './pages/Performance'
-import Trades from './pages/Trades'
 import Settings from './pages/Settings'
-import PolymarketEmbed from './pages/PolymarketEmbed'
-import LeaderStrategy from './pages/LeaderStrategy'
-import Pennies from './pages/Pennies'
 import BTC15M from './pages/BTC15M'
 import JC from './pages/JC'
-import LastMinute from './pages/LastMinute'
 import Tradebook from './pages/Tradebook'
 
 // Global error boundary
@@ -42,17 +35,10 @@ function Sidebar() {
   const location = useLocation()
   
   const navItems = [
-    { path: '/tradebook', label: 'Tradebook', icon: '📒' },
+    { path: '/', label: 'Home', icon: '🏠' },
     { path: '/jc', label: 'Casper', icon: '👻' },
     { path: '/btc15m', label: 'BroBot', icon: '🤖' },
-    { path: '/pennies', label: 'Pennies', icon: '🎰' },
-    { path: '/last-minute', label: 'Last Minute', icon: '⏱️' },
-    { path: '/', label: 'Home', icon: '🏠' },
-    { path: '/markets', label: 'Markets', icon: '📊' },
-    { path: '/performance', label: 'Performance', icon: '🏆' },
-    { path: '/trades', label: 'Trades', icon: '💰' },
-    { path: '/polymarket', label: 'Polymarket', icon: '🔮' },
-    { path: '/leader', label: 'Leader', icon: '🎯' },
+    { path: '/tradebook', label: 'Tradebook', icon: '📒' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
   
@@ -88,14 +74,6 @@ function App() {
           <ErrorBoundary>
             <Routes>
               <Route path="/" element={<Overview />} />
-              <Route path="/markets" element={<Markets />} />
-              <Route path="/markets/:industry" element={<Markets />} />
-              <Route path="/performance" element={<Performance />} />
-              <Route path="/trades" element={<Trades />} />
-              <Route path="/polymarket" element={<PolymarketEmbed />} />
-              <Route path="/leader" element={<LeaderStrategy />} />
-              <Route path="/pennies" element={<Pennies />} />
-              <Route path="/last-minute" element={<LastMinute />} />
               <Route path="/btc15m" element={<BTC15M />} />
               <Route path="/jc" element={<JC />} />
               <Route path="/tradebook" element={<Tradebook />} />

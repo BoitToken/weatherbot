@@ -151,6 +151,8 @@ export default function BTCPolymarketEngine() {
   const [wallet, setWallet] = useState({ usdc: 0, matic: 0, wallet: "" });
   const [liveStats, setLiveStats] = useState({ total_trades: 0, wins: 0, losses: 0, win_rate: 0, total_pnl: 0, avg_pnl: 0, total_staked: 0 });
   const [liveTrades, setLiveTrades] = useState([]);
+  // V4 paper trades with full confluence breakdown
+  const [v4Trades, setV4Trades] = useState([]);
 
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
@@ -197,6 +199,20 @@ export default function BTCPolymarketEngine() {
     };
     fetchTrades();
     const iv = setInterval(fetchTrades, 15000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // V4 paper trades with confluence breakdown — 30s
+  useEffect(() => {
+    const fetch_v4 = async () => {
+      try {
+        const res = await fetch("/api/btc/v4-trades");
+        const data = await res.json();
+        if (data.trades) setV4Trades(data.trades);
+      } catch (e) { /* silent */ }
+    };
+    fetch_v4();
+    const iv = setInterval(fetch_v4, 30000);
     return () => clearInterval(iv);
   }, []);
 
@@ -544,96 +560,125 @@ export default function BTCPolymarketEngine() {
       {/* ═══ TRADES TAB — LIVE TRADES ONLY ═══ */}
       {tab === "trades" && (
         <div style={{ padding: isMobile ? "12px" : "20px 24px" }}>
+          {/* Summary bar */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
-            <div style={{ fontSize: 10, color: C.muted, fontFamily: font, letterSpacing: 1.5 }}>
-              🟢 LIVE TRADES — {liveTrades.length} TOTAL
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.win, fontWeight: 600 }}>W: {liveStats.wins}</span>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.loss, fontWeight: 600 }}>L: {liveStats.losses}</span>
-              <span style={{ fontSize: 12, fontFamily: font, color: liveStats.total_pnl >= 0 ? C.win : C.loss, fontWeight: 700 }}>
-                P&L: {liveStats.total_pnl >= 0 ? "+" : ""}${liveStats.total_pnl.toFixed(2)}
+            <div style={{ fontSize: 10, color: C.muted, fontFamily: font, letterSpacing: 1.5 }}>🤖 BROBOT SIGNAL CARDS — {v4Trades.length} TRADES</div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <span style={{ fontSize: 11, fontFamily: font, color: C.win }}>
+                W: {v4Trades.filter(t => t.won === true).length}
               </span>
-              <span style={{ fontSize: 12, fontFamily: font, color: C.white }}>Win Rate: {liveStats.win_rate}%</span>
+              <span style={{ fontSize: 11, fontFamily: font, color: C.loss }}>
+                L: {v4Trades.filter(t => t.won === false).length}
+              </span>
+              <span style={{ fontSize: 11, fontFamily: font, color: '#f59e0b' }}>
+                Open: {v4Trades.filter(t => t.resolution === null || t.resolution === 'OPEN').length}
+              </span>
+              {(() => {
+                const pnl = v4Trades.reduce((s, t) => s + (t.simulated_pnl || 0), 0);
+                return <span style={{ fontSize: 12, fontFamily: font, color: pnl >= 0 ? C.win : C.loss, fontWeight: 700 }}>P&L: {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>;
+              })()}
             </div>
           </div>
 
-          {liveTrades.length === 0 ? (
-            <div style={{
-              padding: 60, textAlign: "center", background: C.card, borderRadius: 16,
-              border: `1px solid rgba(16,185,129,0.2)`,
-            }}>
-              <div style={{ fontSize: 48, marginBottom: 16 }}>🟢</div>
-              <h3 style={{ fontFamily: font, fontSize: 18, color: C.win, fontWeight: 700, marginBottom: 8 }}>Live Trading Active</h3>
-              <p style={{ fontFamily: font, fontSize: 13, color: C.muted, marginBottom: 12 }}>Waiting for first live trade...</p>
-              <p style={{ fontFamily: font, fontSize: 16, color: C.white, fontWeight: 600 }}>
-                Wallet: ${wallet.usdc.toFixed(2)} USDC ready
-              </p>
-              <p style={{ fontFamily: font, fontSize: 11, color: C.muted, marginTop: 8 }}>
-                {wallet.wallet ? `${wallet.wallet.slice(0, 6)}...${wallet.wallet.slice(-4)}` : ""} · Polygon
-              </p>
+          {v4Trades.length === 0 ? (
+            <div style={{ padding: 60, textAlign: "center", background: C.card, borderRadius: 16, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🤖</div>
+              <h3 style={{ fontFamily: font, fontSize: 16, color: C.white, marginBottom: 8 }}>Waiting for first V4 signal</h3>
+              <p style={{ fontFamily: font, fontSize: 12, color: C.muted }}>BroBot scans every 45s for confluence entries</p>
             </div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font, fontSize: 12 }}>
-                <thead>
-                  <tr style={{ borderBottom: `2px solid ${C.border}` }}>
-                    <th style={{ padding: "10px 8px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1 }}>PREDICTION</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>STAKE</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>ENTRY</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>P&L</th>
-                    <th style={{ padding: "10px 8px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1 }}>TX</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", color: C.muted, fontSize: 10, letterSpacing: 1 }}>STATUS</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10, letterSpacing: 1 }}>TIME</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {liveTrades.map((trade) => (
-                    <tr key={trade.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <td style={{ padding: "10px 8px" }}>
-                        <span style={{
-                          fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 4,
-                          background: trade.prediction === "UP" ? "rgba(0,255,135,0.15)" : "rgba(255,51,102,0.15)",
-                          color: trade.prediction === "UP" ? C.win : C.loss,
-                        }}>
-                          {trade.prediction || trade.side || "—"}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {v4Trades.map((trade) => {
+                const isUp = trade.direction === 'UP';
+                const isOpen = !trade.resolution || trade.resolution === 'OPEN';
+                const won = trade.won === true;
+                const lost = trade.won === false;
+                const factors = trade.factors_json || {};
+                const factorEntries = typeof factors === 'string' ? Object.entries(JSON.parse(factors)) : Object.entries(factors);
+                const statusColor = isOpen ? '#f59e0b' : won ? C.win : C.loss;
+                const dirColor = isUp ? C.win : C.loss;
+                const timeStr = trade.created_at ? new Date(trade.created_at).toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }) : '—';
+
+                return (
+                  <div key={trade.id} style={{
+                    background: '#0d1117',
+                    border: `1px solid ${isOpen ? 'rgba(245,158,11,0.25)' : won ? 'rgba(0,255,135,0.15)' : 'rgba(255,51,102,0.15)'}`,
+                    borderRadius: 12, padding: 16, position: 'relative',
+                  }}>
+                    {/* Header row */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <span style={{ fontFamily: font, fontSize: 13, fontWeight: 700, color: dirColor,
+                          background: isUp ? 'rgba(0,255,135,0.12)' : 'rgba(255,51,102,0.12)',
+                          padding: '3px 10px', borderRadius: 6 }}>
+                          {isUp ? '▲ UP' : '▼ DOWN'}
                         </span>
-                      </td>
-                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.white }}>
-                        ${trade.stake_usd?.toFixed(2) || "—"}
-                      </td>
-                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.white }}>
-                        {trade.entry_price ? `${(trade.entry_price * 100).toFixed(1)}¢` : "—"}
-                      </td>
-                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 700, color: trade.pnl_usd != null ? (trade.pnl_usd >= 0 ? C.win : C.loss) : C.muted }}>
-                        {trade.pnl_usd != null ? `${trade.pnl_usd >= 0 ? "+" : ""}$${trade.pnl_usd.toFixed(2)}` : "Open"}
-                      </td>
-                      <td style={{ padding: "10px 8px" }}>
-                        {trade.tx_hash ? (
-                          <a href={`https://polygonscan.com/tx/${trade.tx_hash}`} target="_blank" rel="noopener noreferrer"
-                            style={{ color: C.accent, textDecoration: "none", fontSize: 11 }}>
-                            {trade.tx_hash.slice(0, 8)}...
-                          </a>
-                        ) : (
-                          <span style={{ color: C.muted }}>Pending</span>
+                        <span style={{ fontFamily: font, fontSize: 12, color: C.white, fontWeight: 600 }}>
+                          {trade.token_price ? `${(trade.token_price * 100).toFixed(1)}¢` : '—'} entry
+                        </span>
+                        <span style={{ fontFamily: font, fontSize: 11, color: C.muted }}>
+                          ${trade.stake_usd?.toFixed(2) || '—'} staked
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                        <span style={{ fontFamily: font, fontSize: 10, color: statusColor, fontWeight: 700, letterSpacing: 1 }}>
+                          {isOpen ? '● OPEN' : won ? '✓ WIN' : '✗ LOSS'}
+                        </span>
+                        {trade.simulated_pnl != null && (
+                          <span style={{ fontFamily: font, fontSize: 12, color: trade.simulated_pnl >= 0 ? C.win : C.loss, fontWeight: 700 }}>
+                            {trade.simulated_pnl >= 0 ? '+' : ''}${trade.simulated_pnl.toFixed(2)}
+                          </span>
                         )}
-                      </td>
-                      <td style={{ padding: "10px 8px", textAlign: "center" }}>
-                        <span style={{
-                          fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 600,
-                          background: trade.status === "resolved" ? "rgba(0,255,135,0.1)" : trade.status === "pending" ? "rgba(255,170,0,0.1)" : "rgba(255,255,255,0.05)",
-                          color: trade.status === "resolved" ? C.win : trade.status === "pending" ? "#ffaa00" : C.muted,
-                        }}>
-                          {trade.status || "—"}
+                      </div>
+                    </div>
+
+                    {/* Confluence score bar */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <span style={{ fontFamily: font, fontSize: 10, color: C.muted, letterSpacing: 1 }}>CONFLUENCE</span>
+                      <div style={{ flex: 1, height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                        <div style={{ height: '100%', borderRadius: 2, width: `${Math.min(100, (trade.confluence_score || 0) * 10)}%`,
+                          background: (trade.confluence_score || 0) >= 6 ? C.win : '#f59e0b' }} />
+                      </div>
+                      <span style={{ fontFamily: font, fontSize: 11, fontWeight: 700,
+                        color: (trade.confluence_score || 0) >= 6 ? C.win : '#f59e0b' }}>
+                        {trade.confluence_score || 0}/10
+                      </span>
+                    </div>
+
+                    {/* Why this trade — factors breakdown */}
+                    {factorEntries.length > 0 && (
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 9, color: C.muted, fontFamily: font, letterSpacing: 1.5, marginBottom: 6 }}>WHY THIS TRADE</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {factorEntries.map(([key, val]) => (
+                            <span key={key} style={{
+                              fontFamily: font, fontSize: 10,
+                              background: 'rgba(255,255,255,0.04)',
+                              border: '1px solid rgba(255,255,255,0.07)',
+                              borderRadius: 4, padding: '2px 7px', color: '#94a3b8',
+                            }}>
+                              <span style={{ color: '#64748b' }}>{key}: </span>
+                              {String(val).slice(0, 40)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* JC Level + time */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      {trade.jc_level && (
+                        <span style={{ fontFamily: font, fontSize: 10, color: '#6366f1' }}>
+                          📍 JC: {trade.jc_level}
                         </span>
-                      </td>
-                      <td style={{ padding: "10px 8px", textAlign: "right", color: C.muted, fontSize: 10 }}>
-                        {trade.created_at ? new Date(trade.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      )}
+                      <span style={{ fontFamily: font, fontSize: 10, color: C.muted, marginLeft: 'auto' }}>
+                        {timeStr} IST · {trade.strategy_version || 'V4'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
