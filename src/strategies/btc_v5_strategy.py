@@ -341,17 +341,32 @@ class BTCV5Strategy:
                     win_rate = (float(stats['wins']) / float(stats['total']) * 100) if stats and float(stats['total']) > 0 else 0
                     total_pnl = float(stats['total_pnl']) if stats else 0
 
+                    # Parse factors for reason summary
+                    factors_data = {}
+                    try:
+                        if trade['factors_json']:
+                            factors_data = json.loads(trade['factors_json']) if isinstance(trade['factors_json'], str) else dict(trade['factors_json'])
+                    except: pass
+                    reason_lines = []
+                    for k, v in factors_data.items():
+                        if k not in ('engine_factors',):
+                            reason_lines.append(f"  {k}: {v}")
+                    reason_str = '\n'.join(reason_lines[:5]) if reason_lines else '  Signal engine confluence'
+
                     msg = (
-                        f"{result_emoji} V5 {'WON' if won else 'LOST'}\n"
-                        f"{'─'*28}\n"
-                        f"{'🟢 UP' if direction=='UP' else '🔴 DOWN'} at {token_price*100:.1f}¢ | ${stake:.2f}\n"
-                        f"BTC: ${btc_open:,.0f} → ${btc_close:,.0f} ({btc_move:+,.0f})\n"
-                        f"Result: {actual} | P&L: {pnl_str}\n"
-                        f"{'─'*28}\n"
-                        f"💰 Bankroll: ${new_balance:,.2f}\n"
-                        f"📈 Win Rate: {win_rate:.1f}% ({stats['wins']}/{stats['total']})\n"
-                        f"💵 Total P&L: ${total_pnl:+,.2f}\n"
-                        f"⚠️ PAPER MODE"
+                        f"{result_emoji} {'WON' if won else 'LOST'} | {pnl_str}\n"
+                        f"{'='*30}\n"
+                        f"Position: {'🟢 LONG' if direction=='UP' else '🔴 SHORT'}\n"
+                        f"Entry: {token_price*100:.1f}c | Stake: ${stake:.2f}\n"
+                        f"BTC: ${btc_open:,.0f} -> ${btc_close:,.0f} ({btc_move:+,.0f})\n"
+                        f"Outcome: {actual}\n"
+                        f"{'='*30}\n"
+                        f"Reason:\n{reason_str}\n"
+                        f"{'='*30}\n"
+                        f"Bankroll: ${new_balance:,.2f} | P&L: {pnl_str}\n"
+                        f"Record: {stats['wins']}W-{int(stats['total'])-int(stats['wins'])}L ({win_rate:.0f}%)\n"
+                        f"Total P&L: ${total_pnl:+,.2f}\n"
+                        f"PAPER MODE"
                     )
                     await tg_send(msg)
 

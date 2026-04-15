@@ -1113,19 +1113,7 @@ async def scheduled_v5_paper_scan():
 
                 logger.info(f"📝 V5 PAPER: {direction} | {token_price*100:.1f}c | ${stake} | Score {score}")
 
-                from src.strategies.btc_v5_strategy import tg_send as v5_tg
-                engine_info = f"prob_up={prob_up:.2f} conf={confidence:.2f}"
-                await v5_tg(
-                    f"📊 V5 PAPER TRADE\n"
-                    f"{'─'*28}\n"
-                    f"{'🟢 UP' if direction=='UP' else '🔴 DOWN'} at {token_price*100:.1f}¢ | ${stake:.2f}\n"
-                    f"BTC: ${btc_price:,.0f} | R:R {rr:.1f}:1\n"
-                    f"🎯 Engine: {engine_info}\n"
-                    f"🔮 JC: {jc_label}\n"
-                    f"{'─'*28}\n"
-                    f"💰 Bankroll: ${bankroll:,.2f}\n"
-                    f"⚠️ PAPER MODE"
-                )
+                # Trade open — log only, no TG notification (CEO: only send won/loss results)
 
     except Exception as e:
         logger.error(f"❌ V5 paper scan failed: {e}")
@@ -1624,7 +1612,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"V5 heartbeat failed: {e}")
 
-    scheduler.add_job(v5_heartbeat, 'cron', hour='0,6,12,18', minute=0, timezone='Asia/Kolkata', id='v5_heartbeat', replace_existing=True)
+    # DISABLED: CEO wants only trade results
+    # scheduler.add_job(v5_heartbeat, 'cron', hour='0,6,12,18', minute=0, timezone='Asia/Kolkata', id='v5_heartbeat', replace_existing=True)
     logger.info("✅ V5 Strategy scheduled (scan: 45s, resolve: 2min, heartbeat: 4h, daily: 11PM)")
     logger.info("✅ BTC Signal Engine scheduled (scan: 45s, resolve: 2min)")
 
