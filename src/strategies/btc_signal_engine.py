@@ -31,11 +31,11 @@ class BTCSignalEngine:
     """7-factor signal engine for BTC/USD 15-minute Polymarket windows."""
 
     DEFAULT_WEIGHTS = {
-        'price_delta': 0.38,
-        'momentum': 0.22,
-        'volume_imbalance': 0.15,
-        'oracle_lead': 0.08,
-        'book_imbalance': 0.10,
+        'price_delta': 0.25,      # Reduced from 0.38 — was dominating during downtrends
+        'momentum': 0.20,          # Reduced from 0.22
+        'volume_imbalance': 0.20,  # Increased from 0.15 — actual buyer/seller flow
+        'oracle_lead': 0.10,       # Increased from 0.08
+        'book_imbalance': 0.18,    # Increased from 0.10 — market maker pricing is forward-looking
         'volatility': 0.05,
         'time_decay': 0.02,
     }
@@ -659,7 +659,7 @@ class BTCSignalEngine:
         except Exception as e:
             logger.warning(f"Balance refresh failed: {e}")
 
-    async def run_scan(self) -> List[Dict]:
+    async def run_scan(self, apply_v4_filters=True) -> List[Dict]:
         """Full scan cycle: find windows, compute factors, predict, store."""
         results = []
 
@@ -690,8 +690,10 @@ class BTCSignalEngine:
                     prediction = 'SKIP'
                     skip_reason = f'INVALID_PRICE: up={up_p} down={down_p} (degenerate market)'
 
-                # V4 filters: entry 10-50c, price_delta > 0.25, 5M only, factors >= 5
-                if prediction != 'SKIP' and entry_p is not None:
+                # V4 filters only — V5 has its own gates in btc_v5_strategy.evaluate()
+                if not apply_v4_filters:
+                    pass  # V5 path: skip V4-specific filters
+                elif prediction != 'SKIP' and entry_p is not None:
                     pd = abs(float(factors.get('f_price_delta', 0)))
                     if entry_p < 0.10:
                         prediction = 'SKIP'

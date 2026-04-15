@@ -198,7 +198,7 @@ class BTCV5Strategy:
         factors["timing"] = f"{seconds_remaining}s remaining ✅"
         
         # ── Confidence check (engine must have some conviction) ──────────
-        if engine_confidence < 0.15:
+        if engine_confidence < 0.10:  # Lowered from 0.15 — signals cluster 0.10-0.25
             return {"should_trade": False,
                     "reason": f"Low confidence: {engine_confidence:.2f} (need >= 0.15)",
                     "direction": direction, "score": 0, "factors": factors}

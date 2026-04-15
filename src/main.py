@@ -3957,6 +3957,58 @@ async def jc_discord_feed():
 # =============================================================================
 
 # Path to the built React dashboard
+@app.get("/api/v5/status")
+async def v5_status():
+    """V5 paper trading status and stats."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            stats = await conn.fetchrow("""
+                SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE won=true) as wins,
+                  COUNT(*) FILTER (WHERE won=false) as losses,
+                  COUNT(*) FILTER (WHERE resolved_at IS NULL) as open_trades,
+                  COALESCE(SUM(simulated_pnl),0) as total_pnl,
+                  MAX(created_at) as last_trade
+                FROM paper_trades WHERE strategy_version='V5'
+            """)
+            bankroll = await conn.fetchrow(
+                "SELECT balance, total_trades, total_won, total_lost FROM btc_bankroll WHERE id=1"
+            )
+        total = int(stats['total']) if stats else 0
+        wins = int(stats['wins']) if stats else 0
+        win_rate = round((wins / max(total, 1)) * 100, 1)
+        return {
+            "status": "running", "mode": "paper",
+            "total_trades": total, "wins": wins,
+            "losses": int(stats['losses']) if stats else 0,
+            "open_trades": int(stats['open_trades']) if stats else 0,
+            "win_rate": win_rate,
+            "total_pnl": round(float(stats['total_pnl']), 2) if stats else 0,
+            "bankroll": float(bankroll['balance']) if bankroll else 10000.0,
+            "last_trade": str(stats['last_trade']) if stats and stats['last_trade'] else None,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/v5/trades")
+async def v5_trades():
+    """Recent V5 paper trades."""
+    try:
+        pool = get_async_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, direction, token_price, stake_usd, confluence_score,
+                       resolution, won, simulated_pnl, created_at, resolved_at
+                FROM paper_trades WHERE strategy_version='V5'
+                ORDER BY created_at DESC LIMIT 50
+            """)
+        return {"trades": [{**dict(r), 'created_at': str(r['created_at']), 'resolved_at': str(r['resolved_at']) if r['resolved_at'] else None} for r in rows]}
+    except Exception as e:
+        return {"trades": [], "error": str(e)}
+
+
 BUILD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard", "dist")
 
 if os.path.exists(BUILD_PATH):
